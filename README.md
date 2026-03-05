@@ -61,6 +61,11 @@ cp .env.example .env
 # then fill values
 ```
 
+Snowflake auth can be either:
+
+- `SNOWFLAKE_AUTH_TYPE=password` + `SNOWFLAKE_PASSWORD`
+- `SNOWFLAKE_AUTH_TYPE=keypair` + `SNOWFLAKE_PRIVATE_KEY_PATH` (and optional `SNOWFLAKE_PRIVATE_KEY_PASSPHRASE`)
+
 3. Initialize tenant + repo (creates keys and stores config)
 
 ```bash
@@ -95,6 +100,8 @@ npm run dev -- chat --tenant acme --message "How many orders did we have yesterd
   - `--dbt-subpath <path>` (default: `models`)
   - `--force` (regenerate keypair)
 - `sync-dbt`
+  - `--tenant <id>`
+- `prod-smoke`
   - `--tenant <id>`
 - `chat`
   - `--tenant <id>`

@@ -1,6 +1,6 @@
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { buildRuntime, buildStore } from "./app.js";
+import { buildLlmProvider, buildRuntime, buildSnowflakeWarehouse, buildStore } from "./app.js";
 import { initializeTenant } from "./bootstrap/initTenant.js";
 import { GitDbtRepositoryService } from "./adapters/dbt/dbtRepoService.js";
 import { createId } from "./utils/id.js";
@@ -12,6 +12,7 @@ function usage(): string {
     "Usage:",
     "  npm run dev -- init --tenant <id> --repo-url <git@...> [--dbt-subpath models] [--force]",
     "  npm run dev -- sync-dbt --tenant <id>",
+    "  npm run dev -- prod-smoke --tenant <id>",
     "  npm run dev -- chat --tenant <id> [--profile default] [--conversation <id>] [--message \"...\"]"
   ].join("\n");
 }
@@ -84,6 +85,39 @@ async function run(): Promise<void> {
       }
     }
     rl.close();
+    return;
+  }
+
+  if (command === "prod-smoke") {
+    const tenantId = getStringArg(args, "tenant");
+    const dbt = new GitDbtRepositoryService(store);
+    const llm = buildLlmProvider();
+    const warehouse = buildSnowflakeWarehouse();
+
+    output.write("Running production smoke checks...\n");
+
+    output.write("1/3 LLM connectivity...\n");
+    const llmResult = await llm.generateText({
+      model: env.llmModel,
+      temperature: 0,
+      messages: [
+        { role: "system", content: "Return only the word OK." },
+        { role: "user", content: "Health check." }
+      ]
+    });
+    output.write(`   LLM response: ${llmResult.slice(0, 200)}\n`);
+
+    output.write("2/3 Snowflake connectivity...\n");
+    const sfResult = await warehouse.query(
+      "SELECT CURRENT_ACCOUNT() AS account, CURRENT_ROLE() AS role, CURRENT_DATABASE() AS database_name, CURRENT_SCHEMA() AS schema_name LIMIT 1"
+    );
+    output.write(`   Snowflake rows: ${sfResult.rowCount}\n`);
+
+    output.write("3/3 dbt repo sync + indexing...\n");
+    await dbt.syncRepo(tenantId);
+    const models = await dbt.listModels(tenantId);
+    output.write(`   dbt models indexed: ${models.length}\n`);
+    output.write("Smoke checks complete.\n");
     return;
   }
 

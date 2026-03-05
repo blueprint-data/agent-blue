@@ -5,11 +5,20 @@ import { QueryResult } from "../../core/types.js";
 export interface SnowflakeConfig {
   account: string;
   username: string;
-  password: string;
   warehouse: string;
   database: string;
   schema: string;
   role?: string;
+  auth:
+    | {
+        type: "password";
+        password: string;
+      }
+    | {
+        type: "keypair";
+        privateKeyPath: string;
+        privateKeyPassphrase?: string;
+      };
 }
 
 export class SnowflakeWarehouseAdapter implements WarehouseAdapter {
@@ -17,15 +26,26 @@ export class SnowflakeWarehouseAdapter implements WarehouseAdapter {
   private connected = false;
 
   constructor(config: SnowflakeConfig) {
-    this.connection = snowflake.createConnection({
+    const options = {
       account: config.account,
       username: config.username,
-      password: config.password,
       warehouse: config.warehouse,
       database: config.database,
       schema: config.schema,
       role: config.role
-    });
+    };
+
+    if (config.auth.type === "password") {
+      (options as Record<string, unknown>).password = config.auth.password;
+    } else {
+      (options as Record<string, unknown>).authenticator = "SNOWFLAKE_JWT";
+      (options as Record<string, unknown>).privateKeyPath = config.auth.privateKeyPath;
+      if (config.auth.privateKeyPassphrase) {
+        (options as Record<string, unknown>).privateKeyPass = config.auth.privateKeyPassphrase;
+      }
+    }
+
+    this.connection = snowflake.createConnection(options as snowflake.ConnectionOptions);
   }
 
   private async ensureConnected(): Promise<void> {
