@@ -36,7 +36,9 @@ export class GitDbtRepositoryService implements DbtRepositoryService {
       throw new Error(`No dbt repo configured for tenant "${tenantId}". Run init first.`);
     }
 
-    const sshCommand = `ssh -i "${repo.deployKeyPath}" -o StrictHostKeyChecking=accept-new`;
+    const deployKeyPath = path.resolve(repo.deployKeyPath);
+    const localRepoPath = path.resolve(repo.localPath);
+    const sshCommand = `ssh -i "${deployKeyPath}" -o StrictHostKeyChecking=accept-new`;
     const env = {
       ...process.env,
       GIT_SSH_COMMAND: sshCommand,
@@ -44,13 +46,13 @@ export class GitDbtRepositoryService implements DbtRepositoryService {
       GIT_CONFIG_GLOBAL: "/dev/null"
     };
 
-    if (!fs.existsSync(repo.localPath)) {
-      fs.mkdirSync(path.dirname(repo.localPath), { recursive: true });
-      execFileSync("git", ["clone", repo.repoUrl, repo.localPath], { env, stdio: "pipe" });
+    if (!fs.existsSync(localRepoPath)) {
+      fs.mkdirSync(path.dirname(localRepoPath), { recursive: true });
+      execFileSync("git", ["clone", repo.repoUrl, localRepoPath], { env, stdio: "pipe" });
       return;
     }
 
-    execFileSync("git", ["-C", repo.localPath, "pull", "--ff-only"], { env, stdio: "pipe" });
+    execFileSync("git", ["-C", localRepoPath, "pull", "--ff-only"], { env, stdio: "pipe" });
   }
 
   async listModels(tenantId: string, dbtSubpath?: string): Promise<DbtModelInfo[]> {
@@ -58,7 +60,7 @@ export class GitDbtRepositoryService implements DbtRepositoryService {
     if (!repo) {
       return [];
     }
-    const root = path.join(repo.localPath, dbtSubpath ?? repo.dbtSubpath);
+    const root = path.resolve(path.join(repo.localPath, dbtSubpath ?? repo.dbtSubpath));
     if (!fs.existsSync(root)) {
       return [];
     }
@@ -74,7 +76,7 @@ export class GitDbtRepositoryService implements DbtRepositoryService {
     if (!repo) {
       return null;
     }
-    const root = path.join(repo.localPath, dbtSubpath ?? repo.dbtSubpath);
+    const root = path.resolve(path.join(repo.localPath, dbtSubpath ?? repo.dbtSubpath));
     if (!fs.existsSync(root)) {
       return null;
     }
