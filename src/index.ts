@@ -3,6 +3,7 @@ import { stdin as input, stdout as output } from "node:process";
 import { buildLlmProvider, buildRuntime, buildSnowflakeWarehouse, buildStore } from "./app.js";
 import { initializeTenant } from "./bootstrap/initTenant.js";
 import { GitDbtRepositoryService } from "./adapters/dbt/dbtRepoService.js";
+import { parseSlackTeamTenantMap, startSlackAgentServer } from "./adapters/channel/slack/slackAgentServer.js";
 import { createId } from "./utils/id.js";
 import { getStringArg, parseArgs } from "./utils/args.js";
 import { env } from "./config/env.js";
@@ -13,7 +14,8 @@ function usage(): string {
     "  npm run dev -- init --tenant <id> --repo-url <git@...> [--dbt-subpath models] [--force]",
     "  npm run dev -- sync-dbt --tenant <id>",
     "  npm run dev -- prod-smoke --tenant <id>",
-    "  npm run dev -- chat --tenant <id> [--profile default] [--conversation <id>] [--message \"...\"]"
+    "  npm run dev -- chat --tenant <id> [--profile default] [--conversation <id>] [--message \"...\"]",
+    "  npm run dev -- slack [--tenant <id>] [--profile default] [--port 3000]"
   ].join("\n");
 }
 
@@ -118,6 +120,27 @@ async function run(): Promise<void> {
     const models = await dbt.listModels(tenantId);
     output.write(`   dbt models indexed: ${models.length}\n`);
     output.write("Smoke checks complete.\n");
+    return;
+  }
+
+  if (command === "slack") {
+    const runtime = buildRuntime(store);
+    const defaultTenantId =
+      (typeof args.tenant === "string" ? args.tenant : undefined) || env.slackDefaultTenantId || undefined;
+    const defaultProfileName =
+      (typeof args.profile === "string" ? args.profile : undefined) || env.slackDefaultProfileName || "default";
+    const port = typeof args.port === "string" ? Number.parseInt(args.port, 10) : env.slackPort;
+    const teamTenantMap = parseSlackTeamTenantMap(env.slackTeamTenantMapRaw);
+
+    await startSlackAgentServer({
+      runtime,
+      botToken: env.slackBotToken,
+      signingSecret: env.slackSigningSecret,
+      port: Number.isFinite(port) ? port : 3000,
+      defaultTenantId,
+      defaultProfileName,
+      teamTenantMap
+    });
     return;
   }
 

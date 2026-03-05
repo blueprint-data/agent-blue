@@ -66,6 +66,14 @@ Snowflake auth can be either:
 - `SNOWFLAKE_AUTH_TYPE=password` + `SNOWFLAKE_PASSWORD`
 - `SNOWFLAKE_AUTH_TYPE=keypair` + `SNOWFLAKE_PRIVATE_KEY_PATH` (and optional `SNOWFLAKE_PRIVATE_KEY_PASSPHRASE`)
 
+Slack server requires:
+
+- `SLACK_BOT_TOKEN`
+- `SLACK_SIGNING_SECRET`
+- one of:
+  - `SLACK_DEFAULT_TENANT_ID` (single-tenant workspace), or
+  - `SLACK_TEAM_TENANT_MAP` (JSON map for multi-workspace, e.g. `{"T123":"acme"}`)
+
 3. Initialize tenant + repo (creates keys and stores config)
 
 ```bash
@@ -92,6 +100,16 @@ One-shot chat:
 npm run dev -- chat --tenant acme --message "How many orders did we have yesterday?"
 ```
 
+7. Run Slack server (Events API)
+
+```bash
+npm run dev -- slack --tenant acme --profile default --port 3000
+```
+
+Then point your Slack app Event Subscriptions URL to:
+
+`https://<your-host>/slack/events`
+
 ## Commands
 
 - `init`
@@ -108,6 +126,10 @@ npm run dev -- chat --tenant acme --message "How many orders did we have yesterd
   - `--profile <name>` (default: `default`)
   - `--conversation <id>` (optional)
   - `--message "<text>"` (optional, non-interactive)
+- `slack`
+  - `--tenant <id>` (optional if `SLACK_DEFAULT_TENANT_ID` is set)
+  - `--profile <name>` (default: `default`)
+  - `--port <number>` (default: `SLACK_PORT` or `3000`)
 
 ## What you were missing (important for production)
 

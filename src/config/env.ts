@@ -25,6 +25,12 @@ export const env = {
   snowflakeDatabase: process.env.SNOWFLAKE_DATABASE ?? "",
   snowflakeSchema: process.env.SNOWFLAKE_SCHEMA ?? "",
   snowflakeRole: process.env.SNOWFLAKE_ROLE ?? "",
+  slackBotToken: process.env.SLACK_BOT_TOKEN ?? "",
+  slackSigningSecret: process.env.SLACK_SIGNING_SECRET ?? "",
+  slackPort: Number.parseInt(process.env.SLACK_PORT ?? "3000", 10),
+  slackDefaultTenantId: process.env.SLACK_DEFAULT_TENANT_ID ?? "",
+  slackDefaultProfileName: process.env.SLACK_DEFAULT_PROFILE_NAME ?? "default",
+  slackTeamTenantMapRaw: process.env.SLACK_TEAM_TENANT_MAP ?? "",
   require(name: string): string {
     return required(name);
   }
