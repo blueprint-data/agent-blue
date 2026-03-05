@@ -37,7 +37,12 @@ export class GitDbtRepositoryService implements DbtRepositoryService {
     }
 
     const sshCommand = `ssh -i "${repo.deployKeyPath}" -o StrictHostKeyChecking=accept-new`;
-    const env = { ...process.env, GIT_SSH_COMMAND: sshCommand };
+    const env = {
+      ...process.env,
+      GIT_SSH_COMMAND: sshCommand,
+      // Ignore environment-level global git URL rewrites so deploy-key SSH is always used.
+      GIT_CONFIG_GLOBAL: "/dev/null"
+    };
 
     if (!fs.existsSync(repo.localPath)) {
       fs.mkdirSync(path.dirname(repo.localPath), { recursive: true });
