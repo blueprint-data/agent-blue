@@ -1,17 +1,123 @@
 (function () {
+  let authBearerToken = null;
+  let authBasicHeader = null;
+  let authRequired = false;
+
+  function applyAuthHeaders(headers) {
+    if (authBearerToken) {
+      headers["Authorization"] = "Bearer " + authBearerToken;
+      return;
+    }
+    if (authBasicHeader) {
+      headers["Authorization"] = authBasicHeader;
+    }
+  }
+
+  function clearStoredBasicAuth() {
+    try {
+      sessionStorage.removeItem("admin_ui_basic_auth");
+    } catch {
+      // ignore storage access issues
+    }
+  }
+
+  function loadStoredBasicAuth() {
+    try {
+      const stored = sessionStorage.getItem("admin_ui_basic_auth");
+      if (stored) authBasicHeader = stored;
+    } catch {
+      // ignore storage access issues
+    }
+  }
+
+  function promptForBasicAuth(basicUserHint) {
+    const user = window.prompt("Admin username", basicUserHint || "admin");
+    if (!user) return false;
+    const password = window.prompt("Admin password");
+    if (!password) return false;
+    const encoded = btoa(user + ":" + password);
+    authBasicHeader = "Basic " + encoded;
+    try {
+      sessionStorage.setItem("admin_ui_basic_auth", authBasicHeader);
+    } catch {
+      // ignore storage access issues
+    }
+    return true;
+  }
+
+  async function loadBootstrapConfig() {
+    try {
+      const res = await fetch("/admin/config");
+      const cfg = await res.json();
+      authBearerToken = cfg.bearerToken || null;
+      authRequired = cfg.authRequired || false;
+      if (!authBearerToken) {
+        loadStoredBasicAuth();
+        if (!authBasicHeader && cfg.basicEnabled) {
+          promptForBasicAuth(cfg.basicUser || "admin");
+        }
+      }
+      const indicator = document.getElementById("auth-indicator");
+      if (indicator) {
+        if (authRequired && !authBearerToken && !authBasicHeader) {
+          indicator.textContent = "Auth required (no token)";
+          indicator.className = "auth-indicator auth-fail";
+        } else if (authBearerToken || authBasicHeader) {
+          indicator.textContent = "Authenticated";
+          indicator.className = "auth-indicator auth-ok";
+        } else {
+          indicator.textContent = "No auth";
+          indicator.className = "auth-indicator";
+        }
+      }
+    } catch (err) {
+      const indicator = document.getElementById("auth-indicator");
+      if (indicator) {
+        indicator.textContent = "Config load failed";
+        indicator.className = "auth-indicator auth-fail";
+      }
+      if (authRequired) alert("Could not load admin config. API calls may fail: " + err.message);
+    }
+  }
+
   async function api(path, options = {}) {
+    const headers = {
+      "Content-Type": "application/json",
+      ...options.headers,
+    };
+    applyAuthHeaders(headers);
     const res = await fetch(path, {
       ...options,
-      headers: {
-        "Content-Type": "application/json",
-        ...options.headers,
-      },
+      headers,
     });
     if (!res.ok) {
+      if (res.status === 401 && authBasicHeader) {
+        authBasicHeader = null;
+        clearStoredBasicAuth();
+      }
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error || res.statusText);
     }
     if (res.status === 204) return null;
+    return res.json();
+  }
+
+  async function apiUpload(path, formData) {
+    const headers = {};
+    applyAuthHeaders(headers);
+    const res = await fetch(path, {
+      method: "POST",
+      headers,
+      body: formData,
+    });
+    if (!res.ok) {
+      if (res.status === 401 && authBasicHeader) {
+        authBasicHeader = null;
+        clearStoredBasicAuth();
+      }
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || res.statusText);
+    }
     return res.json();
   }
 
@@ -294,6 +400,52 @@
     tenantForm.classList.add("hidden");
   });
 
+  let p8UploadTenantId = null;
+  const p8FileInput = document.getElementById("p8-file-input");
+
+  function triggerP8Upload(tenantId) {
+    p8UploadTenantId = tenantId;
+    p8FileInput.value = "";
+    p8FileInput.click();
+  }
+
+  p8FileInput.addEventListener("change", async () => {
+    const tenantId = p8UploadTenantId;
+    p8UploadTenantId = null;
+    if (!tenantId || !p8FileInput.files?.length) return;
+    const file = p8FileInput.files[0];
+    if (!file.name.toLowerCase().endsWith(".p8")) {
+      alert("Please select a .p8 file.");
+      return;
+    }
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const res = await apiUpload("/admin/tenants/" + encodeURIComponent(tenantId) + "/key-upload", formData);
+      alert(res.message || "Key uploaded successfully.");
+      loadTenants();
+      if (document.querySelector(".tab[data-tab=credentials].active")) loadCredentials();
+    } catch (err) {
+      alert("Upload failed: " + err.message);
+    }
+  });
+
+  async function refreshRepo(tenantId) {
+    try {
+      const res = await api("/admin/tenants/" + encodeURIComponent(tenantId) + "/repo-refresh", {
+        method: "POST",
+      });
+      if (res.status === "success") {
+        alert(res.message || "Repo refreshed.");
+      } else {
+        alert("Refresh failed: " + (res.error || "Unknown error") + (res.hint ? "\n\n" + res.hint : ""));
+      }
+      loadTenants();
+    } catch (err) {
+      alert("Refresh failed: " + err.message);
+    }
+  }
+
   async function loadTenants() {
     tenantsList.innerHTML = "<p class='loading'>Loading...</p>";
     try {
@@ -309,6 +461,8 @@
               <span>${escapeHtml(t.tenantId)}</span>
               <span class="muted">${escapeHtml(t.repoUrl)}</span>
               <div>
+                <button class="upload-p8-tenant" data-id="${escapeHtml(t.tenantId)}">Upload .p8</button>
+                <button class="refresh-repo-tenant" data-id="${escapeHtml(t.tenantId)}">Refresh repo</button>
                 <button class="edit-tenant" data-id="${escapeHtml(t.tenantId)}" data-repo="${escapeHtml(t.repoUrl)}" data-dbt="${escapeHtml(t.dbtSubpath)}">Edit</button>
                 <button class="delete-tenant danger" data-id="${escapeHtml(t.tenantId)}">Delete</button>
               </div>
@@ -326,6 +480,12 @@
       });
       tenantsList.querySelectorAll(".delete-tenant").forEach((btn) => {
         btn.addEventListener("click", () => showDeleteModal("tenant", btn.dataset.id, "Tenant " + btn.dataset.id + " and all associated data (mappings, conversations, profiles) will be permanently deleted."));
+      });
+      tenantsList.querySelectorAll(".upload-p8-tenant").forEach((btn) => {
+        btn.addEventListener("click", () => triggerP8Upload(btn.dataset.id));
+      });
+      tenantsList.querySelectorAll(".refresh-repo-tenant").forEach((btn) => {
+        btn.addEventListener("click", () => refreshRepo(btn.dataset.id));
       });
     } catch (err) {
       tenantsList.innerHTML = "<p class='hint'>" + escapeHtml(err.message) + "</p>";
@@ -477,6 +637,7 @@
               <div>
                 <strong>${escapeHtml(r.tenantId)}</strong>
                 <div class="hint">Deploy key: ${escapeHtml(r.deployKeyPath || "—")}</div>
+                ${r.snowflakeKeyPath ? "<div class='hint'>Snowflake .p8 key: " + escapeHtml(r.snowflakeKeyPath) + (r.snowflakeKeyUploadedAt ? " (uploaded " + escapeHtml(r.snowflakeKeyUploadedAt.slice(0, 10)) + ")" : "") + "</div>" : ""}
                 ${r.warehouseMetadata && Object.keys(r.warehouseMetadata).length ? "<div class='hint'>Warehouse: " + escapeHtml(JSON.stringify(r.warehouseMetadata)) + "</div>" : ""}
               </div>
             </div>`
@@ -538,5 +699,8 @@
     return div.innerHTML;
   }
 
-  init();
+  (async function main() {
+    await loadBootstrapConfig();
+    init();
+  })();
 })();

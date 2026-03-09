@@ -10,6 +10,7 @@
   <div id="app">
     <header>
       <h1>Agent Blue Admin</h1>
+      <span id="auth-indicator" class="auth-indicator" title="Auth status from /admin/config">—</span>
     </header>
 
     <nav class="tabs">
@@ -133,6 +134,7 @@
         <div id="tenants-list">
           <p class="loading">Loading...</p>
         </div>
+        <input type="file" id="p8-file-input" accept=".p8" class="hidden" />
         <div id="tenant-form" class="form hidden">
           <h3>Create / Edit tenant</h3>
           <form>

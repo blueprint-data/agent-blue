@@ -1,7 +1,11 @@
-import express, { Request, Response } from "express";
+import express, { Request, Response, NextFunction } from "express";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import fs from "node:fs";
+import crypto from "node:crypto";
+import multer from "multer";
 import type { ConversationStore } from "../../core/interfaces.js";
+import { env } from "../../config/env.js";
 import type {
   AdminGuardrails,
   TenantCredentialsRef,
@@ -26,10 +30,67 @@ export interface AdminServerOptions {
   appDataDir: string;
 }
 
+function requireAdminAuth(req: Request, res: Response, next: NextFunction): void {
+  const path = req.path;
+  const skipPaths = ["/config", "", "/"];
+  const isStatic = /\.(css|js|html|ico|svg|png|jpg|jpeg|gif|woff|woff2|ttf)$/i.test(path);
+  if (skipPaths.includes(path) || isStatic) {
+    next();
+    return;
+  }
+  const authHeader = req.headers.authorization;
+  const basicUser = env.adminBasicUser;
+  const basicPassword = env.adminBasicPassword;
+  const bearerToken = env.adminUiToken || env.adminBearerToken;
+  const hasBasic = basicUser && basicPassword;
+  const hasBearer = !!bearerToken;
+  if (!hasBasic && !hasBearer) {
+    next();
+    return;
+  }
+  if (authHeader?.startsWith("Basic ")) {
+    const b64 = authHeader.slice(6);
+    try {
+      const decoded = Buffer.from(b64, "base64").toString("utf8");
+      const [user, password] = decoded.split(":", 2);
+      if (hasBasic && user === basicUser && password === basicPassword) {
+        next();
+        return;
+      }
+    } catch {
+      // ignore
+    }
+  }
+  if (authHeader?.startsWith("Bearer ")) {
+    const token = authHeader.slice(7).trim();
+    if (hasBearer && token === bearerToken) {
+      next();
+      return;
+    }
+  }
+  if (hasBasic) {
+    res.setHeader("WWW-Authenticate", 'Basic realm="Agent Blue Admin"');
+  }
+  res.status(401).json({ error: "Unauthorized" });
+}
+
 export function startAdminServer(options: AdminServerOptions): void {
   const { store, port, appDataDir } = options;
   const app = express();
   app.use(express.json());
+
+  app.get("/admin/config", (_req: Request, res: Response) => {
+    const bearerToken = env.adminUiToken || env.adminBearerToken;
+    const basicEnabled = !!(env.adminBasicUser && env.adminBasicPassword);
+    res.json({
+      bearerToken: bearerToken || null,
+      authRequired: basicEnabled || !!bearerToken,
+      basicEnabled,
+      basicUser: env.adminBasicUser || null
+    });
+  });
+
+  app.use("/admin", requireAdminAuth);
 
   // --- Tenants ---
   app.get("/admin/tenants", (_req: Request, res: Response) => {
@@ -118,12 +179,99 @@ export function startAdminServer(options: AdminServerOptions): void {
         res.status(404).json({ error: "Tenant not found" });
         return;
       }
+      const keyMeta = store.getTenantKeyMetadata(tenantId);
+      if (keyMeta?.filePath && fs.existsSync(keyMeta.filePath)) {
+        try {
+          fs.unlinkSync(keyMeta.filePath);
+        } catch {
+          // ignore unlink errors
+        }
+      }
       store.deleteTenant(tenantId);
       res.status(204).send();
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }
   });
+
+  const MAX_P8_SIZE = 64 * 1024;
+  const uploadP8 = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: MAX_P8_SIZE },
+    fileFilter(_req, file, cb) {
+      const ext = path.extname(file.originalname || "").toLowerCase();
+      if (ext !== ".p8") {
+        cb(new Error("Only .p8 files are allowed"));
+        return;
+      }
+      cb(null, true);
+    }
+  });
+
+  app.post(
+    "/admin/tenants/:tenantId/key-upload",
+    (req: Request, res: Response, next: NextFunction) => {
+      uploadP8.single("file")(req, res, (err: unknown) => {
+        if (err) {
+          const msg = err instanceof Error ? err.message : "Upload failed";
+          res.status(400).json({ error: msg });
+          return;
+        }
+        next();
+      });
+    },
+    (req: Request, res: Response) => {
+    try {
+      const tenantId = param(req, "tenantId");
+      const repo = store.getTenantRepo(tenantId);
+      if (!repo) {
+        res.status(404).json({ error: "Tenant not found" });
+        return;
+      }
+      const file = req.file;
+      if (!file || !file.buffer) {
+        res.status(400).json({ error: "No file uploaded. Use form field 'file' with a .p8 file." });
+        return;
+      }
+      const keysDir = path.join(appDataDir, "keys", tenantId);
+      fs.mkdirSync(keysDir, { recursive: true, mode: 0o700 });
+      const fileName = `snowflake_key_${Date.now()}.p8`;
+      const filePath = path.join(keysDir, fileName);
+      fs.writeFileSync(filePath, file.buffer, { mode: 0o600 });
+      const fingerprint = crypto.createHash("sha256").update(file.buffer).digest("hex").slice(0, 16);
+      const uploadedAt = new Date().toISOString();
+      const existing = store.getTenantKeyMetadata(tenantId);
+      if (existing?.filePath && existing.filePath !== filePath && fs.existsSync(existing.filePath)) {
+        try {
+          fs.unlinkSync(existing.filePath);
+        } catch {
+          // ignore
+        }
+      }
+      store.upsertTenantKeyMetadata({ tenantId, filePath, uploadedAt, fingerprint });
+      const warehouseConfig = store.getTenantWarehouseConfig(tenantId);
+      if (warehouseConfig?.provider === "snowflake" && warehouseConfig.snowflake) {
+        store.upsertTenantWarehouseConfig({
+          ...warehouseConfig,
+          snowflake: {
+            ...warehouseConfig.snowflake,
+            authType: "keypair",
+            privateKeyPath: filePath
+          }
+        });
+      }
+      res.status(201).json({
+        tenantId,
+        filePath,
+        uploadedAt,
+        fingerprint,
+        message: "Key uploaded. Warehouse config updated to use keypair auth."
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  }
+  );
 
   // --- Slack mappings ---
   app.get("/admin/slack-mappings", (_req: Request, res: Response) => {
@@ -276,10 +424,13 @@ export function startAdminServer(options: AdminServerOptions): void {
         return;
       }
       const ref = store.getTenantCredentialsRef(tenantId);
+      const keyMeta = store.getTenantKeyMetadata(tenantId);
       res.json({
         tenantId,
         deployKeyPath: ref?.deployKeyPath ?? repo.deployKeyPath,
-        warehouseMetadata: ref?.warehouseMetadata ?? {}
+        warehouseMetadata: ref?.warehouseMetadata ?? {},
+        snowflakeKeyPath: keyMeta?.filePath ?? null,
+        snowflakeKeyUploadedAt: keyMeta?.uploadedAt ?? null
       });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
@@ -310,6 +461,36 @@ export function startAdminServer(options: AdminServerOptions): void {
 
   // --- Wizard ---
   const dbtRepo = new GitDbtRepositoryService(store);
+
+  app.post("/admin/tenants/:tenantId/repo-refresh", async (req: Request, res: Response) => {
+    try {
+      const tenantId = param(req, "tenantId");
+      const repo = store.getTenantRepo(tenantId);
+      if (!repo) {
+        res.status(404).json({
+          status: "failed",
+          error: "Tenant not found",
+          refreshedAt: null
+        });
+        return;
+      }
+      await dbtRepo.syncRepo(tenantId);
+      const models = await dbtRepo.listModels(tenantId);
+      res.json({
+        status: "success",
+        message: `Repo refreshed. ${models.length} dbt models found.`,
+        refreshedAt: new Date().toISOString(),
+        modelCount: models.length
+      });
+    } catch (err) {
+      res.status(500).json({
+        status: "failed",
+        error: (err as Error).message,
+        refreshedAt: null,
+        hint: "Ensure the deploy key was added to the GitHub repo as a Deploy Key (read-only)."
+      });
+    }
+  });
 
   app.post("/admin/wizard/tenant/init", (req: Request, res: Response) => {
     try {
@@ -654,5 +835,16 @@ export function startAdminServer(options: AdminServerOptions): void {
 
   app.listen(port, () => {
     console.log(`Admin server listening on http://localhost:${port}`);
+    const hasBasic = !!(env.adminBasicUser && env.adminBasicPassword);
+    const hasBearer = !!(env.adminUiToken || env.adminBearerToken);
+    if (hasBasic || hasBearer) {
+      console.log("Admin API auth enabled: " + (hasBasic ? "Basic " : "") + (hasBearer ? "Bearer" : ""));
+    }
+    if (env.adminBasicUser && !env.adminBasicPassword) {
+      console.warn("ADMIN_BASIC_USER set but ADMIN_BASIC_PASSWORD empty; Basic Auth will not work.");
+    }
+    if (env.adminBasicPassword && !env.adminBasicUser) {
+      console.warn("ADMIN_BASIC_PASSWORD set but ADMIN_BASIC_USER empty; Basic Auth will not work.");
+    }
   });
 }

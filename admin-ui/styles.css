@@ -98,6 +98,23 @@ header h1 {
   font-size: 1.25rem;
 }
 
+.auth-indicator {
+  font-size: 0.75rem;
+  color: var(--muted);
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+}
+
+.auth-indicator.auth-ok {
+  color: var(--success);
+  background: rgba(63, 185, 80, 0.15);
+}
+
+.auth-indicator.auth-fail {
+  color: var(--danger);
+  background: rgba(248, 81, 73, 0.15);
+}
+
 #logout-btn {
   padding: 0.4rem 0.8rem;
   background: transparent;

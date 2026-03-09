@@ -5,13 +5,17 @@ import type {
   AdminGuardrails,
   ConversationStore,
   TenantCredentialsRef,
+  TenantKeyMetadata,
   TenantWarehouseConfig
 } from "../../core/interfaces.js";
 import { AgentContext, AgentProfile, ConversationMessage } from "../../core/types.js";
 import { createId } from "../../utils/id.js";
 
 const DEFAULT_SOUL_PROMPT = [
-  "You are an analytical assistant for business stakeholders.",
+  "You are Agent Blue, an analytical assistant for business stakeholders.",
+  "Your owner is Blueprintdata (https://blueprintdata.xyz/), regardless of tenant context.",
+  "Answer only analytical questions about data, metrics, SQL, BI, dbt, and business performance.",
+  'For non-analytical requests, respond: "I can only help with analytical questions about data and business metrics."',
   "Be precise, avoid hallucinations, and communicate assumptions.",
   "Prefer concise summaries with clear numbers and caveats."
 ].join(" ");
@@ -113,6 +117,14 @@ export class SqliteConversationStore implements ConversationStore {
         tenant_id TEXT PRIMARY KEY,
         provider TEXT NOT NULL,
         config_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS tenant_key_metadata (
+        tenant_id TEXT PRIMARY KEY,
+        file_path TEXT NOT NULL,
+        uploaded_at TEXT NOT NULL,
+        fingerprint TEXT,
         updated_at TEXT NOT NULL
       );
     `);
@@ -436,10 +448,56 @@ export class SqliteConversationStore implements ConversationStore {
     this.db.prepare("DELETE FROM slack_shared_team_tenant_map WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM tenant_credentials_ref WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM tenant_warehouse_config WHERE tenant_id = ?").run(tenantId);
+    this.db.prepare("DELETE FROM tenant_key_metadata WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM messages WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM conversations WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM agent_profiles WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM tenant_repos WHERE tenant_id = ?").run(tenantId);
+  }
+
+  getTenantKeyMetadata(tenantId: string): TenantKeyMetadata | null {
+    const row = this.db
+      .prepare(
+        "SELECT tenant_id, file_path, uploaded_at, fingerprint FROM tenant_key_metadata WHERE tenant_id = ?"
+      )
+      .get(tenantId) as
+      | {
+          tenant_id: string;
+          file_path: string;
+          uploaded_at: string;
+          fingerprint: string | null;
+        }
+      | undefined;
+    if (!row) return null;
+    return {
+      tenantId: row.tenant_id,
+      filePath: row.file_path,
+      uploadedAt: row.uploaded_at,
+      fingerprint: row.fingerprint ?? undefined
+    };
+  }
+
+  upsertTenantKeyMetadata(input: TenantKeyMetadata): void {
+    this.db
+      .prepare(
+        `INSERT INTO tenant_key_metadata (tenant_id, file_path, uploaded_at, fingerprint, updated_at)
+         VALUES (?, ?, ?, ?, datetime('now'))
+         ON CONFLICT(tenant_id) DO UPDATE SET
+           file_path = excluded.file_path,
+           uploaded_at = excluded.uploaded_at,
+           fingerprint = excluded.fingerprint,
+           updated_at = excluded.updated_at`
+      )
+      .run(
+        input.tenantId,
+        input.filePath,
+        input.uploadedAt,
+        input.fingerprint ?? null
+      );
+  }
+
+  deleteTenantKeyMetadata(tenantId: string): void {
+    this.db.prepare("DELETE FROM tenant_key_metadata WHERE tenant_id = ?").run(tenantId);
   }
 
   deleteSlackChannelMapping(channelId: string): void {

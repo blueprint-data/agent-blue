@@ -219,12 +219,20 @@ npm run admin:ui
 2. Open `http://localhost:3100/admin` in a browser.
 3. Use the tabs to:
    - **New Tenant Wizard**: Step-by-step onboarding for a new tenant. Complete each step in order: (1) tenant basics + init, (2) verify repo access, (3) configure per-tenant warehouse (Snowflake), (4) test warehouse connectivity, (5) add Slack mappings, (6) final validation. Per-tenant warehouse config overrides env when present.
-   - **Tenants**: Create, edit, delete tenants and their dbt repo config.
+   - **Tenants**: Create, edit, delete tenants and their dbt repo config. Per tenant: "Upload .p8" for Snowflake keypair auth, "Refresh repo" for `git pull --ff-only`.
    - **Slack Mappings**: Add/remove channel, user, and shared-team mappings to tenants.
    - **Guardrails**: Configure owner team/enterprise IDs, strict tenant routing, default tenant, and team→tenant map. Persisted guardrails override env vars when the Slack server starts.
    - **Credentials**: View credential reference metadata (paths and warehouse metadata only; no raw secrets).
 
-The admin server runs on a separate port from the Slack server. It has no authentication—do not expose it publicly without TLS and proper access control (e.g. firewall, VPN).
+The admin server runs on a separate port from the Slack server. **Authentication:** When any of `ADMIN_UI_TOKEN`, `ADMIN_BEARER_TOKEN`, or `ADMIN_BASIC_USER`+`ADMIN_BASIC_PASSWORD` are set, all admin API routes require auth. The UI fetches `/admin/config` on load and auto-attaches the Bearer token when `ADMIN_UI_TOKEN` (or `ADMIN_BEARER_TOKEN`) is set. Use Basic Auth or Bearer for programmatic access. Do not expose the admin server publicly without TLS and proper access control (e.g. firewall, VPN).
+
+### Operator validation (auth, upload, repo refresh)
+
+After deploying, verify:
+
+1. **Auth**: Set `ADMIN_UI_TOKEN` (or `ADMIN_BEARER_TOKEN`) in `.env`. Start admin server, open `/admin`. Header should show "Authenticated". Unauthenticated requests to `/admin/tenants` should return 401.
+2. **.p8 upload**: In Tenants tab, click "Upload .p8" for a tenant. Select a valid Snowflake `.p8` key file. Expect success message; Credentials tab should show the key path. No raw key content in API response or SQLite.
+3. **Repo refresh**: In Tenants tab, click "Refresh repo" for a tenant with a configured dbt repo. Expect "Repo refreshed. N dbt models found." or a clear error (e.g. deploy key not added).
 
 ### New Tenant Wizard flow
 

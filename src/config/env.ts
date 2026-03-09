@@ -38,6 +38,9 @@ export const env = {
   verboseMode: process.env.AGENT_VERBOSE === "1" || process.env.AGENT_VERBOSE?.toLowerCase() === "true",
   adminPort: Number.parseInt(process.env.ADMIN_PORT ?? "3100", 10),
   adminBearerToken: process.env.ADMIN_BEARER_TOKEN ?? "",
+  adminBasicUser: process.env.ADMIN_BASIC_USER ?? "admin",
+  adminBasicPassword: process.env.ADMIN_BASIC_PASSWORD ?? "",
+  adminUiToken: process.env.ADMIN_UI_TOKEN ?? process.env.ADMIN_BEARER_TOKEN ?? "",
   require(name: string): string {
     return required(name);
   }

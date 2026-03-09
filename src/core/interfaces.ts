@@ -134,6 +134,9 @@ export interface ConversationStore {
   upsertTenantCredentialsRef(input: TenantCredentialsRef): void;
   getTenantWarehouseConfig(tenantId: string): TenantWarehouseConfig | null;
   upsertTenantWarehouseConfig(input: Omit<TenantWarehouseConfig, "updatedAt">): void;
+  getTenantKeyMetadata(tenantId: string): TenantKeyMetadata | null;
+  upsertTenantKeyMetadata(input: TenantKeyMetadata): void;
+  deleteTenantKeyMetadata(tenantId: string): void;
 }
 
 export interface AdminGuardrails {
@@ -148,6 +151,14 @@ export interface TenantCredentialsRef {
   tenantId: string;
   deployKeyPath?: string;
   warehouseMetadata?: { provider?: string; lastRotated?: string };
+}
+
+/** Metadata for tenant Snowflake .p8 key file (path + metadata only; no raw key content). */
+export interface TenantKeyMetadata {
+  tenantId: string;
+  filePath: string;
+  uploadedAt: string;
+  fingerprint?: string;
 }
 
 export type TenantWarehouseProvider = "snowflake" | "bigquery";
