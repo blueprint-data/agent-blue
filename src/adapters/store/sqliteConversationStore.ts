@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 import path from "node:path";
 import fs from "node:fs";
 import type {
+  AdminSession,
   AdminGuardrails,
   ConversationStore,
   TenantCredentialsRef,
@@ -126,6 +127,16 @@ export class SqliteConversationStore implements ConversationStore {
         uploaded_at TEXT NOT NULL,
         fingerprint TEXT,
         updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS admin_sessions (
+        session_id TEXT PRIMARY KEY,
+        username TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        user_agent TEXT,
+        ip_address TEXT
       );
     `);
   }
@@ -660,5 +671,74 @@ export class SqliteConversationStore implements ConversationStore {
            updated_at = excluded.updated_at`
       )
       .run(input.tenantId, input.provider, configJson);
+  }
+
+  createAdminSession(input: Omit<AdminSession, "lastSeenAt"> & { lastSeenAt?: string }): void {
+    const lastSeenAt = input.lastSeenAt ?? input.createdAt;
+    this.db
+      .prepare(
+        `INSERT INTO admin_sessions (session_id, username, created_at, expires_at, last_seen_at, user_agent, ip_address)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        input.sessionId,
+        input.username,
+        input.createdAt,
+        input.expiresAt,
+        lastSeenAt,
+        input.userAgent ?? null,
+        input.ipAddress ?? null
+      );
+  }
+
+  getAdminSession(sessionId: string): AdminSession | null {
+    const row = this.db
+      .prepare(
+        `SELECT session_id, username, created_at, expires_at, last_seen_at, user_agent, ip_address
+         FROM admin_sessions
+         WHERE session_id = ?`
+      )
+      .get(sessionId) as
+      | {
+          session_id: string;
+          username: string;
+          created_at: string;
+          expires_at: string;
+          last_seen_at: string;
+          user_agent: string | null;
+          ip_address: string | null;
+        }
+      | undefined;
+    if (!row) {
+      return null;
+    }
+    return {
+      sessionId: row.session_id,
+      username: row.username,
+      createdAt: row.created_at,
+      expiresAt: row.expires_at,
+      lastSeenAt: row.last_seen_at,
+      userAgent: row.user_agent ?? undefined,
+      ipAddress: row.ip_address ?? undefined
+    };
+  }
+
+  touchAdminSession(sessionId: string, lastSeenAt: string, expiresAt?: string): void {
+    this.db
+      .prepare(
+        `UPDATE admin_sessions
+         SET last_seen_at = ?, expires_at = COALESCE(?, expires_at)
+         WHERE session_id = ?`
+      )
+      .run(lastSeenAt, expiresAt ?? null, sessionId);
+  }
+
+  deleteAdminSession(sessionId: string): void {
+    this.db.prepare("DELETE FROM admin_sessions WHERE session_id = ?").run(sessionId);
+  }
+
+  deleteExpiredAdminSessions(nowIso = new Date().toISOString()): number {
+    const result = this.db.prepare("DELETE FROM admin_sessions WHERE expires_at <= ?").run(nowIso);
+    return result.changes;
   }
 }

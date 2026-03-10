@@ -137,6 +137,11 @@ export interface ConversationStore {
   getTenantKeyMetadata(tenantId: string): TenantKeyMetadata | null;
   upsertTenantKeyMetadata(input: TenantKeyMetadata): void;
   deleteTenantKeyMetadata(tenantId: string): void;
+  createAdminSession(input: Omit<AdminSession, "lastSeenAt"> & { lastSeenAt?: string }): void;
+  getAdminSession(sessionId: string): AdminSession | null;
+  touchAdminSession(sessionId: string, lastSeenAt: string, expiresAt?: string): void;
+  deleteAdminSession(sessionId: string): void;
+  deleteExpiredAdminSessions(nowIso?: string): number;
 }
 
 export interface AdminGuardrails {
@@ -190,6 +195,16 @@ export interface TenantWarehouseConfig {
   snowflake?: TenantSnowflakeConfig;
   bigquery?: TenantBigQueryConfig;
   updatedAt: string;
+}
+
+export interface AdminSession {
+  sessionId: string;
+  username: string;
+  createdAt: string;
+  expiresAt: string;
+  lastSeenAt: string;
+  userAgent?: string;
+  ipAddress?: string;
 }
 
 export interface ChannelAdapter {
