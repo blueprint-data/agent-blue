@@ -120,6 +120,15 @@ export interface ConversationStore {
   listSlackChannelMappings(): Array<{ channelId: string; tenantId: string; source: string; updatedAt: string }>;
   listSlackUserMappings(): Array<{ userId: string; tenantId: string; updatedAt: string }>;
   listSlackSharedTeamMappings(): Array<{ sharedTeamId: string; tenantId: string; updatedAt: string }>;
+  tryMarkSlackEventProcessed(input: {
+    eventKey: string;
+    eventId?: string | null;
+    eventType?: string | null;
+    teamId?: string | null;
+    channelId?: string | null;
+    userId?: string | null;
+    messageTs?: string | null;
+  }): boolean;
   logSlackTenantRoutingAudit?(input: {
     messageTs: string;
     channelId: string;

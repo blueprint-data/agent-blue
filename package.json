@@ -17,7 +17,7 @@
     "admin:web:dev": "vite --config admin-ui/vite.config.ts",
     "admin:web:build": "vite build --config admin-ui/vite.config.ts",
     "admin:web:check": "tsc -p admin-ui/tsconfig.json --noEmit",
-    "admin:dev": "concurrently -k -n api,web -c green,cyan \"npm run admin:api\" \"npm run admin:web:dev\"",
+    "admin:dev": "concurrently -k -n api,web,tunnel -c green,cyan,magenta \"npm run admin:api\" \"npm run admin:web:dev\" \"npm run tunnel\"",
     "test": "vitest run"
   },
   "repository": {

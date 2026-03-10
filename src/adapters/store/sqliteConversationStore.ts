@@ -108,6 +108,17 @@ export class SqliteConversationStore implements ConversationStore {
         created_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS processed_slack_events (
+        event_key TEXT PRIMARY KEY,
+        event_id TEXT,
+        event_type TEXT,
+        team_id TEXT,
+        channel_id TEXT,
+        user_id TEXT,
+        message_ts TEXT,
+        created_at TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS admin_guardrails (
         id TEXT PRIMARY KEY DEFAULT 'default',
         default_tenant_id TEXT,
@@ -482,6 +493,34 @@ export class SqliteConversationStore implements ConversationStore {
         input.resolvedTenant,
         input.ruleUsed
       );
+  }
+
+  tryMarkSlackEventProcessed(input: {
+    eventKey: string;
+    eventId?: string | null;
+    eventType?: string | null;
+    teamId?: string | null;
+    channelId?: string | null;
+    userId?: string | null;
+    messageTs?: string | null;
+  }): boolean {
+    const result = this.db
+      .prepare(
+        `INSERT OR IGNORE INTO processed_slack_events
+         (event_key, event_id, event_type, team_id, channel_id, user_id, message_ts, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        input.eventKey,
+        input.eventId ?? null,
+        input.eventType ?? null,
+        input.teamId ?? null,
+        input.channelId ?? null,
+        input.userId ?? null,
+        input.messageTs ?? null,
+        new Date().toISOString()
+      );
+    return result.changes > 0;
   }
 
   listTenants(): Array<{

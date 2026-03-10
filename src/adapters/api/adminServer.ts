@@ -57,6 +57,10 @@ function isSecureRequest(req: Request): boolean {
   return typeof forwardedProto === "string" && forwardedProto.toLowerCase().split(",")[0]?.trim() === "https";
 }
 
+function isLoopbackHostname(hostname: string): boolean {
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]";
+}
+
 function timingSafeStringEqual(left: string, right: string): boolean {
   const leftBuffer = Buffer.from(left);
   const rightBuffer = Buffer.from(right);
@@ -152,11 +156,35 @@ function enforceSameOriginForSession(req: Request): boolean {
   const forwardedHost = req.get("x-forwarded-host")?.split(",")[0]?.trim();
   const forwardedProto = req.get("x-forwarded-proto")?.split(",")[0]?.trim();
   const requestOrigin = `${forwardedProto ?? (isSecureRequest(req) ? "https" : req.protocol)}://${forwardedHost ?? req.get("host")}`;
+  let requestUrl: URL | null = null;
+  try {
+    requestUrl = new URL(requestOrigin);
+  } catch {
+    requestUrl = null;
+  }
+
+  const matchesAllowedOrigin = (value: string): boolean => {
+    try {
+      const candidateUrl = new URL(value);
+      if (candidateUrl.origin === requestOrigin) {
+        return true;
+      }
+      return Boolean(
+        requestUrl &&
+          isLoopbackHostname(candidateUrl.hostname) &&
+          isLoopbackHostname(requestUrl.hostname) &&
+          candidateUrl.protocol === requestUrl.protocol
+      );
+    } catch {
+      return false;
+    }
+  };
+
   if (origin) {
-    return origin === requestOrigin;
+    return matchesAllowedOrigin(origin);
   }
   if (referer) {
-    return referer.startsWith(`${requestOrigin}/`) || referer === requestOrigin;
+    return matchesAllowedOrigin(referer);
   }
   return false;
 }

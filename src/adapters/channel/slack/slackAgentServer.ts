@@ -61,6 +61,47 @@ function getUserId(event: Record<string, unknown>): string | null {
   return null;
 }
 
+function getBodyString(body: unknown, key: string): string | null {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return null;
+  }
+  const value = (body as Record<string, unknown>)[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function getEnvelopeEventType(body: unknown, fallbackType: string): string {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return fallbackType;
+  }
+  const event = (body as Record<string, unknown>)["event"];
+  if (!event || typeof event !== "object" || Array.isArray(event)) {
+    return fallbackType;
+  }
+  const eventType = (event as Record<string, unknown>)["type"];
+  return typeof eventType === "string" && eventType.length > 0 ? eventType : fallbackType;
+}
+
+function buildSlackEventDedupeKey(input: {
+  eventId?: string | null;
+  eventType: string;
+  teamId: string | null;
+  channelId: string;
+  userId: string | null;
+  messageTs: string;
+}): string {
+  if (input.eventId) {
+    return `event:${input.eventId}`;
+  }
+  return [
+    "fallback",
+    input.eventType,
+    input.teamId ?? "unknown-team",
+    input.channelId,
+    input.messageTs,
+    input.userId ?? "unknown-user"
+  ].join(":");
+}
+
 function isOwnerContext(
   teamId: string | null,
   enterpriseId: string | null,
@@ -256,6 +297,48 @@ export async function startSlackAgentServer(options: SlackAgentServerOptions): P
     } catch {
       // ignore observer failures
     }
+  };
+
+  const shouldSkipDuplicateMessage = (input: {
+    body: unknown;
+    fallbackEventType: string;
+    teamId: string | null;
+    channelId: string;
+    userId: string | null;
+    messageTs: string;
+  }): boolean => {
+    const eventId = getBodyString(input.body, "event_id");
+    const eventType = getEnvelopeEventType(input.body, input.fallbackEventType);
+    const eventKey = buildSlackEventDedupeKey({
+      eventId,
+      eventType,
+      teamId: input.teamId,
+      channelId: input.channelId,
+      userId: input.userId,
+      messageTs: input.messageTs
+    });
+    const isNew = options.store.tryMarkSlackEventProcessed({
+      eventKey,
+      eventId,
+      eventType,
+      teamId: input.teamId,
+      channelId: input.channelId,
+      userId: input.userId,
+      messageTs: input.messageTs
+    });
+    if (isNew) {
+      return false;
+    }
+    void emitEvent("message.duplicate_skipped", "info", "Skipped duplicate Slack event.", {
+      eventKey,
+      eventId,
+      eventType,
+      channelId: input.channelId,
+      teamId: input.teamId,
+      userId: input.userId,
+      messageTs: input.messageTs
+    });
+    return true;
   };
 
   const processMessage = async (input: {
@@ -511,11 +594,25 @@ export async function startSlackAgentServer(options: SlackAgentServerOptions): P
     if (typeof channel !== "string" || typeof ts !== "string" || typeof text !== "string") {
       return;
     }
+    const teamId = getTeamId(body, slackEvent);
+    const userId = getUserId(slackEvent);
+    if (
+      shouldSkipDuplicateMessage({
+        body,
+        fallbackEventType: "app_mention",
+        teamId,
+        channelId: channel,
+        userId,
+        messageTs: ts
+      })
+    ) {
+      return;
+    }
 
     void processMessage({
       body,
-      teamId: getTeamId(body, slackEvent),
-      userId: getUserId(slackEvent),
+      teamId,
+      userId,
       channel,
       threadTs: typeof threadTs === "string" ? threadTs : ts,
       text: parseMessageText(text),
@@ -542,11 +639,25 @@ export async function startSlackAgentServer(options: SlackAgentServerOptions): P
     if (typeof channel !== "string" || typeof ts !== "string" || typeof text !== "string") {
       return;
     }
+    const teamId = getTeamId(body, slackMessage);
+    const userId = getUserId(slackMessage);
+    if (
+      shouldSkipDuplicateMessage({
+        body,
+        fallbackEventType: "message",
+        teamId,
+        channelId: channel,
+        userId,
+        messageTs: ts
+      })
+    ) {
+      return;
+    }
 
     void processMessage({
       body,
-      teamId: getTeamId(body, slackMessage),
-      userId: getUserId(slackMessage),
+      teamId,
+      userId,
       channel,
       threadTs: typeof threadTs === "string" ? threadTs : ts,
       text: text.trim(),
