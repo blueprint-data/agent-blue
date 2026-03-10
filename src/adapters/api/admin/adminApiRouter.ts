@@ -15,6 +15,7 @@ import { initializeTenant } from "../../../bootstrap/initTenant.js";
 import { buildWarehouseFromTenantConfig } from "../../../app.js";
 import { GitDbtRepositoryService } from "../../dbt/dbtRepoService.js";
 import type { SlackBotSupervisor } from "./slackBotSupervisor.js";
+import type { TelegramBotSupervisor } from "./telegramBotSupervisor.js";
 
 function param(req: Request, name: string): string {
   const value = req.params[name];
@@ -25,10 +26,11 @@ export interface AdminApiRouterOptions {
   store: ConversationStore;
   appDataDir: string;
   slackBotSupervisor?: SlackBotSupervisor;
+  telegramBotSupervisor?: TelegramBotSupervisor;
 }
 
 export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
-  const { store, appDataDir, slackBotSupervisor } = options;
+  const { store, appDataDir, slackBotSupervisor, telegramBotSupervisor } = options;
   const router = Router();
   const dbtRepo = new GitDbtRepositoryService(store);
 
@@ -414,6 +416,145 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
     }
   });
 
+  router.get("/tenants/:tenantId/warehouse", (req: Request, res: Response) => {
+    try {
+      const tenantId = param(req, "tenantId");
+      if (!store.getTenantRepo(tenantId)) {
+        res.status(404).json({ error: "Tenant not found" });
+        return;
+      }
+      const config = store.getTenantWarehouseConfig(tenantId);
+      if (!config) {
+        res.json({ tenantId, provider: null });
+        return;
+      }
+      const sanitized: Record<string, unknown> = {
+        tenantId: config.tenantId,
+        provider: config.provider,
+        updatedAt: config.updatedAt
+      };
+      if (config.provider === "snowflake" && config.snowflake) {
+        sanitized.snowflake = {
+          account: config.snowflake.account,
+          username: config.snowflake.username,
+          warehouse: config.snowflake.warehouse,
+          database: config.snowflake.database,
+          schema: config.snowflake.schema,
+          role: config.snowflake.role,
+          authType: config.snowflake.authType
+        };
+      }
+      if (config.provider === "bigquery" && config.bigquery) {
+        sanitized.bigquery = {
+          projectId: config.bigquery.projectId,
+          dataset: config.bigquery.dataset,
+          location: config.bigquery.location
+        };
+      }
+      res.json(sanitized);
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.get("/telegram-mappings", (_req: Request, res: Response) => {
+    try {
+      res.json(store.listTelegramChatMappings());
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.put("/telegram-mappings/:chatId", (req: Request, res: Response) => {
+    try {
+      const chatId = param(req, "chatId");
+      const { tenantId } = req.body as { tenantId?: string };
+      if (!tenantId) {
+        res.status(400).json({ error: "tenantId required" });
+        return;
+      }
+      if (!store.getTenantRepo(tenantId)) {
+        res.status(400).json({ error: "Tenant not found" });
+        return;
+      }
+      store.upsertTelegramChatTenant(chatId, tenantId, "manual");
+      res.json({ chatId, tenantId, source: "manual" });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.delete("/telegram-mappings/:chatId", (req: Request, res: Response) => {
+    try {
+      store.deleteTelegramChatMapping(param(req, "chatId"));
+      res.status(204).send();
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.get("/telegram-bot/status", (_req: Request, res: Response) => {
+    try {
+      if (!telegramBotSupervisor) {
+        res.status(503).json({ error: "Telegram bot supervisor unavailable" });
+        return;
+      }
+      res.json(telegramBotSupervisor.getStatus());
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.get("/telegram-bot/events", (req: Request, res: Response) => {
+    try {
+      if (!telegramBotSupervisor) {
+        res.status(503).json({ error: "Telegram bot supervisor unavailable" });
+        return;
+      }
+      const limitRaw = typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : 100;
+      const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 500) : 100;
+      res.json(telegramBotSupervisor.listEvents(limit));
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.post("/telegram-bot/start", async (_req: Request, res: Response) => {
+    try {
+      if (!telegramBotSupervisor) {
+        res.status(503).json({ error: "Telegram bot supervisor unavailable" });
+        return;
+      }
+      res.json(await telegramBotSupervisor.start());
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.post("/telegram-bot/stop", async (_req: Request, res: Response) => {
+    try {
+      if (!telegramBotSupervisor) {
+        res.status(503).json({ error: "Telegram bot supervisor unavailable" });
+        return;
+      }
+      res.json(await telegramBotSupervisor.stop());
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.post("/telegram-bot/restart", async (_req: Request, res: Response) => {
+    try {
+      if (!telegramBotSupervisor) {
+        res.status(503).json({ error: "Telegram bot supervisor unavailable" });
+        return;
+      }
+      res.json(await telegramBotSupervisor.restart());
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
   router.get("/conversations", (req: Request, res: Response) => {
     try {
       const tenantId = typeof req.query.tenantId === "string" ? req.query.tenantId : undefined;
@@ -780,10 +921,13 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
         checks.push({ name: "repo_sync", passed: false, message: (error as Error).message });
       }
 
-      if (warehouseConfig && warehouseConfig.provider === "snowflake") {
+      if (warehouseConfig) {
         try {
           const warehouse = buildWarehouseFromTenantConfig(warehouseConfig);
-          await warehouse.query("SELECT 1 AS ok LIMIT 1");
+          const testQuery = warehouseConfig.provider === "bigquery"
+            ? "SELECT 1 AS ok"
+            : "SELECT 1 AS ok LIMIT 1";
+          await warehouse.query(testQuery);
           warehouseOk = true;
           checks.push({ name: "warehouse_connect", passed: true });
         } catch (error) {
@@ -793,7 +937,7 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
         checks.push({
           name: "warehouse_connect",
           passed: false,
-          message: "Warehouse config missing or BigQuery not supported."
+          message: "Warehouse config missing."
         });
       }
 

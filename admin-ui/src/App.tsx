@@ -123,6 +123,33 @@ interface BotEvent {
   createdAt: string;
 }
 
+interface WarehouseConfigResponse {
+  tenantId: string;
+  provider: "snowflake" | "bigquery" | null;
+  updatedAt?: string;
+  snowflake?: {
+    account: string;
+    username: string;
+    warehouse: string;
+    database: string;
+    schema: string;
+    role?: string;
+    authType: "keypair" | "password";
+  };
+  bigquery?: {
+    projectId: string;
+    dataset?: string;
+    location?: string;
+  };
+}
+
+interface TelegramMapping {
+  chatId: string;
+  tenantId: string;
+  source: string;
+  updatedAt: string;
+}
+
 interface NotificationState {
   type: "success" | "error" | "info";
   text: string;
@@ -301,6 +328,7 @@ function AdminShell({
               <Route path="/tenants" element={<TenantsPage notify={notify} />} />
               <Route path="/conversations" element={<ConversationsPage notify={notify} />} />
               <Route path="/slack-bot" element={<SlackBotPage notify={notify} />} />
+              <Route path="/telegram-bot" element={<TelegramBotPage notify={notify} />} />
               <Route path="/settings" element={<SettingsPage notify={notify} />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
@@ -340,23 +368,26 @@ function OverviewPage({ notify }: { notify: (value: NotificationState | null) =>
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [botStatus, setBotStatus] = useState<BotStatus | null>(null);
   const [botEvents, setBotEvents] = useState<BotEvent[]>([]);
+  const [telegramBotStatus, setTelegramBotStatus] = useState<BotStatus | null>(null);
 
   const loadOverview = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const [nextTenants, nextMappings, nextConversations, nextBotStatus, nextBotEvents] = await Promise.all([
+      const [nextTenants, nextMappings, nextConversations, nextBotStatus, nextBotEvents, nextTelegramStatus] = await Promise.all([
         apiRequest<TenantRecord[]>("/api/admin/tenants"),
         apiRequest<SlackMappingsResponse>("/api/admin/slack-mappings"),
         apiRequest<ConversationSummary[]>("/api/admin/conversations?limit=6"),
         apiRequest<BotStatus>("/api/admin/bot/status"),
-        apiRequest<BotEvent[]>("/api/admin/bot/events?limit=5")
+        apiRequest<BotEvent[]>("/api/admin/bot/events?limit=5"),
+        apiRequest<BotStatus>("/api/admin/telegram-bot/status")
       ]);
       setTenants(nextTenants);
       setMappings(nextMappings);
       setConversations(nextConversations);
       setBotStatus(nextBotStatus);
       setBotEvents(nextBotEvents);
+      setTelegramBotStatus(nextTelegramStatus);
     } catch (caught) {
       setError(sectionError(caught));
       notify({ type: "error", text: sectionError(caught) });
@@ -404,6 +435,12 @@ function OverviewPage({ notify }: { notify: (value: NotificationState | null) =>
           value={botStatus?.actualState ?? "unknown"}
           hint={botStatus?.port ? `Port ${botStatus.port}` : "Embedded supervisor"}
           tone={botStatus?.actualState === "running" ? "success" : botStatus?.actualState === "error" ? "error" : "neutral"}
+        />
+        <StatCard
+          label="Telegram bot"
+          value={telegramBotStatus?.actualState ?? "unknown"}
+          hint="Long-polling supervisor"
+          tone={telegramBotStatus?.actualState === "running" ? "success" : telegramBotStatus?.actualState === "error" ? "error" : "neutral"}
         />
       </div>
       <div className="two-column">
@@ -484,6 +521,7 @@ function NewTenantPage({ notify }: { notify: (value: NotificationState | null) =
   const [tenantId, setTenantId] = useState("");
   const [repoUrl, setRepoUrl] = useState("");
   const [dbtSubpath, setDbtSubpath] = useState("models");
+  const [provider, setProvider] = useState<"snowflake" | "bigquery">("snowflake");
   const [account, setAccount] = useState("");
   const [username, setUsername] = useState("");
   const [warehouse, setWarehouse] = useState("");
@@ -493,6 +531,9 @@ function NewTenantPage({ notify }: { notify: (value: NotificationState | null) =
   const [authType, setAuthType] = useState<"keypair" | "password">("keypair");
   const [privateKeyPath, setPrivateKeyPath] = useState("");
   const [passwordEnvVar, setPasswordEnvVar] = useState("SNOWFLAKE_PASSWORD");
+  const [bqProjectId, setBqProjectId] = useState("");
+  const [bqDataset, setBqDataset] = useState("");
+  const [bqLocation, setBqLocation] = useState("");
   const [channelInput, setChannelInput] = useState("");
   const [userInput, setUserInput] = useState("");
   const [teamInput, setTeamInput] = useState("");
@@ -541,7 +582,7 @@ function NewTenantPage({ notify }: { notify: (value: NotificationState | null) =
               void runStep("init", async () => {
                 const response = await apiRequest<{ tenantId: string; publicKey: string; message: string }>("/api/admin/wizard/tenant/init", {
                   method: "POST",
-                  body: { tenantId, repoUrl, dbtSubpath, warehouseProvider: "snowflake" }
+                  body: { tenantId, repoUrl, dbtSubpath, warehouseProvider: provider }
                 });
                 setWizardTenantId(response.tenantId);
                 return response;
@@ -560,49 +601,75 @@ function NewTenantPage({ notify }: { notify: (value: NotificationState | null) =
           {results.repo_verify ? <JsonBlock value={results.repo_verify} /> : null}
         </AppShellCard>
 
-        <AppShellCard title="3. Configure warehouse" subtitle="Store tenant-specific Snowflake connection settings">
+        <AppShellCard title="3. Configure warehouse" subtitle="Store tenant-specific warehouse connection settings">
           <div className="form-grid">
             <label>
-              Account
-              <input value={account} onChange={(event) => setAccount(event.target.value)} />
-            </label>
-            <label>
-              Username
-              <input value={username} onChange={(event) => setUsername(event.target.value)} />
-            </label>
-            <label>
-              Warehouse
-              <input value={warehouse} onChange={(event) => setWarehouse(event.target.value)} />
-            </label>
-            <label>
-              Database
-              <input value={database} onChange={(event) => setDatabase(event.target.value)} />
-            </label>
-            <label>
-              Schema
-              <input value={schema} onChange={(event) => setSchema(event.target.value)} />
-            </label>
-            <label>
-              Role
-              <input value={role} onChange={(event) => setRole(event.target.value)} placeholder="Optional" />
-            </label>
-            <label>
-              Auth type
-              <select value={authType} onChange={(event) => setAuthType(event.target.value as "keypair" | "password")}>
-                <option value="keypair">Keypair</option>
-                <option value="password">Password</option>
+              Provider
+              <select value={provider} onChange={(event) => setProvider(event.target.value as "snowflake" | "bigquery")}>
+                <option value="snowflake">Snowflake</option>
+                <option value="bigquery">BigQuery</option>
               </select>
             </label>
-            {authType === "keypair" ? (
-              <label>
-                Private key path
-                <input value={privateKeyPath} onChange={(event) => setPrivateKeyPath(event.target.value)} placeholder="/path/to/key.p8" />
-              </label>
+            {provider === "snowflake" ? (
+              <>
+                <label>
+                  Account
+                  <input value={account} onChange={(event) => setAccount(event.target.value)} />
+                </label>
+                <label>
+                  Username
+                  <input value={username} onChange={(event) => setUsername(event.target.value)} />
+                </label>
+                <label>
+                  Warehouse
+                  <input value={warehouse} onChange={(event) => setWarehouse(event.target.value)} />
+                </label>
+                <label>
+                  Database
+                  <input value={database} onChange={(event) => setDatabase(event.target.value)} />
+                </label>
+                <label>
+                  Schema
+                  <input value={schema} onChange={(event) => setSchema(event.target.value)} />
+                </label>
+                <label>
+                  Role
+                  <input value={role} onChange={(event) => setRole(event.target.value)} placeholder="Optional" />
+                </label>
+                <label>
+                  Auth type
+                  <select value={authType} onChange={(event) => setAuthType(event.target.value as "keypair" | "password")}>
+                    <option value="keypair">Keypair</option>
+                    <option value="password">Password</option>
+                  </select>
+                </label>
+                {authType === "keypair" ? (
+                  <label>
+                    Private key path
+                    <input value={privateKeyPath} onChange={(event) => setPrivateKeyPath(event.target.value)} placeholder="/path/to/key.p8" />
+                  </label>
+                ) : (
+                  <label>
+                    Password env var
+                    <input value={passwordEnvVar} onChange={(event) => setPasswordEnvVar(event.target.value)} />
+                  </label>
+                )}
+              </>
             ) : (
-              <label>
-                Password env var
-                <input value={passwordEnvVar} onChange={(event) => setPasswordEnvVar(event.target.value)} />
-              </label>
+              <>
+                <label>
+                  Project ID
+                  <input value={bqProjectId} onChange={(event) => setBqProjectId(event.target.value)} placeholder="my-gcp-project" />
+                </label>
+                <label>
+                  Dataset
+                  <input value={bqDataset} onChange={(event) => setBqDataset(event.target.value)} placeholder="Optional" />
+                </label>
+                <label>
+                  Location
+                  <input value={bqLocation} onChange={(event) => setBqLocation(event.target.value)} placeholder="Optional (e.g. US, EU)" />
+                </label>
+              </>
             )}
           </div>
           <button
@@ -612,20 +679,29 @@ function NewTenantPage({ notify }: { notify: (value: NotificationState | null) =
               void runStep("warehouse", () =>
                 apiRequest(`/api/admin/wizard/tenant/${wizardTenantId}/warehouse`, {
                   method: "PUT",
-                  body: {
-                    provider: "snowflake",
-                    snowflake: {
-                      account,
-                      username,
-                      warehouse,
-                      database,
-                      schema,
-                      role: role || undefined,
-                      authType,
-                      privateKeyPath: authType === "keypair" ? privateKeyPath || undefined : undefined,
-                      passwordEnvVar: authType === "password" ? passwordEnvVar || undefined : undefined
-                    }
-                  }
+                  body: provider === "snowflake"
+                    ? {
+                        provider: "snowflake",
+                        snowflake: {
+                          account,
+                          username,
+                          warehouse,
+                          database,
+                          schema,
+                          role: role || undefined,
+                          authType,
+                          privateKeyPath: authType === "keypair" ? privateKeyPath || undefined : undefined,
+                          passwordEnvVar: authType === "password" ? passwordEnvVar || undefined : undefined
+                        }
+                      }
+                    : {
+                        provider: "bigquery",
+                        bigquery: {
+                          projectId: bqProjectId,
+                          dataset: bqDataset || undefined,
+                          location: bqLocation || undefined
+                        }
+                      }
                 })
               )
             }
@@ -699,9 +775,15 @@ function TenantsPage({ notify }: { notify: (value: NotificationState | null) => 
   const [selectedTenantId, setSelectedTenantId] = useState<string | null>(null);
   const [credentials, setCredentials] = useState<CredentialReference | null>(null);
   const [wizardState, setWizardState] = useState<WizardStateResponse | null>(null);
+  const [warehouseConfig, setWarehouseConfig] = useState<WarehouseConfigResponse | null>(null);
   const [form, setForm] = useState({ tenantId: "", repoUrl: "", dbtSubpath: "models" });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [savingWarehouse, setSavingWarehouse] = useState(false);
+  const [whProvider, setWhProvider] = useState<"snowflake" | "bigquery">("snowflake");
+  const [whSnowflake, setWhSnowflake] = useState({ account: "", username: "", warehouse: "", database: "", schema: "", role: "", authType: "keypair" as "keypair" | "password", privateKeyPath: "", passwordEnvVar: "SNOWFLAKE_PASSWORD" });
+  const [whBigQuery, setWhBigQuery] = useState({ projectId: "", dataset: "", location: "" });
+  const [whEditing, setWhEditing] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const selectedTenant = useMemo(
@@ -732,16 +814,44 @@ function TenantsPage({ notify }: { notify: (value: NotificationState | null) => 
     if (!selectedTenantId) {
       setCredentials(null);
       setWizardState(null);
+      setWarehouseConfig(null);
+      setWhEditing(false);
       return;
     }
     void (async () => {
       try {
-        const [nextCredentials, nextWizardState] = await Promise.all([
+        const [nextCredentials, nextWizardState, nextWarehouse] = await Promise.all([
           apiRequest<CredentialReference>(`/api/admin/credentials-ref/${selectedTenantId}`),
-          apiRequest<WizardStateResponse>(`/api/admin/wizard/tenant/${selectedTenantId}/state`)
+          apiRequest<WizardStateResponse>(`/api/admin/wizard/tenant/${selectedTenantId}/state`),
+          apiRequest<WarehouseConfigResponse>(`/api/admin/tenants/${selectedTenantId}/warehouse`)
         ]);
         setCredentials(nextCredentials);
         setWizardState(nextWizardState);
+        setWarehouseConfig(nextWarehouse);
+        setWhEditing(false);
+        if (nextWarehouse.provider === "snowflake" && nextWarehouse.snowflake) {
+          setWhProvider("snowflake");
+          setWhSnowflake({
+            account: nextWarehouse.snowflake.account,
+            username: nextWarehouse.snowflake.username,
+            warehouse: nextWarehouse.snowflake.warehouse,
+            database: nextWarehouse.snowflake.database,
+            schema: nextWarehouse.snowflake.schema,
+            role: nextWarehouse.snowflake.role ?? "",
+            authType: nextWarehouse.snowflake.authType,
+            privateKeyPath: "",
+            passwordEnvVar: "SNOWFLAKE_PASSWORD"
+          });
+        } else if (nextWarehouse.provider === "bigquery" && nextWarehouse.bigquery) {
+          setWhProvider("bigquery");
+          setWhBigQuery({
+            projectId: nextWarehouse.bigquery.projectId,
+            dataset: nextWarehouse.bigquery.dataset ?? "",
+            location: nextWarehouse.bigquery.location ?? ""
+          });
+        } else {
+          setWhProvider("snowflake");
+        }
       } catch (caught) {
         notify({ type: "error", text: sectionError(caught) });
       }
@@ -785,6 +895,48 @@ function TenantsPage({ notify }: { notify: (value: NotificationState | null) => 
     }
   }
 
+  async function saveWarehouse() {
+    if (!selectedTenant) return;
+    setSavingWarehouse(true);
+    try {
+      const body = whProvider === "snowflake"
+        ? {
+            provider: "snowflake" as const,
+            snowflake: {
+              account: whSnowflake.account,
+              username: whSnowflake.username,
+              warehouse: whSnowflake.warehouse,
+              database: whSnowflake.database,
+              schema: whSnowflake.schema,
+              role: whSnowflake.role || undefined,
+              authType: whSnowflake.authType,
+              privateKeyPath: whSnowflake.authType === "keypair" ? whSnowflake.privateKeyPath || undefined : undefined,
+              passwordEnvVar: whSnowflake.authType === "password" ? whSnowflake.passwordEnvVar || undefined : undefined
+            }
+          }
+        : {
+            provider: "bigquery" as const,
+            bigquery: {
+              projectId: whBigQuery.projectId,
+              dataset: whBigQuery.dataset || undefined,
+              location: whBigQuery.location || undefined
+            }
+          };
+      await apiRequest(`/api/admin/wizard/tenant/${selectedTenant.tenantId}/warehouse`, {
+        method: "PUT",
+        body
+      });
+      notify({ type: "success", text: "Warehouse config saved." });
+      const nextWarehouse = await apiRequest<WarehouseConfigResponse>(`/api/admin/tenants/${selectedTenant.tenantId}/warehouse`);
+      setWarehouseConfig(nextWarehouse);
+      setWhEditing(false);
+    } catch (caught) {
+      notify({ type: "error", text: sectionError(caught) });
+    } finally {
+      setSavingWarehouse(false);
+    }
+  }
+
   async function refreshRepo() {
     if (!selectedTenant) return;
     try {
@@ -817,11 +969,28 @@ function TenantsPage({ notify }: { notify: (value: NotificationState | null) => 
     try {
       const result = await uploadRequest<{ message: string }>(`/api/admin/tenants/${selectedTenant.tenantId}/key-upload`, formData);
       notify({ type: "success", text: result.message });
-      const nextCredentials = await apiRequest<CredentialReference>(`/api/admin/credentials-ref/${selectedTenant.tenantId}`);
+      const [nextCredentials, nextWarehouse] = await Promise.all([
+        apiRequest<CredentialReference>(`/api/admin/credentials-ref/${selectedTenant.tenantId}`),
+        apiRequest<WarehouseConfigResponse>(`/api/admin/tenants/${selectedTenant.tenantId}/warehouse`)
+      ]);
       setCredentials(nextCredentials);
+      setWarehouseConfig(nextWarehouse);
     } catch (caught) {
       notify({ type: "error", text: sectionError(caught) });
     }
+  }
+
+  function warehouseSummary(): string {
+    if (!warehouseConfig?.provider) return "Not configured";
+    if (warehouseConfig.provider === "snowflake" && warehouseConfig.snowflake) {
+      return `${warehouseConfig.snowflake.account} / ${warehouseConfig.snowflake.database}`;
+    }
+    if (warehouseConfig.provider === "bigquery" && warehouseConfig.bigquery) {
+      return warehouseConfig.bigquery.dataset
+        ? `${warehouseConfig.bigquery.projectId} / ${warehouseConfig.bigquery.dataset}`
+        : warehouseConfig.bigquery.projectId;
+    }
+    return "Configured";
   }
 
   return (
@@ -896,25 +1065,29 @@ function TenantsPage({ notify }: { notify: (value: NotificationState | null) => 
                 <button className="secondary-button" onClick={() => void refreshRepo()}>
                   Refresh repo
                 </button>
-                <button className="secondary-button" onClick={() => fileInputRef.current?.click()}>
-                  Upload .p8 key
-                </button>
+                {warehouseConfig?.provider === "snowflake" ? (
+                  <>
+                    <button className="secondary-button" onClick={() => fileInputRef.current?.click()}>
+                      Upload .p8 key
+                    </button>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept=".p8"
+                      hidden
+                      onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        if (file) {
+                          void uploadKey(file);
+                        }
+                        event.currentTarget.value = "";
+                      }}
+                    />
+                  </>
+                ) : null}
                 <button className="danger-button" onClick={() => void deleteTenant()}>
                   Delete tenant
                 </button>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept=".p8"
-                  hidden
-                  onChange={(event) => {
-                    const file = event.target.files?.[0];
-                    if (file) {
-                      void uploadKey(file);
-                    }
-                    event.currentTarget.value = "";
-                  }}
-                />
               </div>
             ) : null}
           </AppShellCard>
@@ -923,9 +1096,14 @@ function TenantsPage({ notify }: { notify: (value: NotificationState | null) => 
             {selectedTenant ? (
               <div className="details-grid">
                 <DetailItem label="Deploy key" value={credentials?.deployKeyPath ?? "—"} />
-                <DetailItem label="Snowflake .p8" value={credentials?.snowflakeKeyPath ?? "—"} />
-                <DetailItem label="Key uploaded" value={formatDate(credentials?.snowflakeKeyUploadedAt)} />
-                <DetailItem label="Warehouse configured" value={wizardState?.hasWarehouseConfig ? "Yes" : "No"} />
+                <DetailItem label="Warehouse provider" value={warehouseConfig?.provider ?? "Not configured"} />
+                <DetailItem label="Warehouse details" value={warehouseSummary()} />
+                {warehouseConfig?.provider === "snowflake" ? (
+                  <>
+                    <DetailItem label="Snowflake .p8" value={credentials?.snowflakeKeyPath ?? "—"} />
+                    <DetailItem label="Key uploaded" value={formatDate(credentials?.snowflakeKeyUploadedAt)} />
+                  </>
+                ) : null}
                 <DetailItem label="Slack channels" value={String(wizardState?.slackChannelCount ?? 0)} />
                 <DetailItem label="Slack users" value={String(wizardState?.slackUserCount ?? 0)} />
                 <DetailItem label="Shared teams" value={String(wizardState?.slackSharedTeamCount ?? 0)} />
@@ -935,6 +1113,90 @@ function TenantsPage({ notify }: { notify: (value: NotificationState | null) => 
               <div className="empty-state">Create or select a tenant to inspect operational state.</div>
             )}
           </AppShellCard>
+
+          {selectedTenant ? (
+            <AppShellCard
+              title="Warehouse configuration"
+              subtitle="View or edit the warehouse connection for this tenant"
+              action={
+                whEditing ? (
+                  <div className="button-row">
+                    <button onClick={() => void saveWarehouse()} disabled={savingWarehouse}>
+                      {savingWarehouse ? "Saving…" : "Save"}
+                    </button>
+                    <button className="secondary-button" onClick={() => setWhEditing(false)}>Cancel</button>
+                  </div>
+                ) : (
+                  <button className="secondary-button" onClick={() => setWhEditing(true)}>Edit</button>
+                )
+              }
+            >
+              {whEditing ? (
+                <div className="form-grid">
+                  <label>
+                    Provider
+                    <select value={whProvider} onChange={(event) => setWhProvider(event.target.value as "snowflake" | "bigquery")}>
+                      <option value="snowflake">Snowflake</option>
+                      <option value="bigquery">BigQuery</option>
+                    </select>
+                  </label>
+                  {whProvider === "snowflake" ? (
+                    <>
+                      <label>Account<input value={whSnowflake.account} onChange={(e) => setWhSnowflake((c) => ({ ...c, account: e.target.value }))} /></label>
+                      <label>Username<input value={whSnowflake.username} onChange={(e) => setWhSnowflake((c) => ({ ...c, username: e.target.value }))} /></label>
+                      <label>Warehouse<input value={whSnowflake.warehouse} onChange={(e) => setWhSnowflake((c) => ({ ...c, warehouse: e.target.value }))} /></label>
+                      <label>Database<input value={whSnowflake.database} onChange={(e) => setWhSnowflake((c) => ({ ...c, database: e.target.value }))} /></label>
+                      <label>Schema<input value={whSnowflake.schema} onChange={(e) => setWhSnowflake((c) => ({ ...c, schema: e.target.value }))} /></label>
+                      <label>Role<input value={whSnowflake.role} onChange={(e) => setWhSnowflake((c) => ({ ...c, role: e.target.value }))} placeholder="Optional" /></label>
+                      <label>
+                        Auth type
+                        <select value={whSnowflake.authType} onChange={(e) => setWhSnowflake((c) => ({ ...c, authType: e.target.value as "keypair" | "password" }))}>
+                          <option value="keypair">Keypair</option>
+                          <option value="password">Password</option>
+                        </select>
+                      </label>
+                      {whSnowflake.authType === "keypair" ? (
+                        <label>Private key path<input value={whSnowflake.privateKeyPath} onChange={(e) => setWhSnowflake((c) => ({ ...c, privateKeyPath: e.target.value }))} placeholder="/path/to/key.p8" /></label>
+                      ) : (
+                        <label>Password env var<input value={whSnowflake.passwordEnvVar} onChange={(e) => setWhSnowflake((c) => ({ ...c, passwordEnvVar: e.target.value }))} /></label>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      <label>Project ID<input value={whBigQuery.projectId} onChange={(e) => setWhBigQuery((c) => ({ ...c, projectId: e.target.value }))} placeholder="my-gcp-project" /></label>
+                      <label>Dataset<input value={whBigQuery.dataset} onChange={(e) => setWhBigQuery((c) => ({ ...c, dataset: e.target.value }))} placeholder="Optional" /></label>
+                      <label>Location<input value={whBigQuery.location} onChange={(e) => setWhBigQuery((c) => ({ ...c, location: e.target.value }))} placeholder="Optional (e.g. US, EU)" /></label>
+                    </>
+                  )}
+                </div>
+              ) : warehouseConfig?.provider ? (
+                <div className="details-grid">
+                  <DetailItem label="Provider" value={warehouseConfig.provider} />
+                  {warehouseConfig.provider === "snowflake" && warehouseConfig.snowflake ? (
+                    <>
+                      <DetailItem label="Account" value={warehouseConfig.snowflake.account} />
+                      <DetailItem label="Username" value={warehouseConfig.snowflake.username} />
+                      <DetailItem label="Warehouse" value={warehouseConfig.snowflake.warehouse} />
+                      <DetailItem label="Database" value={warehouseConfig.snowflake.database} />
+                      <DetailItem label="Schema" value={warehouseConfig.snowflake.schema} />
+                      <DetailItem label="Role" value={warehouseConfig.snowflake.role ?? "—"} />
+                      <DetailItem label="Auth type" value={warehouseConfig.snowflake.authType} />
+                    </>
+                  ) : null}
+                  {warehouseConfig.provider === "bigquery" && warehouseConfig.bigquery ? (
+                    <>
+                      <DetailItem label="Project ID" value={warehouseConfig.bigquery.projectId} />
+                      <DetailItem label="Dataset" value={warehouseConfig.bigquery.dataset ?? "—"} />
+                      <DetailItem label="Location" value={warehouseConfig.bigquery.location ?? "—"} />
+                    </>
+                  ) : null}
+                  {warehouseConfig.updatedAt ? <DetailItem label="Updated" value={formatDate(warehouseConfig.updatedAt)} /> : null}
+                </div>
+              ) : (
+                <div className="empty-state">No warehouse configured. Click Edit to set one up.</div>
+              )}
+            </AppShellCard>
+          ) : null}
         </div>
       </div>
     </div>
@@ -1189,6 +1451,190 @@ function SlackBotPage({ notify }: { notify: (value: NotificationState | null) =>
               ))}
             </div>
           )}
+        </AppShellCard>
+      </div>
+    </div>
+  );
+}
+
+function TelegramBotPage({ notify }: { notify: (value: NotificationState | null) => void }): ReactElement {
+  const [mappings, setMappings] = useState<TelegramMapping[]>([]);
+  const [tenants, setTenants] = useState<TenantRecord[]>([]);
+  const [botStatus, setBotStatus] = useState<BotStatus | null>(null);
+  const [botEvents, setBotEvents] = useState<BotEvent[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [chatId, setChatId] = useState("");
+  const [tenantId, setTenantId] = useState("");
+
+  const loadData = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [nextMappings, nextTenants, nextStatus, nextEvents] = await Promise.all([
+        apiRequest<TelegramMapping[]>("/api/admin/telegram-mappings"),
+        apiRequest<TenantRecord[]>("/api/admin/tenants"),
+        apiRequest<BotStatus>("/api/admin/telegram-bot/status"),
+        apiRequest<BotEvent[]>("/api/admin/telegram-bot/events?limit=40")
+      ]);
+      setMappings(nextMappings);
+      setTenants(nextTenants);
+      setBotStatus(nextStatus);
+      setBotEvents(nextEvents);
+    } catch (caught) {
+      notify({ type: "error", text: sectionError(caught) });
+    } finally {
+      setLoading(false);
+    }
+  }, [notify]);
+
+  useEffect(() => {
+    void loadData();
+  }, [loadData]);
+
+  async function invokeBot(action: "start" | "stop" | "restart") {
+    try {
+      const result = await apiRequest<BotStatus>(`/api/admin/telegram-bot/${action}`, {
+        method: "POST",
+        body: {}
+      });
+      setBotStatus(result);
+      notify({ type: "success", text: `Telegram bot ${action} requested.` });
+      await loadData();
+    } catch (caught) {
+      notify({ type: "error", text: sectionError(caught) });
+    }
+  }
+
+  async function addMapping() {
+    if (!chatId || !tenantId) return;
+    try {
+      await apiRequest(`/api/admin/telegram-mappings/${chatId}`, {
+        method: "PUT",
+        body: { tenantId }
+      });
+      notify({ type: "success", text: `Mapped chat ${chatId} to tenant ${tenantId}.` });
+      setChatId("");
+      setTenantId("");
+      await loadData();
+    } catch (caught) {
+      notify({ type: "error", text: sectionError(caught) });
+    }
+  }
+
+  async function deleteMapping(id: string) {
+    try {
+      await apiRequest(`/api/admin/telegram-mappings/${id}`, { method: "DELETE" });
+      notify({ type: "success", text: "Mapping deleted." });
+      await loadData();
+    } catch (caught) {
+      notify({ type: "error", text: sectionError(caught) });
+    }
+  }
+
+  return (
+    <div className="page-grid">
+      <PageHeader
+        title="Telegram bot"
+        subtitle="Control the Telegram bot lifecycle, manage chat-to-tenant routing, and inspect operational events."
+        actions={
+          <button className="secondary-button" onClick={() => void loadData()}>
+            Refresh
+          </button>
+        }
+      />
+      <div className="two-column">
+        <AppShellCard title="Bot status" subtitle="Current desired/actual runtime state and recent lifecycle timestamps">
+          {loading || !botStatus ? (
+            <div className="muted">Loading…</div>
+          ) : (
+            <>
+              <div className="details-grid">
+                <DetailItem label="Bot name" value={botStatus.botName} />
+                <DetailItem label="Desired state" value={botStatus.desiredState} />
+                <DetailItem label="Actual state" value={botStatus.actualState} />
+                <DetailItem label="Last started" value={formatDate(botStatus.lastStartedAt)} />
+                <DetailItem label="Last stopped" value={formatDate(botStatus.lastStoppedAt)} />
+                <DetailItem label="Last error" value={formatDate(botStatus.lastErrorAt)} />
+                <DetailItem label="Error message" value={botStatus.lastErrorMessage ?? "—"} multiline />
+              </div>
+              <div className="button-row">
+                <button onClick={() => void invokeBot("start")}>Start</button>
+                <button className="secondary-button" onClick={() => void invokeBot("restart")}>
+                  Restart
+                </button>
+                <button className="danger-button" onClick={() => void invokeBot("stop")}>
+                  Stop
+                </button>
+              </div>
+            </>
+          )}
+        </AppShellCard>
+
+        <AppShellCard title="Recent bot events" subtitle="Lifecycle and processing events emitted by the Telegram bot supervisor">
+          {loading ? (
+            <div className="muted">Loading…</div>
+          ) : botEvents.length === 0 ? (
+            <div className="empty-state">No events recorded yet.</div>
+          ) : (
+            <div className="stack">
+              {botEvents.map((event) => (
+                <div key={event.id} className="turn-card">
+                  <div className="turn-header">
+                    <div>
+                      <strong>{event.message}</strong>
+                      <div className="muted">
+                        {event.eventType} · {formatDate(event.createdAt)}
+                      </div>
+                    </div>
+                    <StatusBadge label={event.level} tone={event.level === "error" ? "error" : event.level === "warn" ? "warning" : "success"} />
+                  </div>
+                  {event.metadata ? <JsonBlock value={event.metadata} /> : null}
+                </div>
+              ))}
+            </div>
+          )}
+        </AppShellCard>
+      </div>
+      <div className="two-column">
+        <AppShellCard title="Chat-to-tenant mappings" subtitle="Route Telegram chats to specific tenants">
+          <div className="filters-row">
+            <input placeholder="Chat ID" value={chatId} onChange={(event) => setChatId(event.target.value)} />
+            <select value={tenantId} onChange={(event) => setTenantId(event.target.value)}>
+              <option value="">Select tenant…</option>
+              {tenants.map((tenant) => (
+                <option key={tenant.tenantId} value={tenant.tenantId}>{tenant.tenantId}</option>
+              ))}
+            </select>
+            <button className="secondary-button" onClick={() => void addMapping()} disabled={!chatId || !tenantId}>
+              Add mapping
+            </button>
+          </div>
+          {loading ? (
+            <div className="muted">Loading…</div>
+          ) : mappings.length === 0 ? (
+            <div className="empty-state">No Telegram chat mappings yet.</div>
+          ) : (
+            <div className="list-stack">
+              {mappings.map((mapping) => (
+                <div key={mapping.chatId} className="list-row">
+                  <div>
+                    <strong>{mapping.chatId}</strong>
+                    <div className="muted">{mapping.tenantId}{mapping.source ? ` · ${mapping.source}` : ""} · {formatDate(mapping.updatedAt)}</div>
+                  </div>
+                  <button className="danger-button small" onClick={() => void deleteMapping(mapping.chatId)}>
+                    Delete
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </AppShellCard>
+
+        <AppShellCard title="Configuration reference" subtitle="Environment variables required for the Telegram bot">
+          <div className="details-grid">
+            <DetailItem label="TELEGRAM_BOT_TOKEN" value="Bot token from @BotFather (required)" />
+            <DetailItem label="TELEGRAM_DEFAULT_TENANT_ID" value="Fallback tenant for unmapped chats (optional)" />
+            <DetailItem label="TELEGRAM_DEFAULT_PROFILE_NAME" value="Agent profile name (default: 'default')" />
+          </div>
         </AppShellCard>
       </div>
     </div>

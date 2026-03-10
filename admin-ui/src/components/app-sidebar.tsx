@@ -36,6 +36,7 @@ export function AppSidebar({ username, method, onLogout }: AppSidebarProps) {
           <NavItem to="/tenants">Tenants</NavItem>
           <NavItem to="/conversations">Conversations</NavItem>
           <NavItem to="/slack-bot">Slack Bot</NavItem>
+          <NavItem to="/telegram-bot">Telegram Bot</NavItem>
           <NavItem to="/settings">Settings</NavItem>
         </SidebarMenu>
       </SidebarContent>
