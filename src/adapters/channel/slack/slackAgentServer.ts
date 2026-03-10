@@ -374,9 +374,19 @@ export async function startSlackAgentServer(options: SlackAgentServerOptions): P
           tenantId,
           profileName,
           conversationId,
-          llmModel: options.llmModel
+          llmModel: options.llmModel,
+          origin: {
+            source: "slack",
+            teamId: input.teamId ?? undefined,
+            channelId: input.channel,
+            threadTs: input.threadTs,
+            userId: input.userId ?? undefined
+          }
         },
-        promptText
+        input.text,
+        {
+          promptText
+        }
       );
 
       await input.client.chat.postMessage({

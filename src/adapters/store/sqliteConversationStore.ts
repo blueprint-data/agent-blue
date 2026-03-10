@@ -9,7 +9,16 @@ import type {
   TenantKeyMetadata,
   TenantWarehouseConfig
 } from "../../core/interfaces.js";
-import { AgentContext, AgentProfile, ConversationMessage } from "../../core/types.js";
+import {
+  AdminConversationDetail,
+  AdminConversationSummary,
+  AgentContext,
+  AgentExecutionTurn,
+  AgentProfile,
+  ConversationMessage,
+  ConversationOrigin,
+  ConversationSource
+} from "../../core/types.js";
 import { createId } from "../../utils/id.js";
 
 const DEFAULT_SOUL_PROMPT = [
@@ -137,6 +146,34 @@ export class SqliteConversationStore implements ConversationStore {
         last_seen_at TEXT NOT NULL,
         user_agent TEXT,
         ip_address TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS conversation_origins (
+        conversation_id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        source TEXT NOT NULL,
+        team_id TEXT,
+        channel_id TEXT,
+        thread_ts TEXT,
+        user_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS agent_execution_turns (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        source TEXT NOT NULL,
+        raw_user_text TEXT NOT NULL,
+        prompt_text TEXT NOT NULL,
+        assistant_text TEXT,
+        status TEXT NOT NULL,
+        error_message TEXT,
+        debug_json TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        completed_at TEXT
       );
     `);
   }
@@ -671,6 +708,297 @@ export class SqliteConversationStore implements ConversationStore {
            updated_at = excluded.updated_at`
       )
       .run(input.tenantId, input.provider, configJson);
+  }
+
+  upsertConversationOrigin(conversationId: string, tenantId: string, origin: ConversationOrigin): void {
+    this.db
+      .prepare(
+        `INSERT INTO conversation_origins
+         (conversation_id, tenant_id, source, team_id, channel_id, thread_ts, user_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+         ON CONFLICT(conversation_id) DO UPDATE SET
+           tenant_id = excluded.tenant_id,
+           source = excluded.source,
+           team_id = excluded.team_id,
+           channel_id = excluded.channel_id,
+           thread_ts = excluded.thread_ts,
+           user_id = excluded.user_id,
+           updated_at = excluded.updated_at`
+      )
+      .run(
+        conversationId,
+        tenantId,
+        origin.source,
+        origin.teamId ?? null,
+        origin.channelId ?? null,
+        origin.threadTs ?? null,
+        origin.userId ?? null
+      );
+  }
+
+  getConversationOrigin(conversationId: string): ConversationOrigin | null {
+    const row = this.db
+      .prepare(
+        `SELECT source, team_id, channel_id, thread_ts, user_id
+         FROM conversation_origins
+         WHERE conversation_id = ?`
+      )
+      .get(conversationId) as
+      | {
+          source: ConversationSource;
+          team_id: string | null;
+          channel_id: string | null;
+          thread_ts: string | null;
+          user_id: string | null;
+        }
+      | undefined;
+    if (!row) {
+      return null;
+    }
+    return {
+      source: row.source,
+      teamId: row.team_id ?? undefined,
+      channelId: row.channel_id ?? undefined,
+      threadTs: row.thread_ts ?? undefined,
+      userId: row.user_id ?? undefined
+    };
+  }
+
+  createExecutionTurn(input: Omit<AgentExecutionTurn, "id" | "createdAt" | "updatedAt">): AgentExecutionTurn {
+    const id = createId("turn");
+    const createdAt = new Date().toISOString();
+    const updatedAt = createdAt;
+    const completedAt = input.status === "running" ? undefined : (input.completedAt ?? createdAt);
+    this.db
+      .prepare(
+        `INSERT INTO agent_execution_turns
+         (id, tenant_id, conversation_id, source, raw_user_text, prompt_text, assistant_text, status, error_message, debug_json, created_at, updated_at, completed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        id,
+        input.tenantId,
+        input.conversationId,
+        input.source,
+        input.rawUserText,
+        input.promptText,
+        input.assistantText ?? null,
+        input.status,
+        input.errorMessage ?? null,
+        input.debug ? JSON.stringify(input.debug) : null,
+        createdAt,
+        updatedAt,
+        completedAt ?? null
+      );
+    return {
+      id,
+      tenantId: input.tenantId,
+      conversationId: input.conversationId,
+      source: input.source,
+      rawUserText: input.rawUserText,
+      promptText: input.promptText,
+      assistantText: input.assistantText,
+      status: input.status,
+      errorMessage: input.errorMessage,
+      debug: input.debug,
+      createdAt,
+      updatedAt,
+      completedAt
+    };
+  }
+
+  completeExecutionTurn(input: {
+    turnId: string;
+    status: "completed" | "failed";
+    assistantText?: string;
+    errorMessage?: string;
+    debug?: Record<string, unknown>;
+    completedAt?: string;
+  }): void {
+    const updatedAt = input.completedAt ?? new Date().toISOString();
+    this.db
+      .prepare(
+        `UPDATE agent_execution_turns
+         SET assistant_text = COALESCE(?, assistant_text),
+             status = ?,
+             error_message = ?,
+             debug_json = ?,
+             updated_at = ?,
+             completed_at = ?
+         WHERE id = ?`
+      )
+      .run(
+        input.assistantText ?? null,
+        input.status,
+        input.errorMessage ?? null,
+        input.debug ? JSON.stringify(input.debug) : null,
+        updatedAt,
+        updatedAt,
+        input.turnId
+      );
+  }
+
+  getExecutionTurn(turnId: string): AgentExecutionTurn | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, tenant_id, conversation_id, source, raw_user_text, prompt_text, assistant_text, status,
+                error_message, debug_json, created_at, updated_at, completed_at
+         FROM agent_execution_turns
+         WHERE id = ?`
+      )
+      .get(turnId) as
+      | {
+          id: string;
+          tenant_id: string;
+          conversation_id: string;
+          source: ConversationSource;
+          raw_user_text: string;
+          prompt_text: string;
+          assistant_text: string | null;
+          status: AgentExecutionTurn["status"];
+          error_message: string | null;
+          debug_json: string | null;
+          created_at: string;
+          updated_at: string;
+          completed_at: string | null;
+        }
+      | undefined;
+    if (!row) {
+      return null;
+    }
+    return {
+      id: row.id,
+      tenantId: row.tenant_id,
+      conversationId: row.conversation_id,
+      source: row.source,
+      rawUserText: row.raw_user_text,
+      promptText: row.prompt_text,
+      assistantText: row.assistant_text ?? undefined,
+      status: row.status,
+      errorMessage: row.error_message ?? undefined,
+      debug: row.debug_json ? (JSON.parse(row.debug_json) as Record<string, unknown>) : undefined,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      completedAt: row.completed_at ?? undefined
+    };
+  }
+
+  listExecutionTurns(conversationId: string): AgentExecutionTurn[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id
+         FROM agent_execution_turns
+         WHERE conversation_id = ?
+         ORDER BY created_at ASC`
+      )
+      .all(conversationId) as Array<{ id: string }>;
+    return rows
+      .map((row) => this.getExecutionTurn(row.id))
+      .filter((turn): turn is AgentExecutionTurn => turn !== null);
+  }
+
+  listAdminConversations(input?: {
+    tenantId?: string;
+    source?: ConversationSource;
+    search?: string;
+    limit?: number;
+  }): AdminConversationSummary[] {
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    if (input?.tenantId) {
+      conditions.push("c.tenant_id = ?");
+      params.push(input.tenantId);
+    }
+    if (input?.source) {
+      conditions.push("co.source = ?");
+      params.push(input.source);
+    }
+    if (input?.search) {
+      conditions.push("(latest_turn.raw_user_text LIKE ? OR latest_turn.assistant_text LIKE ?)");
+      const like = `%${input.search}%`;
+      params.push(like, like);
+    }
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    const limit = input?.limit ?? 100;
+    const rows = this.db
+      .prepare(
+        `SELECT c.id AS conversation_id,
+                c.tenant_id,
+                c.profile_name,
+                c.created_at,
+                co.source,
+                co.team_id,
+                co.channel_id,
+                co.thread_ts,
+                co.user_id,
+                COALESCE(MAX(m.created_at), c.created_at) AS last_message_at,
+                COUNT(m.id) AS message_count,
+                latest_turn.status AS latest_turn_status,
+                latest_turn.raw_user_text AS latest_user_text,
+                latest_turn.assistant_text AS latest_assistant_text
+         FROM conversations c
+         LEFT JOIN messages m
+           ON m.conversation_id = c.id
+         LEFT JOIN conversation_origins co
+           ON co.conversation_id = c.id
+         LEFT JOIN agent_execution_turns latest_turn
+           ON latest_turn.id = (
+             SELECT t.id
+             FROM agent_execution_turns t
+             WHERE t.conversation_id = c.id
+             ORDER BY t.created_at DESC
+             LIMIT 1
+           )
+         ${whereClause}
+         GROUP BY c.id, c.tenant_id, c.profile_name, c.created_at, co.source, co.team_id, co.channel_id, co.thread_ts, co.user_id,
+                  latest_turn.status, latest_turn.raw_user_text, latest_turn.assistant_text
+         ORDER BY last_message_at DESC
+         LIMIT ?`
+      )
+      .all(...params, limit) as Array<{
+      conversation_id: string;
+      tenant_id: string;
+      profile_name: string;
+      created_at: string;
+      source: ConversationSource | null;
+      team_id: string | null;
+      channel_id: string | null;
+      thread_ts: string | null;
+      user_id: string | null;
+      last_message_at: string;
+      message_count: number;
+      latest_turn_status: AgentExecutionTurn["status"] | null;
+      latest_user_text: string | null;
+      latest_assistant_text: string | null;
+    }>;
+    return rows.map((row) => ({
+      conversationId: row.conversation_id,
+      tenantId: row.tenant_id,
+      profileName: row.profile_name,
+      source: row.source ?? undefined,
+      teamId: row.team_id ?? undefined,
+      channelId: row.channel_id ?? undefined,
+      threadTs: row.thread_ts ?? undefined,
+      userId: row.user_id ?? undefined,
+      createdAt: row.created_at,
+      lastMessageAt: row.last_message_at,
+      messageCount: row.message_count,
+      latestTurnStatus: row.latest_turn_status ?? undefined,
+      latestUserText: row.latest_user_text ?? undefined,
+      latestAssistantText: row.latest_assistant_text ?? undefined
+    }));
+  }
+
+  getAdminConversationDetail(conversationId: string): AdminConversationDetail | null {
+    const summary = this.listAdminConversations({ limit: 1000 }).find((entry) => entry.conversationId === conversationId);
+    if (!summary) {
+      return null;
+    }
+    return {
+      summary,
+      messages: this.getMessages(conversationId, 500),
+      executionTurns: this.listExecutionTurns(conversationId)
+    };
   }
 
   createAdminSession(input: Omit<AdminSession, "lastSeenAt"> & { lastSeenAt?: string }): void {

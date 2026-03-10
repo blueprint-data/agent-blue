@@ -1,4 +1,15 @@
-import { AgentContext, AgentProfile, ConversationMessage, DbtModelInfo, QueryResult } from "./types.js";
+import {
+  AdminConversationDetail,
+  AdminConversationSummary,
+  AgentContext,
+  AgentExecutionTurn,
+  AgentProfile,
+  ConversationMessage,
+  ConversationOrigin,
+  ConversationSource,
+  DbtModelInfo,
+  QueryResult
+} from "./types.js";
 
 export interface LlmMessage {
   role: "system" | "user" | "assistant";
@@ -137,6 +148,26 @@ export interface ConversationStore {
   getTenantKeyMetadata(tenantId: string): TenantKeyMetadata | null;
   upsertTenantKeyMetadata(input: TenantKeyMetadata): void;
   deleteTenantKeyMetadata(tenantId: string): void;
+  upsertConversationOrigin(conversationId: string, tenantId: string, origin: ConversationOrigin): void;
+  getConversationOrigin(conversationId: string): ConversationOrigin | null;
+  createExecutionTurn(input: Omit<AgentExecutionTurn, "id" | "createdAt" | "updatedAt">): AgentExecutionTurn;
+  completeExecutionTurn(input: {
+    turnId: string;
+    status: "completed" | "failed";
+    assistantText?: string;
+    errorMessage?: string;
+    debug?: Record<string, unknown>;
+    completedAt?: string;
+  }): void;
+  getExecutionTurn(turnId: string): AgentExecutionTurn | null;
+  listExecutionTurns(conversationId: string): AgentExecutionTurn[];
+  listAdminConversations(input?: {
+    tenantId?: string;
+    source?: ConversationSource;
+    search?: string;
+    limit?: number;
+  }): AdminConversationSummary[];
+  getAdminConversationDetail(conversationId: string): AdminConversationDetail | null;
   createAdminSession(input: Omit<AdminSession, "lastSeenAt"> & { lastSeenAt?: string }): void;
   getAdminSession(sessionId: string): AdminSession | null;
   touchAdminSession(sessionId: string, lastSeenAt: string, expiresAt?: string): void;

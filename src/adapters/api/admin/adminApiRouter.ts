@@ -412,6 +412,52 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
     }
   });
 
+  router.get("/conversations", (req: Request, res: Response) => {
+    try {
+      const tenantId = typeof req.query.tenantId === "string" ? req.query.tenantId : undefined;
+      const source = typeof req.query.source === "string" ? req.query.source : undefined;
+      const search = typeof req.query.search === "string" ? req.query.search : undefined;
+      const limitRaw = typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : 100;
+      const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 500) : 100;
+      res.json(
+        store.listAdminConversations({
+          tenantId,
+          source: source as "cli" | "slack" | "admin" | undefined,
+          search,
+          limit
+        })
+      );
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.get("/conversations/:conversationId", (req: Request, res: Response) => {
+    try {
+      const detail = store.getAdminConversationDetail(param(req, "conversationId"));
+      if (!detail) {
+        res.status(404).json({ error: "Conversation not found" });
+        return;
+      }
+      res.json(detail);
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.get("/execution-turns/:turnId", (req: Request, res: Response) => {
+    try {
+      const turn = store.getExecutionTurn(param(req, "turnId"));
+      if (!turn) {
+        res.status(404).json({ error: "Execution turn not found" });
+        return;
+      }
+      res.json(turn);
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
   router.post("/wizard/tenant/init", (req: Request, res: Response) => {
     try {
       const { tenantId, repoUrl, dbtSubpath = "models", warehouseProvider = "snowflake" } = req.body as {

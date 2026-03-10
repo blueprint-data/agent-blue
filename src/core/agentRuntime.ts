@@ -129,6 +129,10 @@ function inferSchemaHintFromModelPath(relativePath: string, fallbackSchema: stri
 
 export type WarehouseResolver = WarehouseAdapter | ((tenantId: string) => WarehouseAdapter);
 
+export interface RuntimeRespondOptions {
+  promptText?: string;
+}
+
 export class AnalyticsAgentRuntime {
   constructor(
     private readonly llm: LlmProvider,
@@ -143,8 +147,10 @@ export class AnalyticsAgentRuntime {
     return typeof this.warehouse === "function" ? this.warehouse(tenantId) : this.warehouse;
   }
 
-  async respond(context: AgentContext, userText: string): Promise<AgentResponse> {
+  async respond(context: AgentContext, userText: string, options: RuntimeRespondOptions = {}): Promise<AgentResponse> {
     const startedAt = Date.now();
+    const persistedUserText = userText;
+    const effectivePromptText = options.promptText?.trim() ? options.promptText : persistedUserText;
     const timings: Record<string, number> = {};
     const maxToolSteps = 8;
     const plannerAttempts: Array<{ step: number; raw?: string; parseError?: string; plan?: Record<string, unknown> }> = [];
@@ -196,59 +202,71 @@ export class AnalyticsAgentRuntime {
     };
 
     this.store.createConversation(context);
+    if (context.origin) {
+      this.store.upsertConversationOrigin(context.conversationId, context.tenantId, context.origin);
+    }
     this.store.addMessage({
       tenantId: context.tenantId,
       conversationId: context.conversationId,
       role: "user",
-      content: userText
+      content: persistedUserText
+    });
+    const executionTurn = this.store.createExecutionTurn({
+      tenantId: context.tenantId,
+      conversationId: context.conversationId,
+      source: context.origin?.source ?? "cli",
+      rawUserText: persistedUserText,
+      promptText: effectivePromptText,
+      status: "running"
     });
 
-    const profile = this.store.getOrCreateProfile(context.tenantId, context.profileName);
-    timings.profileMs = Date.now() - startedAt;
-    const history = this.store.getMessages(context.conversationId, 12);
-    const tenantRepo = this.store.getTenantRepo(context.tenantId);
-    const tenantWhConfig = this.store.getTenantWarehouseConfig(context.tenantId);
-    const snowflakeDatabase =
-      tenantWhConfig?.snowflake?.database?.trim() ?? process.env.SNOWFLAKE_DATABASE?.trim() ?? "";
-    const snowflakeSchema =
-      tenantWhConfig?.snowflake?.schema?.trim() ?? process.env.SNOWFLAKE_SCHEMA?.trim() ?? "";
-    const warehouse = this.resolveWarehouse(context.tenantId);
-    const llmModel = context.llmModel?.trim() || process.env.LLM_MODEL || "openai/gpt-4o-mini";
-    const now = new Date();
-    const currentDateIso = now.toISOString();
-    const currentDate = currentDateIso.slice(0, 10);
-    const hasWarehouseDefaults = snowflakeDatabase.length > 0 && snowflakeSchema.length > 0;
-    const fqPrefix = hasWarehouseDefaults
-      ? `${quoteSqlIdent(snowflakeDatabase)}.${quoteSqlIdent(snowflakeSchema)}`
-      : "";
-    const dbtModels = await measure("dbtModelsMs", async () => {
-      try {
-        return await runTool(
-          "dbt.listModels",
-          { tenantId: context.tenantId },
-          async () => this.dbtRepo.listModels(context.tenantId),
-          (models) => ({ modelCount: models.length })
-        );
-      } catch {
-        return [];
-      }
-    });
-    const schemaCandidates = Array.from(
-      new Set(
-        [snowflakeSchema.toUpperCase(), "INT", "MARTS", "STAGING", "CORE", "PUBLIC"].filter(
-          (value) => value.length > 0
+    try {
+      const profile = this.store.getOrCreateProfile(context.tenantId, context.profileName);
+      timings.profileMs = Date.now() - startedAt;
+      const history = this.store.getMessages(context.conversationId, 12);
+      const tenantRepo = this.store.getTenantRepo(context.tenantId);
+      const tenantWhConfig = this.store.getTenantWarehouseConfig(context.tenantId);
+      const snowflakeDatabase =
+        tenantWhConfig?.snowflake?.database?.trim() ?? process.env.SNOWFLAKE_DATABASE?.trim() ?? "";
+      const snowflakeSchema =
+        tenantWhConfig?.snowflake?.schema?.trim() ?? process.env.SNOWFLAKE_SCHEMA?.trim() ?? "";
+      const warehouse = this.resolveWarehouse(context.tenantId);
+      const llmModel = context.llmModel?.trim() || process.env.LLM_MODEL || "openai/gpt-4o-mini";
+      const now = new Date();
+      const currentDateIso = now.toISOString();
+      const currentDate = currentDateIso.slice(0, 10);
+      const hasWarehouseDefaults = snowflakeDatabase.length > 0 && snowflakeSchema.length > 0;
+      const fqPrefix = hasWarehouseDefaults
+        ? `${quoteSqlIdent(snowflakeDatabase)}.${quoteSqlIdent(snowflakeSchema)}`
+        : "";
+      const dbtModels = await measure("dbtModelsMs", async () => {
+        try {
+          return await runTool(
+            "dbt.listModels",
+            { tenantId: context.tenantId },
+            async () => this.dbtRepo.listModels(context.tenantId),
+            (models) => ({ modelCount: models.length })
+          );
+        } catch {
+          return [];
+        }
+      });
+      const schemaCandidates = Array.from(
+        new Set(
+          [snowflakeSchema.toUpperCase(), "INT", "MARTS", "STAGING", "CORE", "PUBLIC"].filter(
+            (value) => value.length > 0
+          )
         )
-      )
-    );
+      );
 
-    const historyMessages: LlmMessage[] = history
-      .filter((m) => m.role !== "tool" && m.role !== "system")
-      .map((m): LlmMessage => ({
-        role: m.role === "user" ? "user" : "assistant",
-        content: m.content
-      }));
+      const historyMessages: LlmMessage[] = history
+        .filter((m) => m.role !== "tool" && m.role !== "system")
+        .map((m): LlmMessage => ({
+          role: m.role === "user" ? "user" : "assistant",
+          content: m.content
+        }));
 
-    const baseMessages = (): LlmMessage[] => [
+      const baseMessages = (): LlmMessage[] => [
       {
         role: "system",
         content: [
@@ -333,17 +351,41 @@ export class AnalyticsAgentRuntime {
       ...historyMessages,
       {
         role: "user",
-        content: userText
+        content: effectivePromptText
       }
-    ];
+      ];
 
-    const loopMessages: LlmMessage[] = [];
-    let finalPlan: z.infer<typeof toolDecisionSchema> | undefined;
-    let finalSql: string | undefined;
-    let lastSuccessfulQuery: { sql: string; result: QueryResult } | undefined;
-    let latestChartArtifact: AgentArtifact | undefined;
+      const finalizeSuccess = (
+        text: string,
+        debug: Record<string, unknown>,
+        artifacts?: AgentArtifact[]
+      ): AgentResponse => {
+        this.store.addMessage({
+          tenantId: context.tenantId,
+          conversationId: context.conversationId,
+          role: "assistant",
+          content: text
+        });
+        this.store.completeExecutionTurn({
+          turnId: executionTurn.id,
+          status: "completed",
+          assistantText: text,
+          debug
+        });
+        return {
+          text,
+          artifacts,
+          debug
+        };
+      };
 
-    for (let step = 1; step <= maxToolSteps; step += 1) {
+      const loopMessages: LlmMessage[] = [];
+      let finalPlan: z.infer<typeof toolDecisionSchema> | undefined;
+      let finalSql: string | undefined;
+      let lastSuccessfulQuery: { sql: string; result: QueryResult } | undefined;
+      let latestChartArtifact: AgentArtifact | undefined;
+
+      for (let step = 1; step <= maxToolSteps; step += 1) {
       const planRaw = await measure(`plannerMs_step${step}`, async () =>
         this.llm.generateText({
           model: llmModel,
@@ -369,24 +411,18 @@ export class AnalyticsAgentRuntime {
 
       if (plan.type === "final_answer") {
         const text = plan.answer?.trim() ? plan.answer : "I need more details to answer that.";
-        this.store.addMessage({
-          tenantId: context.tenantId,
-          conversationId: context.conversationId,
-          role: "assistant",
-          content: text
-        });
-        return {
+        return finalizeSuccess(
           text,
-          artifacts: latestChartArtifact ? [latestChartArtifact] : undefined,
-          debug: {
+          {
             plan,
             plannerAttempts,
             sql: finalSql,
             toolCalls,
             mode: "direct_tool_loop",
             timings: { ...timings, totalMs: Date.now() - startedAt }
-          }
-        };
+          },
+          latestChartArtifact ? [latestChartArtifact] : undefined
+        );
       }
 
       if (plan.type !== "tool_call" || !plan.tool) {
@@ -560,94 +596,95 @@ export class AnalyticsAgentRuntime {
           content: `Tool error (${plan.tool}): ${(error as Error).message}. Choose a corrected tool call or final_answer.`
         });
       }
-    }
-
-    if (lastSuccessfulQuery) {
-      let text = "";
-      try {
-        text = await this.llm.generateText({
-          model: llmModel,
-          temperature: 0.1,
-          messages: [
-            {
-              role: "system",
-              content: [
-                "Identity and scope (highest priority):",
-                "- You are Agent Blue.",
-                "- Your owner is Blueprintdata (https://blueprintdata.xyz/).",
-                "- Tenant context may change per request, but your identity and owner never change.",
-                "- You ONLY answer analytical questions related to data, metrics, SQL, BI, dbt models, and business performance analysis.",
-                '- If the request is non-analytical, answer exactly: "I can only help with analytical questions about data and business metrics."',
-                "",
-                profile.soulPrompt,
-                "",
-                "Answer using business language and include caveats when sample size or nulls matter."
-              ].join("\n")
-            },
-            {
-              role: "user",
-              content: [
-                `User question: ${userText}`,
-                `Executed SQL:\n${lastSuccessfulQuery.sql}`,
-                "Result JSON:",
-                asJsonBlock({
-                  columns: lastSuccessfulQuery.result.columns,
-                  rowCount: lastSuccessfulQuery.result.rowCount,
-                  rows: lastSuccessfulQuery.result.rows.slice(0, profile.maxRowsPerQuery)
-                })
-              ].join("\n\n")
-            }
-          ]
-        });
-      } catch {
-        text = `I successfully executed the query but could not fully synthesize the final narrative. Raw result: ${asJsonBlock(
-          {
-            columns: lastSuccessfulQuery.result.columns,
-            rowCount: lastSuccessfulQuery.result.rowCount,
-            rows: lastSuccessfulQuery.result.rows.slice(0, profile.maxRowsPerQuery)
-          }
-        )}`;
       }
 
-      this.store.addMessage({
-        tenantId: context.tenantId,
-        conversationId: context.conversationId,
-        role: "assistant",
-        content: text
-      });
-      return {
-        text,
-        artifacts: latestChartArtifact ? [latestChartArtifact] : undefined,
-        debug: {
+      if (lastSuccessfulQuery) {
+        let text = "";
+        try {
+          text = await this.llm.generateText({
+            model: llmModel,
+            temperature: 0.1,
+            messages: [
+              {
+                role: "system",
+                content: [
+                  "Identity and scope (highest priority):",
+                  "- You are Agent Blue.",
+                  "- Your owner is Blueprintdata (https://blueprintdata.xyz/).",
+                  "- Tenant context may change per request, but your identity and owner never change.",
+                  "- You ONLY answer analytical questions related to data, metrics, SQL, BI, dbt models, and business performance analysis.",
+                  '- If the request is non-analytical, answer exactly: "I can only help with analytical questions about data and business metrics."',
+                  "",
+                  profile.soulPrompt,
+                  "",
+                  "Answer using business language and include caveats when sample size or nulls matter."
+                ].join("\n")
+              },
+              {
+                role: "user",
+                content: [
+                  `User question: ${persistedUserText}`,
+                  `Executed SQL:\n${lastSuccessfulQuery.sql}`,
+                  "Result JSON:",
+                  asJsonBlock({
+                    columns: lastSuccessfulQuery.result.columns,
+                    rowCount: lastSuccessfulQuery.result.rowCount,
+                    rows: lastSuccessfulQuery.result.rows.slice(0, profile.maxRowsPerQuery)
+                  })
+                ].join("\n\n")
+              }
+            ]
+          });
+        } catch {
+          text = `I successfully executed the query but could not fully synthesize the final narrative. Raw result: ${asJsonBlock(
+            {
+              columns: lastSuccessfulQuery.result.columns,
+              rowCount: lastSuccessfulQuery.result.rowCount,
+              rows: lastSuccessfulQuery.result.rows.slice(0, profile.maxRowsPerQuery)
+            }
+          )}`;
+        }
+
+        return finalizeSuccess(
+          text,
+          {
+            plan: finalPlan,
+            plannerAttempts,
+            sql: lastSuccessfulQuery.sql,
+            toolCalls,
+            mode: "direct_tool_loop",
+            timings: { ...timings, totalMs: Date.now() - startedAt },
+            finalizedFromLastSuccessfulQuery: true
+          },
+          latestChartArtifact ? [latestChartArtifact] : undefined
+        );
+      }
+
+      const fallback = "I could not reach a reliable final answer after multiple tool attempts. Please try rephrasing.";
+      return finalizeSuccess(
+        fallback,
+        {
           plan: finalPlan,
           plannerAttempts,
-          sql: lastSuccessfulQuery.sql,
+          sql: finalSql,
           toolCalls,
           mode: "direct_tool_loop",
-          timings: { ...timings, totalMs: Date.now() - startedAt },
-          finalizedFromLastSuccessfulQuery: true
+          timings: { ...timings, totalMs: Date.now() - startedAt }
+        },
+        latestChartArtifact ? [latestChartArtifact] : undefined
+      );
+    } catch (error) {
+      this.store.completeExecutionTurn({
+        turnId: executionTurn.id,
+        status: "failed",
+        errorMessage: (error as Error).message,
+        debug: {
+          plannerAttempts,
+          toolCalls,
+          timings: { ...timings, totalMs: Date.now() - startedAt }
         }
-      };
+      });
+      throw error;
     }
-
-    const fallback = "I could not reach a reliable final answer after multiple tool attempts. Please try rephrasing.";
-    this.store.addMessage({
-      tenantId: context.tenantId,
-      conversationId: context.conversationId,
-      role: "assistant",
-      content: fallback
-    });
-    return {
-      text: fallback,
-      artifacts: latestChartArtifact ? [latestChartArtifact] : undefined,
-      debug: {
-        plan: finalPlan,
-        plannerAttempts,
-        sql: finalSql,
-        toolCalls,
-        mode: "direct_tool_loop",
-        timings: { ...timings, totalMs: Date.now() - startedAt }
-      }
-    };
   }
 }

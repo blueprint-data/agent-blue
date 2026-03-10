@@ -309,7 +309,10 @@ async function run(): Promise<void> {
     const verbose = args.verbose === true || env.verboseMode;
 
     if (oneShotMessage) {
-      const response = await runtime.respond({ tenantId, profileName, conversationId, llmModel }, oneShotMessage);
+      const response = await runtime.respond(
+        { tenantId, profileName, conversationId, llmModel, origin: { source: "cli" } },
+        oneShotMessage
+      );
       if (verbose) {
         output.write("\n");
         printVerboseDebug(response.debug);
@@ -338,7 +341,10 @@ async function run(): Promise<void> {
         break;
       }
       try {
-        const response = await runtime.respond({ tenantId, profileName, conversationId, llmModel }, message);
+        const response = await runtime.respond(
+          { tenantId, profileName, conversationId, llmModel, origin: { source: "cli" } },
+          message
+        );
         if (verbose) {
           output.write("\n");
           printVerboseDebug(response.debug);
@@ -386,7 +392,7 @@ async function run(): Promise<void> {
           output.write(`${warnText(`Q${questionIndex + 1}:`)} ${question}\n`);
           try {
             const response = await runtime.respond(
-              { tenantId, profileName, conversationId, llmModel },
+              { tenantId, profileName, conversationId, llmModel, origin: { source: "cli" } },
               question
             );
             const metrics = parseE2eTurnMetrics(response.text, response.debug);
