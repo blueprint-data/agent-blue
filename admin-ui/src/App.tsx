@@ -1,7 +1,9 @@
 import type { ReactElement, ReactNode } from "react";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { NavLink, Navigate, Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes } from "react-router-dom";
 import { ApiError, apiRequest, uploadRequest } from "./api";
+import { AppSidebar } from "./components/app-sidebar";
+import { SidebarInset, SidebarProvider, SidebarTrigger } from "./components/ui/sidebar";
 
 interface SessionState {
   authenticated: boolean;
@@ -284,52 +286,28 @@ function AdminShell({
   }
 
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
-        <div className="sidebar-brand">
-          <span className="eyebrow">Operator console</span>
-          <h1>Agent Blue Admin</h1>
-          <p>Secure tenant operations, Slack bot control, and execution visibility.</p>
-        </div>
-        <nav className="sidebar-nav">
-          <NavItem to="/">Overview</NavItem>
-          <NavItem to="/new-tenant">New Tenant</NavItem>
-          <NavItem to="/tenants">Tenants</NavItem>
-          <NavItem to="/conversations">Conversations</NavItem>
-          <NavItem to="/slack-bot">Slack Bot</NavItem>
-          <NavItem to="/settings">Settings</NavItem>
-        </nav>
-        <div className="sidebar-footer">
-          <div className="session-chip">
-            <span>{session.username}</span>
-            <StatusBadge label={session.method ?? "session"} tone="accent" />
-          </div>
-          <button className="secondary-button" onClick={() => void handleLogout()}>
-            Log out
-          </button>
-        </div>
-      </aside>
-      <main className="content">
-        {notification ? <div className={`banner ${notification.type}`}>{notification.text}</div> : null}
-        <Routes>
-          <Route path="/" element={<OverviewPage notify={notify} />} />
-          <Route path="/new-tenant" element={<NewTenantPage notify={notify} />} />
-          <Route path="/tenants" element={<TenantsPage notify={notify} />} />
-          <Route path="/conversations" element={<ConversationsPage notify={notify} />} />
-          <Route path="/slack-bot" element={<SlackBotPage notify={notify} />} />
-          <Route path="/settings" element={<SettingsPage notify={notify} />} />
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
-      </main>
-    </div>
-  );
-}
-
-function NavItem({ to, children }: { to: string; children: string }) {
-  return (
-    <NavLink className={({ isActive }) => `nav-link ${isActive ? "active" : ""}`} to={to} end={to === "/"}>
-      {children}
-    </NavLink>
+    <SidebarProvider>
+      <div className="app-shell">
+        <AppSidebar username={session.username} method={session.method} onLogout={() => void handleLogout()} />
+        <SidebarInset>
+          <header className="content-header">
+            <SidebarTrigger className="secondary-button" />
+          </header>
+          <main className="content">
+            {notification ? <div className={`banner ${notification.type}`}>{notification.text}</div> : null}
+            <Routes>
+              <Route path="/" element={<OverviewPage notify={notify} />} />
+              <Route path="/new-tenant" element={<NewTenantPage notify={notify} />} />
+              <Route path="/tenants" element={<TenantsPage notify={notify} />} />
+              <Route path="/conversations" element={<ConversationsPage notify={notify} />} />
+              <Route path="/slack-bot" element={<SlackBotPage notify={notify} />} />
+              <Route path="/settings" element={<SettingsPage notify={notify} />} />
+              <Route path="*" element={<Navigate to="/" replace />} />
+            </Routes>
+          </main>
+        </SidebarInset>
+      </div>
+    </SidebarProvider>
   );
 }
 

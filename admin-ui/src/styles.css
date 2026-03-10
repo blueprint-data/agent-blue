@@ -165,18 +165,38 @@ label {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 290px 1fr;
+  grid-template-columns: auto 1fr;
   min-height: 100vh;
 }
 
 .sidebar {
+  width: 290px;
   padding: 1.5rem;
   border-right: 1px solid var(--border);
   background: rgba(7, 17, 31, 0.78);
   backdrop-filter: blur(20px);
-  display: grid;
-  grid-template-rows: auto 1fr auto;
+  display: flex;
+  flex-direction: column;
   gap: 1.5rem;
+  transition: width 0.2s ease, padding 0.2s ease, border-color 0.2s ease;
+  overflow: hidden;
+}
+
+.sidebar[data-state="collapsed"] {
+  width: 0;
+  padding-left: 0;
+  padding-right: 0;
+  border-right-color: transparent;
+}
+
+.sidebar-header,
+.sidebar-content,
+.sidebar-footer {
+  min-width: 0;
+}
+
+.sidebar-content {
+  flex: 1;
 }
 
 .sidebar-brand h1 {
@@ -207,6 +227,21 @@ label {
 .sidebar-footer {
   display: grid;
   gap: 0.9rem;
+}
+
+.sidebar-inset {
+  min-width: 0;
+  display: grid;
+  grid-template-rows: auto 1fr;
+}
+
+.content-header {
+  padding: 1rem 2rem 0;
+}
+
+.sidebar-trigger {
+  padding: 0.62rem 0.8rem;
+  font-size: 0.85rem;
 }
 
 .session-chip {
@@ -553,8 +588,16 @@ label {
   }
 
   .sidebar {
+    width: 100%;
     border-right: 0;
     border-bottom: 1px solid var(--border);
+  }
+
+  .sidebar[data-state="collapsed"] {
+    width: 100%;
+    padding-top: 0;
+    padding-bottom: 0;
+    border-bottom-color: transparent;
   }
 
   .page-header {
@@ -564,6 +607,10 @@ label {
 }
 
 @media (max-width: 720px) {
+  .content-header {
+    padding: 1rem 1rem 0;
+  }
+
   .content {
     padding: 1rem;
   }

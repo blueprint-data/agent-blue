@@ -149,7 +149,9 @@ function getAuthenticatedAdmin(req: Request, store: ConversationStore): AdminReq
 function enforceSameOriginForSession(req: Request): boolean {
   const origin = req.get("origin");
   const referer = req.get("referer");
-  const requestOrigin = `${isSecureRequest(req) ? "https" : req.protocol}://${req.get("host")}`;
+  const forwardedHost = req.get("x-forwarded-host")?.split(",")[0]?.trim();
+  const forwardedProto = req.get("x-forwarded-proto")?.split(",")[0]?.trim();
+  const requestOrigin = `${forwardedProto ?? (isSecureRequest(req) ? "https" : req.protocol)}://${forwardedHost ?? req.get("host")}`;
   if (origin) {
     return origin === requestOrigin;
   }
