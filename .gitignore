@@ -4,3 +4,4 @@ dist/
 data/
 secrets/
 *.log
+.env.deploy

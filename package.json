@@ -20,6 +20,7 @@
     "admin:web:build": "vite build --config admin-ui/vite.config.ts",
     "admin:web:check": "tsc -p admin-ui/tsconfig.json --noEmit",
     "admin:dev": "concurrently -k -n api,web,tunnel -c green,cyan,magenta \"npm run admin:api\" \"npm run admin:web:dev\" \"npm run tunnel\"",
+    "deploy": "sh -lc 'ssh -i \"$HOME/.ssh/DO\" root@5.78.178.31 \"cd /root/agent-blue && git pull && docker compose up -d --build\"'",
     "test": "vitest run"
   },
   "repository": {
