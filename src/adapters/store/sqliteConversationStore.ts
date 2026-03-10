@@ -98,6 +98,13 @@ export class SqliteConversationStore implements ConversationStore {
         updated_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS telegram_chat_tenant_map (
+        chat_id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        source TEXT NOT NULL DEFAULT 'manual',
+        updated_at TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS slack_tenant_routing_audit (
         id TEXT PRIMARY KEY,
         message_ts TEXT NOT NULL,
@@ -472,6 +479,44 @@ export class SqliteConversationStore implements ConversationStore {
     }));
   }
 
+  getTelegramChatTenant(chatId: string): string | null {
+    const row = this.db
+      .prepare("SELECT tenant_id FROM telegram_chat_tenant_map WHERE chat_id = ?")
+      .get(chatId) as { tenant_id: string } | undefined;
+    return row ? row.tenant_id : null;
+  }
+
+  upsertTelegramChatTenant(chatId: string, tenantId: string, source = "manual"): void {
+    this.db
+      .prepare(
+        `INSERT INTO telegram_chat_tenant_map (chat_id, tenant_id, source, updated_at)
+         VALUES (?, ?, ?, datetime('now'))
+         ON CONFLICT(chat_id) DO UPDATE SET
+           tenant_id = excluded.tenant_id,
+           source = excluded.source,
+           updated_at = datetime('now')`
+      )
+      .run(chatId, tenantId, source);
+  }
+
+  listTelegramChatMappings(): Array<{ chatId: string; tenantId: string; source: string; updatedAt: string }> {
+    const rows = this.db
+      .prepare(
+        "SELECT chat_id, tenant_id, source, updated_at FROM telegram_chat_tenant_map ORDER BY updated_at DESC"
+      )
+      .all() as Array<{ chat_id: string; tenant_id: string; source: string; updated_at: string }>;
+    return rows.map((r) => ({
+      chatId: r.chat_id,
+      tenantId: r.tenant_id,
+      source: r.source,
+      updatedAt: r.updated_at
+    }));
+  }
+
+  deleteTelegramChatMapping(chatId: string): void {
+    this.db.prepare("DELETE FROM telegram_chat_tenant_map WHERE chat_id = ?").run(chatId);
+  }
+
   logSlackTenantRoutingAudit(input: {
     messageTs: string;
     channelId: string;
@@ -557,6 +602,7 @@ export class SqliteConversationStore implements ConversationStore {
     this.db.prepare("DELETE FROM slack_channel_tenant_map WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM slack_user_tenant_map WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM slack_shared_team_tenant_map WHERE tenant_id = ?").run(tenantId);
+    this.db.prepare("DELETE FROM telegram_chat_tenant_map WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM tenant_credentials_ref WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM tenant_warehouse_config WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM tenant_key_metadata WHERE tenant_id = ?").run(tenantId);

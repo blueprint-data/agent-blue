@@ -24,6 +24,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const response = await fetch(endpoint, {
         method: "POST",
+        signal: AbortSignal.timeout(120_000),
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${this.apiKey}`,

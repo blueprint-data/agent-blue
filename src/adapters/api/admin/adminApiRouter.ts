@@ -685,18 +685,11 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
         });
         return;
       }
-      if (config.provider === "bigquery") {
-        res.status(400).json({
-          status: "failed",
-          step: "warehouse_test",
-          error: "BigQuery warehouse test is not implemented yet."
-        });
-        return;
-      }
       const warehouse = buildWarehouseFromTenantConfig(config);
-      const result = await warehouse.query(
-        "SELECT CURRENT_ACCOUNT() AS account, CURRENT_ROLE() AS role, CURRENT_DATABASE() AS database_name, CURRENT_SCHEMA() AS schema_name LIMIT 1"
-      );
+      const testQuery = config.provider === "bigquery"
+        ? "SELECT 1 AS test"
+        : "SELECT CURRENT_ACCOUNT() AS account, CURRENT_ROLE() AS role, CURRENT_DATABASE() AS database_name, CURRENT_SCHEMA() AS schema_name LIMIT 1";
+      const result = await warehouse.query(testQuery);
       res.json({
         status: "passed",
         step: "warehouse_test",

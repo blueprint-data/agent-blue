@@ -23,6 +23,7 @@ export interface LlmProvider {
 }
 
 export interface WarehouseAdapter {
+  readonly provider?: TenantWarehouseProvider;
   query(sql: string, opts?: { timeoutMs?: number }): Promise<QueryResult>;
 }
 
@@ -137,6 +138,11 @@ export interface ConversationStore {
     ruleUsed: string;
   }): void;
 
+  getTelegramChatTenant(chatId: string): string | null;
+  upsertTelegramChatTenant(chatId: string, tenantId: string, source?: string): void;
+  listTelegramChatMappings(): Array<{ chatId: string; tenantId: string; source: string; updatedAt: string }>;
+  deleteTelegramChatMapping(chatId: string): void;
+
   // Admin operations
   listTenants(): Array<{
     tenantId: string;
@@ -231,8 +237,7 @@ export interface TenantSnowflakeConfig {
 export interface TenantBigQueryConfig {
   projectId: string;
   dataset?: string;
-  /** Path to service account JSON */
-  credentialsPath?: string;
+  location?: string;
 }
 
 export interface TenantWarehouseConfig {

@@ -1,9 +1,11 @@
+import fs from "node:fs";
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { buildLlmProvider, buildRuntime, buildSnowflakeWarehouse, buildStore } from "./app.js";
 import { initializeTenant } from "./bootstrap/initTenant.js";
 import { GitDbtRepositoryService } from "./adapters/dbt/dbtRepoService.js";
 import { parseSlackTeamTenantMap, startSlackAgentServer } from "./adapters/channel/slack/slackAgentServer.js";
+import { startTelegramAgentServer } from "./adapters/channel/telegram/telegramAgentServer.js";
 import { startAdminServer } from "./adapters/api/adminServer.js";
 import { hashAdminPassword } from "./adapters/api/admin/adminAuth.js";
 import { createId } from "./utils/id.js";
@@ -259,6 +261,12 @@ function usage(): string {
     "  npm run dev -- slack-map-shared-team --team <T...> --tenant <id>",
     "  npm run dev -- slack-map-list",
     "  npm run dev -- slack-map-validate",
+    "  npm run dev -- set-warehouse --tenant <id> --provider bigquery --project <gcp-project> [--dataset <ds>] [--location US]",
+    "  npm run dev -- set-warehouse --tenant <id> --provider snowflake --account <acc> --username <user> --warehouse <wh> --database <db> --schema <sch> [--role <role>] [--auth-type password] [--password-env SNOWFLAKE_PASSWORD]",
+    "  npm run dev -- telegram [--tenant <id>] [--profile default] [--model <provider/model>]",
+    "  npm run dev -- telegram-map-channel --chat <chatId> --tenant <id>",
+    "  npm run dev -- telegram-map-list",
+    "  npm run dev -- status [--tenant <id>]",
     "  npm run dev -- admin-ui [--port 3100]",
     "  npm run dev -- admin-password-hash --password <value>"
   ].join("\n");
@@ -296,6 +304,43 @@ async function run(): Promise<void> {
     await dbt.syncRepo(tenantId);
     const models = await dbt.listModels(tenantId);
     output.write(`Synced dbt repo for tenant "${tenantId}". Models found: ${models.length}\n`);
+    return;
+  }
+
+  if (command === "set-warehouse") {
+    const tenantId = getStringArg(args, "tenant");
+    const provider = getStringArg(args, "provider", "snowflake") as "snowflake" | "bigquery";
+    if (provider === "bigquery") {
+      const projectId = getStringArg(args, "project");
+      const dataset = typeof args.dataset === "string" ? args.dataset : undefined;
+      const location = typeof args.location === "string" ? args.location : undefined;
+      store.upsertTenantWarehouseConfig({
+        tenantId,
+        provider: "bigquery",
+        bigquery: { projectId, dataset, location }
+      });
+      output.write(`${successText("Saved")} BigQuery warehouse config for tenant ${tenantId}\n`);
+      output.write(`  project: ${projectId}\n`);
+      if (dataset) output.write(`  dataset: ${dataset}\n`);
+      if (location) output.write(`  location: ${location}\n`);
+    } else {
+      const account = getStringArg(args, "account");
+      const username = getStringArg(args, "username");
+      const warehouse = getStringArg(args, "warehouse");
+      const database = getStringArg(args, "database");
+      const schema = getStringArg(args, "schema");
+      const role = typeof args.role === "string" ? args.role : undefined;
+      const authType = (typeof args["auth-type"] === "string" ? args["auth-type"] : "password") as "password" | "keypair";
+      const passwordEnvVar = typeof args["password-env"] === "string" ? args["password-env"] : "SNOWFLAKE_PASSWORD";
+      const privateKeyPath = typeof args["private-key-path"] === "string" ? args["private-key-path"] : undefined;
+      store.upsertTenantWarehouseConfig({
+        tenantId,
+        provider: "snowflake",
+        snowflake: { account, username, warehouse, database, schema, role, authType, passwordEnvVar, privateKeyPath }
+      });
+      output.write(`${successText("Saved")} Snowflake warehouse config for tenant ${tenantId}\n`);
+      output.write(`  account: ${account}  database: ${database}  schema: ${schema}\n`);
+    }
     return;
   }
 
@@ -341,6 +386,7 @@ async function run(): Promise<void> {
         break;
       }
       try {
+        output.write(`${infoLabel("Thinking...")}\n`);
         const response = await runtime.respond(
           { tenantId, profileName, conversationId, llmModel, origin: { source: "cli" } },
           message
@@ -571,6 +617,44 @@ async function run(): Promise<void> {
     return;
   }
 
+  if (command === "telegram") {
+    const runtime = buildRuntime(store);
+    const defaultTenantId =
+      (typeof args.tenant === "string" ? args.tenant : undefined) ||
+      env.telegramDefaultTenantId ||
+      undefined;
+    const defaultProfileName =
+      (typeof args.profile === "string" ? args.profile : undefined) || env.telegramDefaultProfileName || "default";
+    const llmModel = typeof args.model === "string" ? args.model : env.llmModel;
+
+    await startTelegramAgentServer({
+      runtime,
+      store,
+      botToken: env.telegramBotToken,
+      defaultTenantId,
+      defaultProfileName,
+      llmModel
+    });
+    return;
+  }
+
+  if (command === "telegram-map-channel") {
+    const chatId = getStringArg(args, "chat");
+    const tenantId = getStringArg(args, "tenant");
+    store.upsertTelegramChatTenant(chatId, tenantId, "manual");
+    output.write(`${successText("Mapped")} Telegram chat ${chatId} -> tenant ${tenantId}\n`);
+    return;
+  }
+
+  if (command === "telegram-map-list") {
+    const chats = store.listTelegramChatMappings();
+    output.write(`${infoLabel("Telegram chat mappings")} (${chats.length})\n`);
+    for (const m of chats) {
+      output.write(`  ${m.chatId} -> ${m.tenantId} (${m.source}) ${m.updatedAt}\n`);
+    }
+    return;
+  }
+
   if (command === "slack") {
     const runtime = buildRuntime(store);
     const guardrails = store.getGuardrails();
@@ -617,6 +701,112 @@ async function run(): Promise<void> {
       ownerEnterpriseIds,
       strictTenantRouting
     });
+    return;
+  }
+
+  if (command === "status") {
+    const filterTenantId = typeof args.tenant === "string" ? args.tenant : null;
+    const tenants = store.listTenants();
+    const slackChannels = store.listSlackChannelMappings();
+    const slackUsers = store.listSlackUserMappings();
+    const slackSharedTeams = store.listSlackSharedTeamMappings();
+    const telegramChats = store.listTelegramChatMappings();
+
+    const tenantIds = filterTenantId
+      ? [filterTenantId]
+      : Array.from(new Set([
+          ...tenants.map((t) => t.tenantId),
+          ...slackChannels.map((m) => m.tenantId),
+          ...slackUsers.map((m) => m.tenantId),
+          ...slackSharedTeams.map((m) => m.tenantId),
+          ...telegramChats.map((m) => m.tenantId)
+        ]));
+
+    if (tenantIds.length === 0) {
+      output.write(`${warnText("No tenants found.")} Run init to create one.\n`);
+      return;
+    }
+
+    for (const tenantId of tenantIds) {
+      output.write(`\n${paint(`=== Tenant: ${tenantId} ===`, 35)}\n`);
+
+      const repo = store.getTenantRepo(tenantId);
+      if (repo) {
+        const repoExists = fs.existsSync(repo.localPath);
+        const dbt = new GitDbtRepositoryService(store);
+        let modelCount = 0;
+        if (repoExists) {
+          try {
+            const models = await dbt.listModels(tenantId);
+            modelCount = models.length;
+          } catch {
+            modelCount = 0;
+          }
+        }
+        output.write(`  ${infoLabel("dbt repo")}\n`);
+        output.write(`    url:    ${repo.repoUrl}\n`);
+        output.write(`    subpath: ${repo.dbtSubpath}\n`);
+        output.write(`    local:  ${repo.localPath}\n`);
+        output.write(`    cloned: ${repoExists ? successText("yes") : warnText("no -- run sync-dbt --tenant " + tenantId)}\n`);
+        if (repoExists) {
+          output.write(`    models: ${modelCount > 0 ? successText(String(modelCount)) : warnText("0")}\n`);
+        }
+      } else {
+        output.write(`  ${infoLabel("dbt repo")}  ${warnText("not configured")}\n`);
+      }
+
+      const whConfig = store.getTenantWarehouseConfig(tenantId);
+      if (whConfig) {
+        output.write(`  ${infoLabel("warehouse")}  ${successText(whConfig.provider)}\n`);
+        if (whConfig.provider === "bigquery" && whConfig.bigquery) {
+          output.write(`    project:  ${whConfig.bigquery.projectId}\n`);
+          if (whConfig.bigquery.dataset) output.write(`    dataset:  ${whConfig.bigquery.dataset}\n`);
+          if (whConfig.bigquery.location) output.write(`    location: ${whConfig.bigquery.location}\n`);
+        }
+        if (whConfig.provider === "snowflake" && whConfig.snowflake) {
+          output.write(`    account:   ${whConfig.snowflake.account}\n`);
+          output.write(`    database:  ${whConfig.snowflake.database}\n`);
+          output.write(`    schema:    ${whConfig.snowflake.schema}\n`);
+          output.write(`    warehouse: ${whConfig.snowflake.warehouse}\n`);
+          output.write(`    auth:      ${whConfig.snowflake.authType}\n`);
+        }
+      } else {
+        output.write(`  ${infoLabel("warehouse")}  ${warnText("not configured -- run set-warehouse --tenant " + tenantId)}\n`);
+      }
+
+      const tSlack = slackChannels.filter((m) => m.tenantId === tenantId);
+      const tSlackUsers = slackUsers.filter((m) => m.tenantId === tenantId);
+      const tSlackTeams = slackSharedTeams.filter((m) => m.tenantId === tenantId);
+      const tTelegram = telegramChats.filter((m) => m.tenantId === tenantId);
+      const hasChannels = tSlack.length + tSlackUsers.length + tSlackTeams.length + tTelegram.length > 0;
+
+      output.write(`  ${infoLabel("channels")}\n`);
+      if (!hasChannels) {
+        output.write(`    ${warnText("none mapped")}\n`);
+      }
+      for (const m of tSlack) {
+        output.write(`    slack channel  ${m.channelId}  (${m.source})\n`);
+      }
+      for (const m of tSlackUsers) {
+        output.write(`    slack user     ${m.userId}\n`);
+      }
+      for (const m of tSlackTeams) {
+        output.write(`    slack team     ${m.sharedTeamId}\n`);
+      }
+      for (const m of tTelegram) {
+        output.write(`    telegram chat  ${m.chatId}  (${m.source})\n`);
+      }
+    }
+
+    output.write("\n");
+    const envSlack = env.slackBotToken ? successText("configured") : warnText("not set");
+    const envTelegram = env.telegramBotToken ? successText("configured") : warnText("not set");
+    const envLlm = env.llmApiKey ? successText(`${env.llmModel}`) : warnText("not set");
+    output.write(`${infoLabel("Environment")}\n`);
+    output.write(`  LLM:      ${envLlm}\n`);
+    output.write(`  Slack:    SLACK_BOT_TOKEN ${envSlack}\n`);
+    output.write(`  Telegram: TELEGRAM_BOT_TOKEN ${envTelegram}\n`);
+    output.write("\n");
     return;
   }
 

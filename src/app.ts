@@ -3,6 +3,7 @@ import { env } from "./config/env.js";
 import { ChartJsTool } from "./adapters/chart/chartJsTool.js";
 import { OpenAiCompatibleProvider } from "./adapters/llm/openAiCompatibleProvider.js";
 import { SqliteConversationStore } from "./adapters/store/sqliteConversationStore.js";
+import { BigQueryConfig, BigQueryWarehouseAdapter } from "./adapters/warehouse/bigQueryWarehouse.js";
 import { SnowflakeConfig, SnowflakeWarehouseAdapter } from "./adapters/warehouse/snowflakeWarehouse.js";
 import { GitDbtRepositoryService } from "./adapters/dbt/dbtRepoService.js";
 import { SqlGuard } from "./core/sqlGuard.js";
@@ -24,10 +25,17 @@ export function buildRuntime(store: SqliteConversationStore): AnalyticsAgentRunt
     if (config) {
       return buildWarehouseFromTenantConfig(config);
     }
-    // Lazily build fallback warehouse to avoid startup failure when global env
-    // is intentionally unset and tenant-specific warehouse config is used.
     if (!defaultWarehouse) {
-      defaultWarehouse = buildSnowflakeWarehouse();
+      if (env.bigqueryProjectId) {
+        defaultWarehouse = buildBigQueryWarehouse();
+      } else if (env.snowflakeAccount) {
+        defaultWarehouse = buildSnowflakeWarehouse();
+      } else {
+        throw new Error(
+          `No warehouse config found for tenant "${tenantId}". ` +
+          "Save one with: npm run dev -- set-warehouse --tenant <id> --provider bigquery --project <gcp-project>"
+        );
+      }
     }
     return defaultWarehouse;
   };
@@ -89,9 +97,25 @@ export function buildSnowflakeWarehouse(): SnowflakeWarehouseAdapter {
   return new SnowflakeWarehouseAdapter(buildSnowflakeConfig());
 }
 
+export function buildBigQueryWarehouse(overrides?: Partial<BigQueryConfig>): BigQueryWarehouseAdapter {
+  return new BigQueryWarehouseAdapter({
+    projectId: overrides?.projectId || env.bigqueryProjectId,
+    dataset: overrides?.dataset || env.bigqueryDataset || undefined,
+    location: overrides?.location || env.bigqueryLocation || undefined
+  });
+}
+
 export function buildWarehouseFromTenantConfig(config: TenantWarehouseConfig): WarehouseAdapter {
   if (config.provider === "bigquery") {
-    throw new Error("BigQuery warehouse adapter is not implemented yet.");
+    const bq = config.bigquery;
+    if (!bq) {
+      throw new Error("BigQuery config missing for tenant.");
+    }
+    return new BigQueryWarehouseAdapter({
+      projectId: bq.projectId,
+      dataset: bq.dataset,
+      location: bq.location
+    });
   }
   const sf = config.snowflake;
   if (!sf) {
