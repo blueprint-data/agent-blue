@@ -202,14 +202,44 @@ Then point your Slack app Event Subscriptions URL to:
   - `--tenant <id>`
 - `slack-map-list` (list all channel/user/shared-team mappings)
 - `slack-map-validate` (check that all mapped tenants have dbt repos configured)
-- `admin-ui` (admin-only web UI for tenants, Slack mappings, guardrails, credential refs)
+- `admin-ui` (admin API + built admin SPA)
   - `--port <number>` (default: `ADMIN_PORT` or `3100`)
+- `admin-password-hash`
+  - `--password <value>` (prints a `scrypt$...` hash for `ADMIN_PASSWORD_HASH`)
 
 ## Admin UI
 
-An admin-only web UI lets you manage tenants, Slack mappings, guardrails, and credential references without using the CLI.
+The admin panel is now a **Vite + React** application backed by the Express admin API. It is designed around the main operator flows:
 
-1. Start the admin server:
+- **Overview**: tenant count, routing health, recent conversations, Slack bot status/events
+- **New Tenant**: guided onboarding wizard
+- **Tenants**: create/edit/delete tenants, refresh repo, upload Snowflake `.p8`, inspect credential refs
+- **Conversations**: browse raw message history and per-turn execution traces (prompt text, SQL/tool-call debug, timings, errors)
+- **Slack Bot**: start/stop/restart the embedded Slack bot and inspect persisted bot events
+- **Settings**: Slack guardrails plus explicit channel/user/shared-team mappings
+
+### Local development
+
+Run the admin API and Vite frontend together:
+
+```bash
+npm run admin:dev
+```
+
+- Admin API / session auth: `http://localhost:3100`
+- Vite dev UI: `http://localhost:5173/admin/`
+
+Vite proxies `/api/*` to the admin API, so browser sessions still work with `credentials: include`.
+
+### Production-style local run
+
+Build the frontend and backend assets first:
+
+```bash
+npm run build
+```
+
+Then start the admin server:
 
 ```bash
 npm run admin:ui
@@ -217,22 +247,44 @@ npm run admin:ui
 ```
 
 2. Open `http://localhost:3100/admin` in a browser.
-3. Use the tabs to:
-   - **New Tenant Wizard**: Step-by-step onboarding for a new tenant. Complete each step in order: (1) tenant basics + init, (2) verify repo access, (3) configure per-tenant warehouse (Snowflake), (4) test warehouse connectivity, (5) add Slack mappings, (6) final validation. Per-tenant warehouse config overrides env when present.
-   - **Tenants**: Create, edit, delete tenants and their dbt repo config. Per tenant: "Upload .p8" for Snowflake keypair auth, "Refresh repo" for `git pull --ff-only`.
-   - **Slack Mappings**: Add/remove channel, user, and shared-team mappings to tenants.
-   - **Guardrails**: Configure owner team/enterprise IDs, strict tenant routing, default tenant, and team→tenant map. Persisted guardrails override env vars when the Slack server starts.
-   - **Credentials**: View credential reference metadata (paths and warehouse metadata only; no raw secrets).
+3. Sign in with the configured admin credentials.
 
-The admin server runs on a separate port from the Slack server. **Authentication:** When any of `ADMIN_UI_TOKEN`, `ADMIN_BEARER_TOKEN`, or `ADMIN_BASIC_USER`+`ADMIN_BASIC_PASSWORD` are set, all admin API routes require auth. The UI fetches `/admin/config` on load and auto-attaches the Bearer token when `ADMIN_UI_TOKEN` (or `ADMIN_BEARER_TOKEN`) is set. Use Basic Auth or Bearer for programmatic access. Do not expose the admin server publicly without TLS and proper access control (e.g. firewall, VPN).
+### Authentication
+
+Browser login uses **server-managed sessions**:
+
+- `POST /api/admin/auth/login`
+- `GET /api/admin/auth/session`
+- `POST /api/admin/auth/logout`
+
+Recommended env configuration:
+
+```bash
+npm run dev -- admin-password-hash --password "choose-a-strong-password"
+```
+
+Then set:
+
+- `ADMIN_USERNAME`
+- `ADMIN_PASSWORD_HASH`
+- `ADMIN_SESSION_SECRET`
+
+Optional API-only auth remains available for scripts/non-browser clients:
+
+- `ADMIN_BEARER_TOKEN` / `ADMIN_UI_TOKEN`
+- `ADMIN_BASIC_USER` + `ADMIN_BASIC_PASSWORD`
+
+The browser UI no longer fetches or stores a bearer token. Do not expose the admin server publicly without TLS and proper access control (VPN, firewall, private ingress, etc.).
 
 ### Operator validation (auth, upload, repo refresh)
 
 After deploying, verify:
 
-1. **Auth**: Set `ADMIN_UI_TOKEN` (or `ADMIN_BEARER_TOKEN`) in `.env`. Start admin server, open `/admin`. Header should show "Authenticated". Unauthenticated requests to `/admin/tenants` should return 401.
-2. **.p8 upload**: In Tenants tab, click "Upload .p8" for a tenant. Select a valid Snowflake `.p8` key file. Expect success message; Credentials tab should show the key path. No raw key content in API response or SQLite.
-3. **Repo refresh**: In Tenants tab, click "Refresh repo" for a tenant with a configured dbt repo. Expect "Repo refreshed. N dbt models found." or a clear error (e.g. deploy key not added).
+1. **Auth**: Start the admin server, open `/admin`, and confirm that unauthenticated API requests to `/api/admin/tenants` return `401`. Log in through the UI and confirm the session unlocks the app.
+2. **.p8 upload**: In the Tenants page, click "Upload .p8" for a tenant. Select a valid Snowflake `.p8` key file. Expect success message; tenant metadata should show the uploaded key path. No raw key content in API responses or SQLite.
+3. **Repo refresh**: In the Tenants page, click "Refresh repo" for a tenant with a configured dbt repo. Expect `Repo refreshed. N dbt models found.` or a clear error (for example, deploy key not added).
+4. **Conversations**: Seed or trigger a conversation and confirm the Conversations page shows the raw user text plus stored execution trace details.
+5. **Slack bot control**: Open Slack Bot page, confirm status/events load, and verify start/stop/restart actions update the persisted bot state.
 
 ### New Tenant Wizard flow
 
