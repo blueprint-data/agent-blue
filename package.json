@@ -5,14 +5,19 @@
   "main": "dist/index.js",
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && npm run admin:web:build",
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
-    "check": "tsc -p tsconfig.json --noEmit",
+    "check": "tsc -p tsconfig.json --noEmit && npm run admin:web:check",
     "slack:server": "npm run dev -- slack --profile default --port 3000",
     "tunnel": "cloudflared tunnel --config cloudflared-agent-blue.yml run agent-blue-slack",
     "slack:local": "concurrently -k -n tunnel,slack -c cyan,green \"npm run tunnel\" \"npm run slack:server\"",
-    "admin:ui": "npm run dev -- admin-ui --port 3100"
+    "admin:ui": "npm run dev -- admin-ui",
+    "admin:api": "npm run dev -- admin-ui",
+    "admin:web:dev": "vite --config admin-ui/vite.config.ts",
+    "admin:web:build": "vite build --config admin-ui/vite.config.ts",
+    "admin:web:check": "tsc -p admin-ui/tsconfig.json --noEmit",
+    "admin:dev": "concurrently -k -n api,web -c green,cyan \"npm run admin:api\" \"npm run admin:web:dev\""
   },
   "repository": {
     "type": "git",
@@ -33,16 +38,23 @@
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
     "multer": "^2.1.1",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "react-router-dom": "^7.8.2",
     "snowflake-sdk": "^2.3.4",
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@types/react": "^19.1.12",
+    "@types/react-dom": "^19.1.9",
+    "@vitejs/plugin-react": "^5.0.2",
     "@types/better-sqlite3": "^7.6.13",
     "@types/express": "^5.0.6",
     "@types/multer": "^2.1.0",
     "@types/node": "^25.3.3",
     "concurrently": "^9.2.1",
     "tsx": "^4.21.0",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vite": "^7.1.5"
   }
 }
