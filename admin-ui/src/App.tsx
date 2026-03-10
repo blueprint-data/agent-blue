@@ -140,6 +140,7 @@ interface WarehouseConfigResponse {
     projectId: string;
     dataset?: string;
     location?: string;
+    authType?: "adc" | "service-account-key";
   };
 }
 
@@ -534,6 +535,7 @@ function NewTenantPage({ notify }: { notify: (value: NotificationState | null) =
   const [bqProjectId, setBqProjectId] = useState("");
   const [bqDataset, setBqDataset] = useState("");
   const [bqLocation, setBqLocation] = useState("");
+  const [bqAuthType, setBqAuthType] = useState<"adc" | "service-account-key">("adc");
   const [channelInput, setChannelInput] = useState("");
   const [userInput, setUserInput] = useState("");
   const [teamInput, setTeamInput] = useState("");
@@ -669,6 +671,32 @@ function NewTenantPage({ notify }: { notify: (value: NotificationState | null) =
                   Location
                   <input value={bqLocation} onChange={(event) => setBqLocation(event.target.value)} placeholder="Optional (e.g. US, EU)" />
                 </label>
+                <label>
+                  Auth type
+                  <select value={bqAuthType} onChange={(event) => setBqAuthType(event.target.value as "adc" | "service-account-key")}>
+                    <option value="adc">ADC (Application Default Credentials)</option>
+                    <option value="service-account-key">Service Account Key</option>
+                  </select>
+                </label>
+                {bqAuthType === "service-account-key" && wizardTenantId ? (
+                  <label>
+                    Service account key (.json)
+                    <input
+                      type="file"
+                      accept=".json"
+                      onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        if (file && wizardTenantId) {
+                          const formData = new FormData();
+                          formData.append("file", file);
+                          void runStep("bq_key_upload", () => uploadRequest(`/api/admin/tenants/${wizardTenantId}/bq-key-upload`, formData));
+                        }
+                        event.currentTarget.value = "";
+                      }}
+                    />
+                  </label>
+                ) : null}
+                {results.bq_key_upload ? <JsonBlock value={results.bq_key_upload} /> : null}
               </>
             )}
           </div>
@@ -699,7 +727,8 @@ function NewTenantPage({ notify }: { notify: (value: NotificationState | null) =
                         bigquery: {
                           projectId: bqProjectId,
                           dataset: bqDataset || undefined,
-                          location: bqLocation || undefined
+                          location: bqLocation || undefined,
+                          authType: bqAuthType
                         }
                       }
                 })
@@ -782,9 +811,10 @@ function TenantsPage({ notify }: { notify: (value: NotificationState | null) => 
   const [savingWarehouse, setSavingWarehouse] = useState(false);
   const [whProvider, setWhProvider] = useState<"snowflake" | "bigquery">("snowflake");
   const [whSnowflake, setWhSnowflake] = useState({ account: "", username: "", warehouse: "", database: "", schema: "", role: "", authType: "keypair" as "keypair" | "password", privateKeyPath: "", passwordEnvVar: "SNOWFLAKE_PASSWORD" });
-  const [whBigQuery, setWhBigQuery] = useState({ projectId: "", dataset: "", location: "" });
+  const [whBigQuery, setWhBigQuery] = useState({ projectId: "", dataset: "", location: "", authType: "adc" as "adc" | "service-account-key" });
   const [whEditing, setWhEditing] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const bqFileInputRef = useRef<HTMLInputElement | null>(null);
 
   const selectedTenant = useMemo(
     () => tenants.find((tenant) => tenant.tenantId === selectedTenantId) ?? null,
@@ -847,7 +877,8 @@ function TenantsPage({ notify }: { notify: (value: NotificationState | null) => 
           setWhBigQuery({
             projectId: nextWarehouse.bigquery.projectId,
             dataset: nextWarehouse.bigquery.dataset ?? "",
-            location: nextWarehouse.bigquery.location ?? ""
+            location: nextWarehouse.bigquery.location ?? "",
+            authType: nextWarehouse.bigquery.authType ?? "adc"
           });
         } else {
           setWhProvider("snowflake");
@@ -919,7 +950,8 @@ function TenantsPage({ notify }: { notify: (value: NotificationState | null) => 
             bigquery: {
               projectId: whBigQuery.projectId,
               dataset: whBigQuery.dataset || undefined,
-              location: whBigQuery.location || undefined
+              location: whBigQuery.location || undefined,
+              authType: whBigQuery.authType
             }
           };
       await apiRequest(`/api/admin/wizard/tenant/${selectedTenant.tenantId}/warehouse`, {
@@ -975,6 +1007,27 @@ function TenantsPage({ notify }: { notify: (value: NotificationState | null) => 
       ]);
       setCredentials(nextCredentials);
       setWarehouseConfig(nextWarehouse);
+    } catch (caught) {
+      notify({ type: "error", text: sectionError(caught) });
+    }
+  }
+
+  async function uploadBqKey(file: File) {
+    if (!selectedTenant) return;
+    const formData = new FormData();
+    formData.append("file", file);
+    try {
+      const result = await uploadRequest<{ message: string }>(`/api/admin/tenants/${selectedTenant.tenantId}/bq-key-upload`, formData);
+      notify({ type: "success", text: result.message });
+      const [nextCredentials, nextWarehouse] = await Promise.all([
+        apiRequest<CredentialReference>(`/api/admin/credentials-ref/${selectedTenant.tenantId}`),
+        apiRequest<WarehouseConfigResponse>(`/api/admin/tenants/${selectedTenant.tenantId}/warehouse`)
+      ]);
+      setCredentials(nextCredentials);
+      setWarehouseConfig(nextWarehouse);
+      if (nextWarehouse.bigquery) {
+        setWhBigQuery((c) => ({ ...c, authType: nextWarehouse.bigquery?.authType ?? "service-account-key" }));
+      }
     } catch (caught) {
       notify({ type: "error", text: sectionError(caught) });
     }
@@ -1085,6 +1138,26 @@ function TenantsPage({ notify }: { notify: (value: NotificationState | null) => 
                     />
                   </>
                 ) : null}
+                {warehouseConfig?.provider === "bigquery" ? (
+                  <>
+                    <button className="secondary-button" onClick={() => bqFileInputRef.current?.click()}>
+                      Upload SA key (.json)
+                    </button>
+                    <input
+                      ref={bqFileInputRef}
+                      type="file"
+                      accept=".json"
+                      hidden
+                      onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        if (file) {
+                          void uploadBqKey(file);
+                        }
+                        event.currentTarget.value = "";
+                      }}
+                    />
+                  </>
+                ) : null}
                 <button className="danger-button" onClick={() => void deleteTenant()}>
                   Delete tenant
                 </button>
@@ -1166,6 +1239,13 @@ function TenantsPage({ notify }: { notify: (value: NotificationState | null) => 
                       <label>Project ID<input value={whBigQuery.projectId} onChange={(e) => setWhBigQuery((c) => ({ ...c, projectId: e.target.value }))} placeholder="my-gcp-project" /></label>
                       <label>Dataset<input value={whBigQuery.dataset} onChange={(e) => setWhBigQuery((c) => ({ ...c, dataset: e.target.value }))} placeholder="Optional" /></label>
                       <label>Location<input value={whBigQuery.location} onChange={(e) => setWhBigQuery((c) => ({ ...c, location: e.target.value }))} placeholder="Optional (e.g. US, EU)" /></label>
+                      <label>
+                        Auth type
+                        <select value={whBigQuery.authType} onChange={(e) => setWhBigQuery((c) => ({ ...c, authType: e.target.value as "adc" | "service-account-key" }))}>
+                          <option value="adc">ADC (Application Default Credentials)</option>
+                          <option value="service-account-key">Service Account Key</option>
+                        </select>
+                      </label>
                     </>
                   )}
                 </div>
@@ -1188,6 +1268,7 @@ function TenantsPage({ notify }: { notify: (value: NotificationState | null) => 
                       <DetailItem label="Project ID" value={warehouseConfig.bigquery.projectId} />
                       <DetailItem label="Dataset" value={warehouseConfig.bigquery.dataset ?? "—"} />
                       <DetailItem label="Location" value={warehouseConfig.bigquery.location ?? "—"} />
+                      <DetailItem label="Auth type" value={warehouseConfig.bigquery.authType === "service-account-key" ? "Service Account Key" : "ADC"} />
                     </>
                   ) : null}
                   {warehouseConfig.updatedAt ? <DetailItem label="Updated" value={formatDate(warehouseConfig.updatedAt)} /> : null}

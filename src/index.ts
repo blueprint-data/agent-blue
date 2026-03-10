@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
@@ -261,7 +262,7 @@ function usage(): string {
     "  npm run dev -- slack-map-shared-team --team <T...> --tenant <id>",
     "  npm run dev -- slack-map-list",
     "  npm run dev -- slack-map-validate",
-    "  npm run dev -- set-warehouse --tenant <id> --provider bigquery --project <gcp-project> [--dataset <ds>] [--location US]",
+    "  npm run dev -- set-warehouse --tenant <id> --provider bigquery --project <gcp-project> [--dataset <ds>] [--location US] [--key-file /path/to/sa-key.json]",
     "  npm run dev -- set-warehouse --tenant <id> --provider snowflake --account <acc> --username <user> --warehouse <wh> --database <db> --schema <sch> [--role <role>] [--auth-type password] [--password-env SNOWFLAKE_PASSWORD]",
     "  npm run dev -- telegram [--tenant <id>] [--profile default] [--model <provider/model>]",
     "  npm run dev -- telegram-map-channel --chat <chatId> --tenant <id>",
@@ -314,13 +315,44 @@ async function run(): Promise<void> {
       const projectId = getStringArg(args, "project");
       const dataset = typeof args.dataset === "string" ? args.dataset : undefined;
       const location = typeof args.location === "string" ? args.location : undefined;
+      const keyFile = typeof args["key-file"] === "string" ? args["key-file"] : undefined;
+      let authType: "adc" | "service-account-key" = "adc";
+      let serviceAccountKeyPath: string | undefined;
+      if (keyFile) {
+        if (!fs.existsSync(keyFile)) {
+          output.write(`${errorText("Error:")} key file not found: ${keyFile}\n`);
+          process.exit(1);
+        }
+        const keyContent = fs.readFileSync(keyFile, "utf-8");
+        let parsed: Record<string, unknown>;
+        try {
+          parsed = JSON.parse(keyContent) as Record<string, unknown>;
+        } catch {
+          output.write(`${errorText("Error:")} key file is not valid JSON.\n`);
+          process.exit(1);
+        }
+        if (parsed.type !== "service_account") {
+          output.write(`${errorText("Error:")} key file must be a Google Cloud service account key (type: "service_account").\n`);
+          process.exit(1);
+        }
+        const keysDir = `${env.appDataDir}/keys/${tenantId}`;
+        fs.mkdirSync(keysDir, { recursive: true, mode: 0o700 });
+        serviceAccountKeyPath = `${keysDir}/bigquery_sa_${Date.now()}.json`;
+        fs.copyFileSync(keyFile, serviceAccountKeyPath);
+        fs.chmodSync(serviceAccountKeyPath, 0o600);
+        const fingerprint = crypto.createHash("sha256").update(keyContent).digest("hex").slice(0, 16);
+        store.upsertTenantKeyMetadata({ tenantId, filePath: serviceAccountKeyPath, uploadedAt: new Date().toISOString(), fingerprint });
+        authType = "service-account-key";
+        output.write(`  SA key: ${serviceAccountKeyPath} (fingerprint: ${fingerprint})\n`);
+      }
       store.upsertTenantWarehouseConfig({
         tenantId,
         provider: "bigquery",
-        bigquery: { projectId, dataset, location }
+        bigquery: { projectId, dataset, location, authType, serviceAccountKeyPath }
       });
       output.write(`${successText("Saved")} BigQuery warehouse config for tenant ${tenantId}\n`);
       output.write(`  project: ${projectId}\n`);
+      output.write(`  auth: ${authType}\n`);
       if (dataset) output.write(`  dataset: ${dataset}\n`);
       if (location) output.write(`  location: ${location}\n`);
     } else {
@@ -762,6 +794,7 @@ async function run(): Promise<void> {
           output.write(`    project:  ${whConfig.bigquery.projectId}\n`);
           if (whConfig.bigquery.dataset) output.write(`    dataset:  ${whConfig.bigquery.dataset}\n`);
           if (whConfig.bigquery.location) output.write(`    location: ${whConfig.bigquery.location}\n`);
+          output.write(`    auth:     ${whConfig.bigquery.authType ?? "adc"}\n`);
         }
         if (whConfig.provider === "snowflake" && whConfig.snowflake) {
           output.write(`    account:   ${whConfig.snowflake.account}\n`);

@@ -6,6 +6,7 @@ export interface BigQueryConfig {
   projectId: string;
   dataset?: string;
   location?: string;
+  keyFilename?: string;
 }
 
 export class BigQueryWarehouseAdapter implements WarehouseAdapter {
@@ -16,7 +17,8 @@ export class BigQueryWarehouseAdapter implements WarehouseAdapter {
   constructor(config: BigQueryConfig) {
     this.client = new BigQuery({
       projectId: config.projectId,
-      location: config.location || undefined
+      location: config.location || undefined,
+      ...(config.keyFilename ? { keyFilename: config.keyFilename } : {})
     });
     this.defaultDataset = config.dataset || undefined;
   }

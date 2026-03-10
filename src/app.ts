@@ -114,7 +114,8 @@ export function buildWarehouseFromTenantConfig(config: TenantWarehouseConfig): W
     return new BigQueryWarehouseAdapter({
       projectId: bq.projectId,
       dataset: bq.dataset,
-      location: bq.location
+      location: bq.location,
+      keyFilename: bq.serviceAccountKeyPath
     });
   }
   const sf = config.snowflake;

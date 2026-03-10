@@ -130,13 +130,25 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
     }
   });
 
-  const maxP8Size = 64 * 1024;
+  const maxKeySize = 64 * 1024;
   const uploadP8 = multer({
     storage: multer.memoryStorage(),
-    limits: { fileSize: maxP8Size },
+    limits: { fileSize: maxKeySize },
     fileFilter(_req, file, cb) {
       if (path.extname(file.originalname || "").toLowerCase() !== ".p8") {
         cb(new Error("Only .p8 files are allowed"));
+        return;
+      }
+      cb(null, true);
+    }
+  });
+
+  const uploadJson = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: maxKeySize },
+    fileFilter(_req, file, cb) {
+      if (path.extname(file.originalname || "").toLowerCase() !== ".json") {
+        cb(new Error("Only .json files are allowed"));
         return;
       }
       cb(null, true);
@@ -200,6 +212,82 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
           uploadedAt,
           fingerprint,
           message: "Key uploaded. Warehouse config updated to use keypair auth."
+        });
+      } catch (error) {
+        res.status(500).json({ error: (error as Error).message });
+      }
+    }
+  );
+
+  router.post(
+    "/tenants/:tenantId/bq-key-upload",
+    (req: Request, res: Response, next: NextFunction) => {
+      uploadJson.single("file")(req, res, (error: unknown) => {
+        if (error) {
+          const message = error instanceof Error ? error.message : "Upload failed";
+          res.status(400).json({ error: message });
+          return;
+        }
+        next();
+      });
+    },
+    (req: Request, res: Response) => {
+      try {
+        const tenantId = param(req, "tenantId");
+        const repo = store.getTenantRepo(tenantId);
+        if (!repo) {
+          res.status(404).json({ error: "Tenant not found" });
+          return;
+        }
+        const file = req.file;
+        if (!file?.buffer) {
+          res.status(400).json({ error: "No file uploaded. Use form field 'file' with a .json service account key file." });
+          return;
+        }
+        let parsed: Record<string, unknown>;
+        try {
+          parsed = JSON.parse(file.buffer.toString("utf-8")) as Record<string, unknown>;
+        } catch {
+          res.status(400).json({ error: "File is not valid JSON." });
+          return;
+        }
+        if (parsed.type !== "service_account") {
+          res.status(400).json({ error: "JSON file must be a Google Cloud service account key (type: \"service_account\")." });
+          return;
+        }
+        const keysDir = path.join(appDataDir, "keys", tenantId);
+        fs.mkdirSync(keysDir, { recursive: true, mode: 0o700 });
+        const filePath = path.join(keysDir, `bigquery_sa_${Date.now()}.json`);
+        fs.writeFileSync(filePath, file.buffer, { mode: 0o600 });
+        const fingerprint = crypto.createHash("sha256").update(file.buffer).digest("hex").slice(0, 16);
+        const uploadedAt = new Date().toISOString();
+        const existing = store.getTenantKeyMetadata(tenantId);
+        if (existing?.filePath && existing.filePath !== filePath && fs.existsSync(existing.filePath)) {
+          try {
+            fs.unlinkSync(existing.filePath);
+          } catch {
+            // ignore cleanup errors
+          }
+        }
+        store.upsertTenantKeyMetadata({ tenantId, filePath, uploadedAt, fingerprint });
+        const warehouseConfig = store.getTenantWarehouseConfig(tenantId);
+        if (warehouseConfig?.provider === "bigquery" && warehouseConfig.bigquery) {
+          store.upsertTenantWarehouseConfig({
+            ...warehouseConfig,
+            bigquery: {
+              ...warehouseConfig.bigquery,
+              authType: "service-account-key",
+              serviceAccountKeyPath: filePath
+            }
+          });
+        }
+        res.status(201).json({
+          tenantId,
+          filePath,
+          uploadedAt,
+          fingerprint,
+          clientEmail: typeof parsed.client_email === "string" ? parsed.client_email : undefined,
+          message: "BigQuery service account key uploaded. Warehouse config updated."
         });
       } catch (error) {
         res.status(500).json({ error: (error as Error).message });
@@ -448,7 +536,8 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
         sanitized.bigquery = {
           projectId: config.bigquery.projectId,
           dataset: config.bigquery.dataset,
-          location: config.bigquery.location
+          location: config.bigquery.location,
+          authType: config.bigquery.authType ?? "adc"
         };
       }
       res.json(sanitized);
@@ -790,13 +879,23 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
           snowflake.passwordEnvVar = "SNOWFLAKE_PASSWORD";
         }
       }
-      if (provider === "bigquery" && !body.bigquery?.projectId) {
-        res.status(400).json({
-          status: "failed",
-          step: "warehouse",
-          error: "BigQuery config requires projectId."
-        });
-        return;
+      if (provider === "bigquery") {
+        if (!body.bigquery?.projectId) {
+          res.status(400).json({
+            status: "failed",
+            step: "warehouse",
+            error: "BigQuery config requires projectId."
+          });
+          return;
+        }
+        if (body.bigquery.authType === "service-account-key" && !body.bigquery.serviceAccountKeyPath) {
+          res.status(400).json({
+            status: "failed",
+            step: "warehouse",
+            error: "serviceAccountKeyPath required for service-account-key auth. Upload a key file first."
+          });
+          return;
+        }
       }
       store.upsertTenantWarehouseConfig({
         tenantId,
@@ -843,7 +942,7 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
         status: "failed",
         step: "warehouse_test",
         error: (error as Error).message,
-        hint: "For Snowflake keypair: ensure privateKeyPath is correct. For password: set the passwordEnvVar in env."
+        hint: "For Snowflake keypair: ensure privateKeyPath is correct. For password: set the passwordEnvVar in env. For BigQuery SA key: ensure the key file exists and has correct permissions."
       });
     }
   });

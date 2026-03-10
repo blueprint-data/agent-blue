@@ -238,6 +238,8 @@ export interface TenantBigQueryConfig {
   projectId: string;
   dataset?: string;
   location?: string;
+  authType?: "adc" | "service-account-key";
+  serviceAccountKeyPath?: string;
 }
 
 export interface TenantWarehouseConfig {
