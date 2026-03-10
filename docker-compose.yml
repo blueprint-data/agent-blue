@@ -1,0 +1,44 @@
+services:
+  proxy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    depends_on:
+      - admin
+      - slack
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+  admin:
+    build:
+      context: .
+    image: agent-blue:local
+    restart: unless-stopped
+    command: ["npm", "run", "start:admin"]
+    env_file:
+      - ${AGENT_BLUE_ENV_FILE:-.env.deploy}
+    environment:
+      APP_DATA_DIR: /app/data
+      ADMIN_PORT: "3100"
+    volumes:
+      - ./data:/app/data
+
+  slack:
+    image: agent-blue:local
+    restart: unless-stopped
+    command: ["npm", "run", "start:slack"]
+    env_file:
+      - ${AGENT_BLUE_ENV_FILE:-.env.deploy}
+    environment:
+      APP_DATA_DIR: /app/data
+      SLACK_PORT: "3000"
+    volumes:
+      - ./data:/app/data
+
+volumes:
+  caddy_data:
+  caddy_config:

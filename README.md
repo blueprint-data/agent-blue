@@ -215,7 +215,7 @@ The admin panel is now a **Vite + React** application backed by the Express admi
 - **New Tenant**: guided onboarding wizard
 - **Tenants**: create/edit/delete tenants, refresh repo, upload Snowflake `.p8`, inspect credential refs
 - **Conversations**: browse raw message history and per-turn execution traces (prompt text, SQL/tool-call debug, timings, errors)
-- **Slack Bot**: start/stop/restart the embedded Slack bot and inspect persisted bot events
+- **Slack Bot**: start/stop/restart the embedded Slack bot for local or single-process runs, and inspect persisted bot events
 - **Settings**: Slack guardrails plus explicit channel/user/shared-team mappings
 
 ### Local development
@@ -248,6 +248,85 @@ npm run admin:ui
 
 2. Open `http://localhost:3100/admin` in a browser.
 3. Sign in with the configured admin credentials.
+
+### Single-VPS deployment (Hetzner + Docker Compose)
+
+This repo now includes a direct VPS deployment path without Cloudflare Tunnel.
+
+The production topology is:
+
+- `proxy`: Caddy on ports `80/443`, terminates TLS for `agent.blueprintdata.xyz`
+- `admin`: Express admin API + built admin SPA on internal port `3100`
+- `slack`: always-on Slack Events API service on internal port `3000`
+- `data/`: local persistent filesystem storage shared by `admin` and `slack`
+
+Routing is path-based on the same hostname:
+
+- `/admin` and `/api/admin/*` -> `admin`
+- `/slack/events` -> `slack`
+
+Before starting the stack:
+
+1. Point the DNS `A`/`AAAA` record for `agent.blueprintdata.xyz` to the VPS.
+2. Copy the deployment env template:
+
+```bash
+cp .env.deploy.example .env.deploy
+```
+
+3. Generate a browser-login password hash:
+
+```bash
+npm run dev -- admin-password-hash --password "choose-a-strong-password"
+```
+
+4. Set at least these values in `.env.deploy`:
+
+- `LLM_API_KEY`
+- `SLACK_BOT_TOKEN`
+- `SLACK_SIGNING_SECRET`
+- `ADMIN_USERNAME`
+- `ADMIN_PASSWORD_HASH`
+- `ADMIN_SESSION_SECRET`
+
+`ADMIN_SESSION_SECRET` must stay stable across restarts or browser sessions will be invalidated.
+If `ADMIN_PASSWORD_HASH` contains `$` characters, wrap the value in single quotes inside `.env.deploy`.
+
+Start the stack:
+
+```bash
+docker compose build
+docker compose up -d
+```
+
+Open the admin UI at:
+
+`https://agent.blueprintdata.xyz/admin`
+
+Point Slack Event Subscriptions to:
+
+`https://agent.blueprintdata.xyz/slack/events`
+
+Persistence is filesystem-backed through `./data` on the VPS. This directory stores:
+
+- `agent.db`
+- generated deploy keys
+- uploaded Snowflake keys
+- cloned tenant dbt repositories
+
+Notes for this deployment mode:
+
+- `admin` and `slack` intentionally share the same `APP_DATA_DIR`, so keep it on the VPS local filesystem and do not move it to a network filesystem.
+- In this compose setup, Slack runs as its own always-on service. The Admin UI Slack Bot controls are still useful for embedded/local mode, but normal VPS lifecycle should be managed with `docker compose`, not the UI bot buttons.
+- The legacy `cloudflared-agent-blue.yml` file is not used by this deployment path.
+
+Post-deploy verification checklist:
+
+1. Open `https://agent.blueprintdata.xyz/admin` and confirm the login page loads.
+2. Log in and confirm `GET /api/admin/auth/session` reports an authenticated session through the UI.
+3. Create or load a tenant, then verify repo refresh and warehouse test succeed.
+4. Confirm the VPS `data/` directory now contains `agent.db`, tenant keys, and repo clones as you use the app.
+5. Trigger a Slack event and confirm the request reaches `/slack/events`, the response shows up in Slack, and the conversation appears in the Admin UI.
 
 ### Authentication
 
@@ -284,7 +363,9 @@ After deploying, verify:
 2. **.p8 upload**: In the Tenants page, click "Upload .p8" for a tenant. Select a valid Snowflake `.p8` key file. Expect success message; tenant metadata should show the uploaded key path. No raw key content in API responses or SQLite.
 3. **Repo refresh**: In the Tenants page, click "Refresh repo" for a tenant with a configured dbt repo. Expect `Repo refreshed. N dbt models found.` or a clear error (for example, deploy key not added).
 4. **Conversations**: Seed or trigger a conversation and confirm the Conversations page shows the raw user text plus stored execution trace details.
-5. **Slack bot control**: Open Slack Bot page, confirm status/events load, and verify start/stop/restart actions update the persisted bot state.
+5. **Slack delivery**: Confirm the `slack` compose service is up, trigger a Slack event against `https://agent.blueprintdata.xyz/slack/events`, and verify the conversation and any bot activity appear in the Admin UI.
+
+If you are running the embedded/local admin-supervised bot instead of the compose `slack` service, you can still use the Slack Bot page to test start/stop/restart behavior.
 
 ### New Tenant Wizard flow
 

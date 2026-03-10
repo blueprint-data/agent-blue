@@ -1,0 +1,17 @@
+agent.blueprintdata.xyz {
+  encode zstd gzip
+
+  @admin path /admin /admin/* /api/admin/* 
+  handle @admin {
+    reverse_proxy admin:3100
+  }
+
+  @slack path /slack/events /slack/events/*
+  handle @slack {
+    reverse_proxy slack:3000
+  }
+
+  handle {
+    redir /admin 308
+  }
+}

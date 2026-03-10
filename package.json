@@ -8,6 +8,8 @@
     "build": "tsc -p tsconfig.json && npm run admin:web:build",
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
+    "start:admin": "node dist/index.js admin-ui",
+    "start:slack": "node dist/index.js slack",
     "check": "tsc -p tsconfig.json --noEmit && npm run admin:web:check",
     "slack:server": "npm run dev -- slack --profile default --port 3000",
     "tunnel": "cloudflared tunnel --config cloudflared-agent-blue.yml run agent-blue-slack",

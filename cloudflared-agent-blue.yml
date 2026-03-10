@@ -1,7 +1,9 @@
+# Legacy local tunnel config.
+# The Hetzner single-VPS Docker Compose deployment does not use this file.
 tunnel: 653da738-bb0f-4e02-8341-76f21c56813e
 credentials-file: /Users/marcoporracin/.cloudflared/653da738-bb0f-4e02-8341-76f21c56813e.json
 
 ingress:
-  - hostname: agent.blueprintdata.xyz
+  - hostname: devagent.blueprintdata.xyz
     service: http://localhost:3000
   - service: http_status:404

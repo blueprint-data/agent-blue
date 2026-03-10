@@ -1,0 +1,13 @@
+.git
+.cursor
+.env
+.env.*
+!.env.example
+!.env.deploy.example
+node_modules
+dist
+data
+secrets
+*.log
+npm-debug.log*
+README.md
