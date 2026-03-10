@@ -1,4 +1,6 @@
 import {
+  AdminBotEvent,
+  AdminBotState,
   AdminConversationDetail,
   AdminConversationSummary,
   AgentContext,
@@ -168,6 +170,10 @@ export interface ConversationStore {
     limit?: number;
   }): AdminConversationSummary[];
   getAdminConversationDetail(conversationId: string): AdminConversationDetail | null;
+  getAdminBotState(botName: string): AdminBotState | null;
+  upsertAdminBotState(input: Omit<AdminBotState, "updatedAt">): AdminBotState;
+  appendAdminBotEvent(input: Omit<AdminBotEvent, "id" | "createdAt">): AdminBotEvent;
+  listAdminBotEvents(botName: string, limit?: number): AdminBotEvent[];
   createAdminSession(input: Omit<AdminSession, "lastSeenAt"> & { lastSeenAt?: string }): void;
   getAdminSession(sessionId: string): AdminSession | null;
   touchAdminSession(sessionId: string, lastSeenAt: string, expiresAt?: string): void;

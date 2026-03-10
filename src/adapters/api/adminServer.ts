@@ -3,8 +3,10 @@ import fs from "node:fs";
 import path from "node:path";
 import express, { NextFunction, Request, Response } from "express";
 import { fileURLToPath } from "node:url";
+import { buildRuntime } from "../../app.js";
 import type { ConversationStore } from "../../core/interfaces.js";
 import { env } from "../../config/env.js";
+import { SqliteConversationStore } from "../store/sqliteConversationStore.js";
 import {
   createSessionId,
   createSignedSessionCookie,
@@ -15,6 +17,7 @@ import {
   verifySignedSessionCookie
 } from "./admin/adminAuth.js";
 import { createAdminApiRouter } from "./admin/adminApiRouter.js";
+import { SlackBotSupervisor } from "./admin/slackBotSupervisor.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const adminSessionCookieName = "agent_blue_admin_session";
@@ -207,6 +210,10 @@ export function startAdminServer(options: AdminServerOptions): void {
   const sessionTtlSeconds = getSessionTtlSeconds();
   const loginEnabled = Boolean(env.adminPasswordHash || env.adminBasicPassword);
   const authMiddleware = requireAdminAuth(store);
+  const slackBotSupervisor = new SlackBotSupervisor({
+    store,
+    createRuntime: () => buildRuntime(store as SqliteConversationStore)
+  });
 
   app.set("trust proxy", 1);
   app.use(express.json());
@@ -283,7 +290,7 @@ export function startAdminServer(options: AdminServerOptions): void {
     res.status(204).send();
   });
 
-  app.use("/api/admin", authMiddleware, createAdminApiRouter({ store, appDataDir }));
+  app.use("/api/admin", authMiddleware, createAdminApiRouter({ store, appDataDir, slackBotSupervisor }));
 
   const { staticDir, indexFile } = resolveAdminUiPaths();
   app.use("/admin", express.static(staticDir, { index: false }));

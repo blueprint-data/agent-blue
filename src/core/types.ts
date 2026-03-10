@@ -101,3 +101,27 @@ export interface AdminConversationDetail {
   messages: ConversationMessage[];
   executionTurns: AgentExecutionTurn[];
 }
+
+export type AdminBotLifecycleState = "stopped" | "starting" | "running" | "stopping" | "error";
+
+export interface AdminBotState {
+  botName: string;
+  desiredState: "running" | "stopped";
+  actualState: AdminBotLifecycleState;
+  port?: number;
+  lastStartedAt?: string;
+  lastStoppedAt?: string;
+  lastErrorAt?: string;
+  lastErrorMessage?: string;
+  updatedAt: string;
+}
+
+export interface AdminBotEvent {
+  id: string;
+  botName: string;
+  level: "info" | "warn" | "error";
+  eventType: string;
+  message: string;
+  metadata?: Record<string, unknown>;
+  createdAt: string;
+}

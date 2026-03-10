@@ -10,6 +10,8 @@ import type {
   TenantWarehouseConfig
 } from "../../core/interfaces.js";
 import {
+  AdminBotEvent,
+  AdminBotState,
   AdminConversationDetail,
   AdminConversationSummary,
   AgentContext,
@@ -174,6 +176,28 @@ export class SqliteConversationStore implements ConversationStore {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         completed_at TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS admin_bot_state (
+        bot_name TEXT PRIMARY KEY,
+        desired_state TEXT NOT NULL,
+        actual_state TEXT NOT NULL,
+        port INTEGER,
+        last_started_at TEXT,
+        last_stopped_at TEXT,
+        last_error_at TEXT,
+        last_error_message TEXT,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS admin_bot_events (
+        id TEXT PRIMARY KEY,
+        bot_name TEXT NOT NULL,
+        level TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        message TEXT NOT NULL,
+        metadata_json TEXT,
+        created_at TEXT NOT NULL
       );
     `);
   }
@@ -999,6 +1023,134 @@ export class SqliteConversationStore implements ConversationStore {
       messages: this.getMessages(conversationId, 500),
       executionTurns: this.listExecutionTurns(conversationId)
     };
+  }
+
+  getAdminBotState(botName: string): AdminBotState | null {
+    const row = this.db
+      .prepare(
+        `SELECT bot_name, desired_state, actual_state, port, last_started_at, last_stopped_at,
+                last_error_at, last_error_message, updated_at
+         FROM admin_bot_state
+         WHERE bot_name = ?`
+      )
+      .get(botName) as
+      | {
+          bot_name: string;
+          desired_state: AdminBotState["desiredState"];
+          actual_state: AdminBotState["actualState"];
+          port: number | null;
+          last_started_at: string | null;
+          last_stopped_at: string | null;
+          last_error_at: string | null;
+          last_error_message: string | null;
+          updated_at: string;
+        }
+      | undefined;
+    if (!row) {
+      return null;
+    }
+    return {
+      botName: row.bot_name,
+      desiredState: row.desired_state,
+      actualState: row.actual_state,
+      port: row.port ?? undefined,
+      lastStartedAt: row.last_started_at ?? undefined,
+      lastStoppedAt: row.last_stopped_at ?? undefined,
+      lastErrorAt: row.last_error_at ?? undefined,
+      lastErrorMessage: row.last_error_message ?? undefined,
+      updatedAt: row.updated_at
+    };
+  }
+
+  upsertAdminBotState(input: Omit<AdminBotState, "updatedAt">): AdminBotState {
+    const updatedAt = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO admin_bot_state
+         (bot_name, desired_state, actual_state, port, last_started_at, last_stopped_at, last_error_at, last_error_message, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(bot_name) DO UPDATE SET
+           desired_state = excluded.desired_state,
+           actual_state = excluded.actual_state,
+           port = excluded.port,
+           last_started_at = excluded.last_started_at,
+           last_stopped_at = excluded.last_stopped_at,
+           last_error_at = excluded.last_error_at,
+           last_error_message = excluded.last_error_message,
+           updated_at = excluded.updated_at`
+      )
+      .run(
+        input.botName,
+        input.desiredState,
+        input.actualState,
+        input.port ?? null,
+        input.lastStartedAt ?? null,
+        input.lastStoppedAt ?? null,
+        input.lastErrorAt ?? null,
+        input.lastErrorMessage ?? null,
+        updatedAt
+      );
+    return {
+      ...input,
+      updatedAt
+    };
+  }
+
+  appendAdminBotEvent(input: Omit<AdminBotEvent, "id" | "createdAt">): AdminBotEvent {
+    const id = createId("bot_event");
+    const createdAt = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO admin_bot_events (id, bot_name, level, event_type, message, metadata_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        id,
+        input.botName,
+        input.level,
+        input.eventType,
+        input.message,
+        input.metadata ? JSON.stringify(input.metadata) : null,
+        createdAt
+      );
+    return {
+      id,
+      botName: input.botName,
+      level: input.level,
+      eventType: input.eventType,
+      message: input.message,
+      metadata: input.metadata,
+      createdAt
+    };
+  }
+
+  listAdminBotEvents(botName: string, limit = 100): AdminBotEvent[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, bot_name, level, event_type, message, metadata_json, created_at
+         FROM admin_bot_events
+         WHERE bot_name = ?
+         ORDER BY created_at DESC
+         LIMIT ?`
+      )
+      .all(botName, limit) as Array<{
+      id: string;
+      bot_name: string;
+      level: AdminBotEvent["level"];
+      event_type: string;
+      message: string;
+      metadata_json: string | null;
+      created_at: string;
+    }>;
+    return rows.map((row) => ({
+      id: row.id,
+      botName: row.bot_name,
+      level: row.level,
+      eventType: row.event_type,
+      message: row.message,
+      metadata: row.metadata_json ? (JSON.parse(row.metadata_json) as Record<string, unknown>) : undefined,
+      createdAt: row.created_at
+    }));
   }
 
   createAdminSession(input: Omit<AdminSession, "lastSeenAt"> & { lastSeenAt?: string }): void {

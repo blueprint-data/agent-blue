@@ -14,6 +14,7 @@ import type {
 import { initializeTenant } from "../../../bootstrap/initTenant.js";
 import { buildWarehouseFromTenantConfig } from "../../../app.js";
 import { GitDbtRepositoryService } from "../../dbt/dbtRepoService.js";
+import type { SlackBotSupervisor } from "./slackBotSupervisor.js";
 
 function param(req: Request, name: string): string {
   const value = req.params[name];
@@ -23,10 +24,11 @@ function param(req: Request, name: string): string {
 export interface AdminApiRouterOptions {
   store: ConversationStore;
   appDataDir: string;
+  slackBotSupervisor?: SlackBotSupervisor;
 }
 
 export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
-  const { store, appDataDir } = options;
+  const { store, appDataDir, slackBotSupervisor } = options;
   const router = Router();
   const dbtRepo = new GitDbtRepositoryService(store);
 
@@ -453,6 +455,71 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
         return;
       }
       res.json(turn);
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.get("/bot/status", (_req: Request, res: Response) => {
+    try {
+      if (!slackBotSupervisor) {
+        res.status(503).json({ error: "Slack bot supervisor unavailable" });
+        return;
+      }
+      res.json(slackBotSupervisor.getStatus());
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.get("/bot/events", (req: Request, res: Response) => {
+    try {
+      if (!slackBotSupervisor) {
+        res.status(503).json({ error: "Slack bot supervisor unavailable" });
+        return;
+      }
+      const limitRaw = typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : 100;
+      const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 500) : 100;
+      res.json(slackBotSupervisor.listEvents(limit));
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.post("/bot/start", async (req: Request, res: Response) => {
+    try {
+      if (!slackBotSupervisor) {
+        res.status(503).json({ error: "Slack bot supervisor unavailable" });
+        return;
+      }
+      const port = typeof req.body?.port === "number" ? req.body.port : undefined;
+      const status = await slackBotSupervisor.start(port);
+      res.json(status);
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.post("/bot/stop", async (_req: Request, res: Response) => {
+    try {
+      if (!slackBotSupervisor) {
+        res.status(503).json({ error: "Slack bot supervisor unavailable" });
+        return;
+      }
+      res.json(await slackBotSupervisor.stop());
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.post("/bot/restart", async (req: Request, res: Response) => {
+    try {
+      if (!slackBotSupervisor) {
+        res.status(503).json({ error: "Slack bot supervisor unavailable" });
+        return;
+      }
+      const port = typeof req.body?.port === "number" ? req.body.port : undefined;
+      res.json(await slackBotSupervisor.restart(port));
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }
