@@ -63,6 +63,57 @@ function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function buildTelegramFormattingPrompt(userMessage: string): string {
+  return [
+    "Formatting rules for this response:",
+    "- You are replying in a Telegram chat.",
+    "- Use **double asterisks** for bold.",
+    "- Use short paragraphs separated by blank lines.",
+    "- Use plain bullet lists with - dashes.",
+    "- Use `backticks` for inline code and ``` for code blocks.",
+    "- Do NOT use Markdown headings (#). Use bold text instead.",
+    "- Do NOT use tables. Use bullet lists to present tabular data.",
+    "- Keep formatting minimal and readable on mobile.",
+    "",
+    `User request: ${userMessage}`
+  ].join("\n");
+}
+
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function markdownToTelegramHtml(text: string): string {
+  const codeBlocks: string[] = [];
+  let result = text.replace(/```(?:\w*\n)?([\s\S]*?)```/g, (_match, code: string) => {
+    const idx = codeBlocks.length;
+    codeBlocks.push(`<pre>${escapeHtml(code.trim())}</pre>`);
+    return `\x00CODEBLOCK_${idx}\x00`;
+  });
+
+  const inlineCode: string[] = [];
+  result = result.replace(/`([^`\n]+)`/g, (_match, code: string) => {
+    const idx = inlineCode.length;
+    inlineCode.push(`<code>${escapeHtml(code)}</code>`);
+    return `\x00INLINE_${idx}\x00`;
+  });
+
+  result = escapeHtml(result);
+
+  result = result.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
+  result = result.replace(/(?<!\w)\*([^*\n]+?)\*(?!\w)/g, "<i>$1</i>");
+  result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
+
+  for (let i = 0; i < codeBlocks.length; i++) {
+    result = result.replace(`\x00CODEBLOCK_${i}\x00`, codeBlocks[i]);
+  }
+  for (let i = 0; i < inlineCode.length; i++) {
+    result = result.replace(`\x00INLINE_${i}\x00`, inlineCode[i]);
+  }
+
+  return result.trim();
+}
+
 function buildConversationId(chatId: number, topicId: number | undefined): string {
   const topic = topicId ? `_topic${topicId}` : "";
   return `telegram_${chatId}${topic}`;
@@ -141,6 +192,13 @@ export async function startTelegramAgentServer(
       return;
     }
 
+    const userId = message.from?.id?.toString() ?? null;
+    const topicId = message.message_thread_id;
+    const chatTitle = "title" in chat ? (chat as unknown as Record<string, unknown>).title : null;
+    process.stderr.write(
+      `[telegram] message from chat_id=${chatIdStr}${chatTitle ? ` (${chatTitle})` : ""} user=${userId ?? "unknown"} type=${chat.type}\n`
+    );
+
     const tenantId =
       options.store.getTelegramChatTenant(chatIdStr) ??
       options.defaultTenantId ??
@@ -151,13 +209,10 @@ export async function startTelegramAgentServer(
         chatId: chatIdStr
       });
       await ctx.reply(
-        "No tenant mapping found for this chat. Configure mapping with telegram-map-channel."
+        `No tenant mapping found for this chat. Run:\n  npm run dev -- telegram-map-channel --chat ${chatIdStr} --tenant <your-tenant-id>`
       );
       return;
     }
-
-    const userId = message.from?.id?.toString() ?? null;
-    const topicId = message.message_thread_id;
 
     await emitEvent("message.received", "info", "Telegram message received.", {
       tenantId,
@@ -171,6 +226,7 @@ export async function startTelegramAgentServer(
     try {
       await ctx.replyWithChatAction("typing");
 
+      const promptText = buildTelegramFormattingPrompt(userText);
       const response = await options.runtime.respond(
         {
           tenantId,
@@ -183,12 +239,22 @@ export async function startTelegramAgentServer(
             userId: userId ?? undefined
           }
         },
-        userText
+        userText,
+        { promptText }
       );
 
-      await ctx.reply(response.text, {
+      const html = markdownToTelegramHtml(response.text);
+      const replyOpts = {
+        parse_mode: "HTML" as const,
         reply_parameters: isGroup ? { message_id: message.message_id } : undefined
-      });
+      };
+      try {
+        await ctx.reply(html, replyOpts);
+      } catch {
+        await ctx.reply(response.text, {
+          reply_parameters: replyOpts.reply_parameters
+        });
+      }
 
       await emitEvent("message.completed", "info", "Telegram message processed.", {
         tenantId,
@@ -218,10 +284,10 @@ export async function startTelegramAgentServer(
         chatId: chatIdStr,
         error: (error as Error).message
       });
-      await ctx.reply(
-        `I hit an error while processing that request: ${(error as Error).message}`,
-        { reply_parameters: isGroup ? { message_id: message.message_id } : undefined }
-      );
+      const errMsg = `I hit an error while processing that request: ${(error as Error).message}`;
+      await ctx.reply(errMsg, {
+        reply_parameters: isGroup ? { message_id: message.message_id } : undefined
+      });
     }
   });
 
