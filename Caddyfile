@@ -12,6 +12,6 @@ agent.blueprintdata.xyz {
   }
 
   handle {
-    redir /admin 308
+    redir /admin/ 308
   }
 }

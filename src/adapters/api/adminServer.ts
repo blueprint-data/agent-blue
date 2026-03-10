@@ -323,7 +323,13 @@ export function startAdminServer(options: AdminServerOptions): void {
   app.use("/api/admin", authMiddleware, createAdminApiRouter({ store, appDataDir, slackBotSupervisor }));
 
   const { staticDir, indexFile } = resolveAdminUiPaths();
-  app.use("/admin", express.static(staticDir, { index: false }));
+  app.use(
+    "/admin",
+    express.static(staticDir, {
+      index: false,
+      redirect: false
+    })
+  );
   app.get(/^\/admin(?:\/.*)?$/, (_req: Request, res: Response) => {
     res.sendFile(indexFile);
   });
