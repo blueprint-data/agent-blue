@@ -35,6 +35,7 @@ export interface AgentContext {
   profileName: string;
   conversationId: string;
   llmModel?: string;
+  origin?: ConversationOrigin;
 }
 
 export interface AgentArtifact {
@@ -48,4 +49,79 @@ export interface AgentResponse {
   text: string;
   artifacts?: AgentArtifact[];
   debug?: Record<string, unknown>;
+}
+
+export type ConversationSource = "cli" | "slack" | "admin";
+
+export interface ConversationOrigin {
+  source: ConversationSource;
+  teamId?: string;
+  channelId?: string;
+  threadTs?: string;
+  userId?: string;
+}
+
+export type AgentExecutionStatus = "running" | "completed" | "failed";
+
+export interface AgentExecutionTurn {
+  id: string;
+  tenantId: string;
+  conversationId: string;
+  source: ConversationSource;
+  rawUserText: string;
+  promptText: string;
+  assistantText?: string;
+  status: AgentExecutionStatus;
+  errorMessage?: string;
+  debug?: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+}
+
+export interface AdminConversationSummary {
+  conversationId: string;
+  tenantId: string;
+  profileName: string;
+  source?: ConversationSource;
+  teamId?: string;
+  channelId?: string;
+  threadTs?: string;
+  userId?: string;
+  createdAt: string;
+  lastMessageAt: string;
+  messageCount: number;
+  latestTurnStatus?: AgentExecutionStatus;
+  latestUserText?: string;
+  latestAssistantText?: string;
+}
+
+export interface AdminConversationDetail {
+  summary: AdminConversationSummary;
+  messages: ConversationMessage[];
+  executionTurns: AgentExecutionTurn[];
+}
+
+export type AdminBotLifecycleState = "stopped" | "starting" | "running" | "stopping" | "error";
+
+export interface AdminBotState {
+  botName: string;
+  desiredState: "running" | "stopped";
+  actualState: AdminBotLifecycleState;
+  port?: number;
+  lastStartedAt?: string;
+  lastStoppedAt?: string;
+  lastErrorAt?: string;
+  lastErrorMessage?: string;
+  updatedAt: string;
+}
+
+export interface AdminBotEvent {
+  id: string;
+  botName: string;
+  level: "info" | "warn" | "error";
+  eventType: string;
+  message: string;
+  metadata?: Record<string, unknown>;
+  createdAt: string;
 }

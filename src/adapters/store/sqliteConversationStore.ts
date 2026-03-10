@@ -2,13 +2,25 @@ import Database from "better-sqlite3";
 import path from "node:path";
 import fs from "node:fs";
 import type {
+  AdminSession,
   AdminGuardrails,
   ConversationStore,
   TenantCredentialsRef,
   TenantKeyMetadata,
   TenantWarehouseConfig
 } from "../../core/interfaces.js";
-import { AgentContext, AgentProfile, ConversationMessage } from "../../core/types.js";
+import {
+  AdminBotEvent,
+  AdminBotState,
+  AdminConversationDetail,
+  AdminConversationSummary,
+  AgentContext,
+  AgentExecutionTurn,
+  AgentProfile,
+  ConversationMessage,
+  ConversationOrigin,
+  ConversationSource
+} from "../../core/types.js";
 import { createId } from "../../utils/id.js";
 
 const DEFAULT_SOUL_PROMPT = [
@@ -126,6 +138,66 @@ export class SqliteConversationStore implements ConversationStore {
         uploaded_at TEXT NOT NULL,
         fingerprint TEXT,
         updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS admin_sessions (
+        session_id TEXT PRIMARY KEY,
+        username TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        user_agent TEXT,
+        ip_address TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS conversation_origins (
+        conversation_id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        source TEXT NOT NULL,
+        team_id TEXT,
+        channel_id TEXT,
+        thread_ts TEXT,
+        user_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS agent_execution_turns (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        source TEXT NOT NULL,
+        raw_user_text TEXT NOT NULL,
+        prompt_text TEXT NOT NULL,
+        assistant_text TEXT,
+        status TEXT NOT NULL,
+        error_message TEXT,
+        debug_json TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        completed_at TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS admin_bot_state (
+        bot_name TEXT PRIMARY KEY,
+        desired_state TEXT NOT NULL,
+        actual_state TEXT NOT NULL,
+        port INTEGER,
+        last_started_at TEXT,
+        last_stopped_at TEXT,
+        last_error_at TEXT,
+        last_error_message TEXT,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS admin_bot_events (
+        id TEXT PRIMARY KEY,
+        bot_name TEXT NOT NULL,
+        level TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        message TEXT NOT NULL,
+        metadata_json TEXT,
+        created_at TEXT NOT NULL
       );
     `);
   }
@@ -660,5 +732,493 @@ export class SqliteConversationStore implements ConversationStore {
            updated_at = excluded.updated_at`
       )
       .run(input.tenantId, input.provider, configJson);
+  }
+
+  upsertConversationOrigin(conversationId: string, tenantId: string, origin: ConversationOrigin): void {
+    this.db
+      .prepare(
+        `INSERT INTO conversation_origins
+         (conversation_id, tenant_id, source, team_id, channel_id, thread_ts, user_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+         ON CONFLICT(conversation_id) DO UPDATE SET
+           tenant_id = excluded.tenant_id,
+           source = excluded.source,
+           team_id = excluded.team_id,
+           channel_id = excluded.channel_id,
+           thread_ts = excluded.thread_ts,
+           user_id = excluded.user_id,
+           updated_at = excluded.updated_at`
+      )
+      .run(
+        conversationId,
+        tenantId,
+        origin.source,
+        origin.teamId ?? null,
+        origin.channelId ?? null,
+        origin.threadTs ?? null,
+        origin.userId ?? null
+      );
+  }
+
+  getConversationOrigin(conversationId: string): ConversationOrigin | null {
+    const row = this.db
+      .prepare(
+        `SELECT source, team_id, channel_id, thread_ts, user_id
+         FROM conversation_origins
+         WHERE conversation_id = ?`
+      )
+      .get(conversationId) as
+      | {
+          source: ConversationSource;
+          team_id: string | null;
+          channel_id: string | null;
+          thread_ts: string | null;
+          user_id: string | null;
+        }
+      | undefined;
+    if (!row) {
+      return null;
+    }
+    return {
+      source: row.source,
+      teamId: row.team_id ?? undefined,
+      channelId: row.channel_id ?? undefined,
+      threadTs: row.thread_ts ?? undefined,
+      userId: row.user_id ?? undefined
+    };
+  }
+
+  createExecutionTurn(input: Omit<AgentExecutionTurn, "id" | "createdAt" | "updatedAt">): AgentExecutionTurn {
+    const id = createId("turn");
+    const createdAt = new Date().toISOString();
+    const updatedAt = createdAt;
+    const completedAt = input.status === "running" ? undefined : (input.completedAt ?? createdAt);
+    this.db
+      .prepare(
+        `INSERT INTO agent_execution_turns
+         (id, tenant_id, conversation_id, source, raw_user_text, prompt_text, assistant_text, status, error_message, debug_json, created_at, updated_at, completed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        id,
+        input.tenantId,
+        input.conversationId,
+        input.source,
+        input.rawUserText,
+        input.promptText,
+        input.assistantText ?? null,
+        input.status,
+        input.errorMessage ?? null,
+        input.debug ? JSON.stringify(input.debug) : null,
+        createdAt,
+        updatedAt,
+        completedAt ?? null
+      );
+    return {
+      id,
+      tenantId: input.tenantId,
+      conversationId: input.conversationId,
+      source: input.source,
+      rawUserText: input.rawUserText,
+      promptText: input.promptText,
+      assistantText: input.assistantText,
+      status: input.status,
+      errorMessage: input.errorMessage,
+      debug: input.debug,
+      createdAt,
+      updatedAt,
+      completedAt
+    };
+  }
+
+  completeExecutionTurn(input: {
+    turnId: string;
+    status: "completed" | "failed";
+    assistantText?: string;
+    errorMessage?: string;
+    debug?: Record<string, unknown>;
+    completedAt?: string;
+  }): void {
+    const updatedAt = input.completedAt ?? new Date().toISOString();
+    this.db
+      .prepare(
+        `UPDATE agent_execution_turns
+         SET assistant_text = COALESCE(?, assistant_text),
+             status = ?,
+             error_message = ?,
+             debug_json = ?,
+             updated_at = ?,
+             completed_at = ?
+         WHERE id = ?`
+      )
+      .run(
+        input.assistantText ?? null,
+        input.status,
+        input.errorMessage ?? null,
+        input.debug ? JSON.stringify(input.debug) : null,
+        updatedAt,
+        updatedAt,
+        input.turnId
+      );
+  }
+
+  getExecutionTurn(turnId: string): AgentExecutionTurn | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, tenant_id, conversation_id, source, raw_user_text, prompt_text, assistant_text, status,
+                error_message, debug_json, created_at, updated_at, completed_at
+         FROM agent_execution_turns
+         WHERE id = ?`
+      )
+      .get(turnId) as
+      | {
+          id: string;
+          tenant_id: string;
+          conversation_id: string;
+          source: ConversationSource;
+          raw_user_text: string;
+          prompt_text: string;
+          assistant_text: string | null;
+          status: AgentExecutionTurn["status"];
+          error_message: string | null;
+          debug_json: string | null;
+          created_at: string;
+          updated_at: string;
+          completed_at: string | null;
+        }
+      | undefined;
+    if (!row) {
+      return null;
+    }
+    return {
+      id: row.id,
+      tenantId: row.tenant_id,
+      conversationId: row.conversation_id,
+      source: row.source,
+      rawUserText: row.raw_user_text,
+      promptText: row.prompt_text,
+      assistantText: row.assistant_text ?? undefined,
+      status: row.status,
+      errorMessage: row.error_message ?? undefined,
+      debug: row.debug_json ? (JSON.parse(row.debug_json) as Record<string, unknown>) : undefined,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      completedAt: row.completed_at ?? undefined
+    };
+  }
+
+  listExecutionTurns(conversationId: string): AgentExecutionTurn[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id
+         FROM agent_execution_turns
+         WHERE conversation_id = ?
+         ORDER BY created_at ASC`
+      )
+      .all(conversationId) as Array<{ id: string }>;
+    return rows
+      .map((row) => this.getExecutionTurn(row.id))
+      .filter((turn): turn is AgentExecutionTurn => turn !== null);
+  }
+
+  listAdminConversations(input?: {
+    tenantId?: string;
+    source?: ConversationSource;
+    search?: string;
+    limit?: number;
+  }): AdminConversationSummary[] {
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    if (input?.tenantId) {
+      conditions.push("c.tenant_id = ?");
+      params.push(input.tenantId);
+    }
+    if (input?.source) {
+      conditions.push("co.source = ?");
+      params.push(input.source);
+    }
+    if (input?.search) {
+      conditions.push("(latest_turn.raw_user_text LIKE ? OR latest_turn.assistant_text LIKE ?)");
+      const like = `%${input.search}%`;
+      params.push(like, like);
+    }
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    const limit = input?.limit ?? 100;
+    const rows = this.db
+      .prepare(
+        `SELECT c.id AS conversation_id,
+                c.tenant_id,
+                c.profile_name,
+                c.created_at,
+                co.source,
+                co.team_id,
+                co.channel_id,
+                co.thread_ts,
+                co.user_id,
+                COALESCE(MAX(m.created_at), c.created_at) AS last_message_at,
+                COUNT(m.id) AS message_count,
+                latest_turn.status AS latest_turn_status,
+                latest_turn.raw_user_text AS latest_user_text,
+                latest_turn.assistant_text AS latest_assistant_text
+         FROM conversations c
+         LEFT JOIN messages m
+           ON m.conversation_id = c.id
+         LEFT JOIN conversation_origins co
+           ON co.conversation_id = c.id
+         LEFT JOIN agent_execution_turns latest_turn
+           ON latest_turn.id = (
+             SELECT t.id
+             FROM agent_execution_turns t
+             WHERE t.conversation_id = c.id
+             ORDER BY t.created_at DESC
+             LIMIT 1
+           )
+         ${whereClause}
+         GROUP BY c.id, c.tenant_id, c.profile_name, c.created_at, co.source, co.team_id, co.channel_id, co.thread_ts, co.user_id,
+                  latest_turn.status, latest_turn.raw_user_text, latest_turn.assistant_text
+         ORDER BY last_message_at DESC
+         LIMIT ?`
+      )
+      .all(...params, limit) as Array<{
+      conversation_id: string;
+      tenant_id: string;
+      profile_name: string;
+      created_at: string;
+      source: ConversationSource | null;
+      team_id: string | null;
+      channel_id: string | null;
+      thread_ts: string | null;
+      user_id: string | null;
+      last_message_at: string;
+      message_count: number;
+      latest_turn_status: AgentExecutionTurn["status"] | null;
+      latest_user_text: string | null;
+      latest_assistant_text: string | null;
+    }>;
+    return rows.map((row) => ({
+      conversationId: row.conversation_id,
+      tenantId: row.tenant_id,
+      profileName: row.profile_name,
+      source: row.source ?? undefined,
+      teamId: row.team_id ?? undefined,
+      channelId: row.channel_id ?? undefined,
+      threadTs: row.thread_ts ?? undefined,
+      userId: row.user_id ?? undefined,
+      createdAt: row.created_at,
+      lastMessageAt: row.last_message_at,
+      messageCount: row.message_count,
+      latestTurnStatus: row.latest_turn_status ?? undefined,
+      latestUserText: row.latest_user_text ?? undefined,
+      latestAssistantText: row.latest_assistant_text ?? undefined
+    }));
+  }
+
+  getAdminConversationDetail(conversationId: string): AdminConversationDetail | null {
+    const summary = this.listAdminConversations({ limit: 1000 }).find((entry) => entry.conversationId === conversationId);
+    if (!summary) {
+      return null;
+    }
+    return {
+      summary,
+      messages: this.getMessages(conversationId, 500),
+      executionTurns: this.listExecutionTurns(conversationId)
+    };
+  }
+
+  getAdminBotState(botName: string): AdminBotState | null {
+    const row = this.db
+      .prepare(
+        `SELECT bot_name, desired_state, actual_state, port, last_started_at, last_stopped_at,
+                last_error_at, last_error_message, updated_at
+         FROM admin_bot_state
+         WHERE bot_name = ?`
+      )
+      .get(botName) as
+      | {
+          bot_name: string;
+          desired_state: AdminBotState["desiredState"];
+          actual_state: AdminBotState["actualState"];
+          port: number | null;
+          last_started_at: string | null;
+          last_stopped_at: string | null;
+          last_error_at: string | null;
+          last_error_message: string | null;
+          updated_at: string;
+        }
+      | undefined;
+    if (!row) {
+      return null;
+    }
+    return {
+      botName: row.bot_name,
+      desiredState: row.desired_state,
+      actualState: row.actual_state,
+      port: row.port ?? undefined,
+      lastStartedAt: row.last_started_at ?? undefined,
+      lastStoppedAt: row.last_stopped_at ?? undefined,
+      lastErrorAt: row.last_error_at ?? undefined,
+      lastErrorMessage: row.last_error_message ?? undefined,
+      updatedAt: row.updated_at
+    };
+  }
+
+  upsertAdminBotState(input: Omit<AdminBotState, "updatedAt">): AdminBotState {
+    const updatedAt = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO admin_bot_state
+         (bot_name, desired_state, actual_state, port, last_started_at, last_stopped_at, last_error_at, last_error_message, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(bot_name) DO UPDATE SET
+           desired_state = excluded.desired_state,
+           actual_state = excluded.actual_state,
+           port = excluded.port,
+           last_started_at = excluded.last_started_at,
+           last_stopped_at = excluded.last_stopped_at,
+           last_error_at = excluded.last_error_at,
+           last_error_message = excluded.last_error_message,
+           updated_at = excluded.updated_at`
+      )
+      .run(
+        input.botName,
+        input.desiredState,
+        input.actualState,
+        input.port ?? null,
+        input.lastStartedAt ?? null,
+        input.lastStoppedAt ?? null,
+        input.lastErrorAt ?? null,
+        input.lastErrorMessage ?? null,
+        updatedAt
+      );
+    return {
+      ...input,
+      updatedAt
+    };
+  }
+
+  appendAdminBotEvent(input: Omit<AdminBotEvent, "id" | "createdAt">): AdminBotEvent {
+    const id = createId("bot_event");
+    const createdAt = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO admin_bot_events (id, bot_name, level, event_type, message, metadata_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        id,
+        input.botName,
+        input.level,
+        input.eventType,
+        input.message,
+        input.metadata ? JSON.stringify(input.metadata) : null,
+        createdAt
+      );
+    return {
+      id,
+      botName: input.botName,
+      level: input.level,
+      eventType: input.eventType,
+      message: input.message,
+      metadata: input.metadata,
+      createdAt
+    };
+  }
+
+  listAdminBotEvents(botName: string, limit = 100): AdminBotEvent[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, bot_name, level, event_type, message, metadata_json, created_at
+         FROM admin_bot_events
+         WHERE bot_name = ?
+         ORDER BY created_at DESC
+         LIMIT ?`
+      )
+      .all(botName, limit) as Array<{
+      id: string;
+      bot_name: string;
+      level: AdminBotEvent["level"];
+      event_type: string;
+      message: string;
+      metadata_json: string | null;
+      created_at: string;
+    }>;
+    return rows.map((row) => ({
+      id: row.id,
+      botName: row.bot_name,
+      level: row.level,
+      eventType: row.event_type,
+      message: row.message,
+      metadata: row.metadata_json ? (JSON.parse(row.metadata_json) as Record<string, unknown>) : undefined,
+      createdAt: row.created_at
+    }));
+  }
+
+  createAdminSession(input: Omit<AdminSession, "lastSeenAt"> & { lastSeenAt?: string }): void {
+    const lastSeenAt = input.lastSeenAt ?? input.createdAt;
+    this.db
+      .prepare(
+        `INSERT INTO admin_sessions (session_id, username, created_at, expires_at, last_seen_at, user_agent, ip_address)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        input.sessionId,
+        input.username,
+        input.createdAt,
+        input.expiresAt,
+        lastSeenAt,
+        input.userAgent ?? null,
+        input.ipAddress ?? null
+      );
+  }
+
+  getAdminSession(sessionId: string): AdminSession | null {
+    const row = this.db
+      .prepare(
+        `SELECT session_id, username, created_at, expires_at, last_seen_at, user_agent, ip_address
+         FROM admin_sessions
+         WHERE session_id = ?`
+      )
+      .get(sessionId) as
+      | {
+          session_id: string;
+          username: string;
+          created_at: string;
+          expires_at: string;
+          last_seen_at: string;
+          user_agent: string | null;
+          ip_address: string | null;
+        }
+      | undefined;
+    if (!row) {
+      return null;
+    }
+    return {
+      sessionId: row.session_id,
+      username: row.username,
+      createdAt: row.created_at,
+      expiresAt: row.expires_at,
+      lastSeenAt: row.last_seen_at,
+      userAgent: row.user_agent ?? undefined,
+      ipAddress: row.ip_address ?? undefined
+    };
+  }
+
+  touchAdminSession(sessionId: string, lastSeenAt: string, expiresAt?: string): void {
+    this.db
+      .prepare(
+        `UPDATE admin_sessions
+         SET last_seen_at = ?, expires_at = COALESCE(?, expires_at)
+         WHERE session_id = ?`
+      )
+      .run(lastSeenAt, expiresAt ?? null, sessionId);
+  }
+
+  deleteAdminSession(sessionId: string): void {
+    this.db.prepare("DELETE FROM admin_sessions WHERE session_id = ?").run(sessionId);
+  }
+
+  deleteExpiredAdminSessions(nowIso = new Date().toISOString()): number {
+    const result = this.db.prepare("DELETE FROM admin_sessions WHERE expires_at <= ?").run(nowIso);
+    return result.changes;
   }
 }

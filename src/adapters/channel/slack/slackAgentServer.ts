@@ -4,6 +4,7 @@ import type { ChartConfiguration } from "chart.js";
 import { AnalyticsAgentRuntime } from "../../../core/agentRuntime.js";
 import type { ConversationStore } from "../../../core/interfaces.js";
 import type { SlackTenantResolution } from "../../../core/interfaces.js";
+import type { AdminBotEvent } from "../../../core/types.js";
 
 export interface SlackAgentServerOptions {
   runtime: AnalyticsAgentRuntime;
@@ -18,6 +19,12 @@ export interface SlackAgentServerOptions {
   ownerTeamIds?: string[];
   ownerEnterpriseIds?: string[];
   strictTenantRouting?: boolean;
+  onEvent?: (event: Omit<AdminBotEvent, "id" | "botName" | "createdAt">) => void | Promise<void>;
+}
+
+export interface SlackAgentServerController {
+  port: number;
+  stop(): Promise<void>;
 }
 
 function parseMessageText(raw: string): string {
@@ -221,7 +228,7 @@ export function parseSlackTeamTenantMap(raw: string): Record<string, string> {
   );
 }
 
-export async function startSlackAgentServer(options: SlackAgentServerOptions): Promise<void> {
+export async function startSlackAgentServer(options: SlackAgentServerOptions): Promise<SlackAgentServerController> {
   if (!options.botToken) {
     throw new Error("SLACK_BOT_TOKEN is required.");
   }
@@ -233,6 +240,23 @@ export async function startSlackAgentServer(options: SlackAgentServerOptions): P
     token: options.botToken,
     signingSecret: options.signingSecret
   });
+  const emitEvent = async (
+    eventType: string,
+    level: AdminBotEvent["level"],
+    message: string,
+    metadata?: Record<string, unknown>
+  ): Promise<void> => {
+    try {
+      await options.onEvent?.({
+        level,
+        eventType,
+        message,
+        metadata
+      });
+    } catch {
+      // ignore observer failures
+    }
+  };
 
   const processMessage = async (input: {
     body: unknown;
@@ -279,6 +303,12 @@ export async function startSlackAgentServer(options: SlackAgentServerOptions): P
     });
 
     if (resolution.rule === "unmapped" || !resolution.tenantId) {
+      await emitEvent("routing.unmapped", "warn", "Slack message rejected due to missing tenant mapping.", {
+        channelId: input.channel,
+        teamId: input.teamId,
+        userId: input.userId,
+        threadTs: input.threadTs
+      });
       await input.client.chat.postMessage({
         channel: input.channel,
         thread_ts: input.threadTs,
@@ -288,6 +318,15 @@ export async function startSlackAgentServer(options: SlackAgentServerOptions): P
     }
 
     const tenantId = resolution.tenantId;
+    await emitEvent("message.received", "info", "Slack message received for processing.", {
+      tenantId,
+      channelId: input.channel,
+      teamId: input.teamId,
+      userId: input.userId,
+      threadTs: input.threadTs,
+      rule: resolution.rule,
+      isDm: input.isDm
+    });
 
     if (options.store.logSlackTenantRoutingAudit) {
       options.store.logSlackTenantRoutingAudit({
@@ -327,6 +366,11 @@ export async function startSlackAgentServer(options: SlackAgentServerOptions): P
       });
       reactionAdded = true;
     } catch (error) {
+      await emitEvent("message.reaction_add_failed", "warn", "Failed to add Slack processing reaction.", {
+        tenantId,
+        channelId: input.channel,
+        error: (error as Error).message
+      });
       process.stderr.write(`Warning: failed to add processing reaction: ${(error as Error).message}\n`);
     }
 
@@ -363,6 +407,11 @@ export async function startSlackAgentServer(options: SlackAgentServerOptions): P
             });
           promptText = buildSlackFormattingPrompt(buildThreadContextPrompt(previousMessages, input.text));
         } catch (error) {
+          await emitEvent("message.thread_context_failed", "warn", "Failed to fetch Slack thread context.", {
+            tenantId,
+            channelId: input.channel,
+            error: (error as Error).message
+          });
           process.stderr.write(
             `Warning: failed to read Slack thread context: ${(error as Error).message}\n`
           );
@@ -374,15 +423,31 @@ export async function startSlackAgentServer(options: SlackAgentServerOptions): P
           tenantId,
           profileName,
           conversationId,
-          llmModel: options.llmModel
+          llmModel: options.llmModel,
+          origin: {
+            source: "slack",
+            teamId: input.teamId ?? undefined,
+            channelId: input.channel,
+            threadTs: input.threadTs,
+            userId: input.userId ?? undefined
+          }
         },
-        promptText
+        input.text,
+        {
+          promptText
+        }
       );
 
       await input.client.chat.postMessage({
         channel: input.channel,
         thread_ts: input.threadTs,
         text: response.text
+      });
+      await emitEvent("message.completed", "info", "Slack message processed successfully.", {
+        tenantId,
+        channelId: input.channel,
+        conversationId,
+        hasArtifacts: Array.isArray(response.artifacts) && response.artifacts.length > 0
       });
 
       const chartConfig = getChartConfigFromArtifacts(response.artifacts);
@@ -397,10 +462,21 @@ export async function startSlackAgentServer(options: SlackAgentServerOptions): P
             file: chartPng
           });
         } catch (chartError) {
+          await emitEvent("message.chart_upload_failed", "warn", "Failed to render or upload Slack chart.", {
+            tenantId,
+            channelId: input.channel,
+            error: (chartError as Error).message
+          });
           process.stderr.write(`Warning: failed to render/send chart image: ${(chartError as Error).message}\n`);
         }
       }
     } catch (error) {
+      await emitEvent("message.error", "error", "Slack message processing failed.", {
+        tenantId,
+        channelId: input.channel,
+        conversationId,
+        error: (error as Error).message
+      });
       await input.client.chat.postMessage({
         channel: input.channel,
         thread_ts: input.threadTs,
@@ -415,6 +491,11 @@ export async function startSlackAgentServer(options: SlackAgentServerOptions): P
             name: processingReaction
           });
         } catch (error) {
+          await emitEvent("message.reaction_remove_failed", "warn", "Failed to remove Slack processing reaction.", {
+            tenantId,
+            channelId: input.channel,
+            error: (error as Error).message
+          });
           process.stderr.write(`Warning: failed to remove processing reaction: ${(error as Error).message}\n`);
         }
       }
@@ -477,5 +558,14 @@ export async function startSlackAgentServer(options: SlackAgentServerOptions): P
   });
 
   await app.start(options.port);
+  await emitEvent("bot.started", "info", "Slack agent server started.", { port: options.port });
   process.stdout.write(`Slack agent server running on port ${options.port}\n`);
+  return {
+    port: options.port,
+    async stop() {
+      await emitEvent("bot.stopping", "info", "Stopping Slack agent server.", { port: options.port });
+      await app.stop();
+      await emitEvent("bot.stopped", "info", "Slack agent server stopped.", { port: options.port });
+    }
+  };
 }

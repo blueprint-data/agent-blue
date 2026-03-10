@@ -5,6 +5,7 @@ import { initializeTenant } from "./bootstrap/initTenant.js";
 import { GitDbtRepositoryService } from "./adapters/dbt/dbtRepoService.js";
 import { parseSlackTeamTenantMap, startSlackAgentServer } from "./adapters/channel/slack/slackAgentServer.js";
 import { startAdminServer } from "./adapters/api/adminServer.js";
+import { hashAdminPassword } from "./adapters/api/admin/adminAuth.js";
 import { createId } from "./utils/id.js";
 import { getStringArg, parseArgs } from "./utils/args.js";
 import { env } from "./config/env.js";
@@ -258,7 +259,8 @@ function usage(): string {
     "  npm run dev -- slack-map-shared-team --team <T...> --tenant <id>",
     "  npm run dev -- slack-map-list",
     "  npm run dev -- slack-map-validate",
-    "  npm run dev -- admin-ui [--port 3100]"
+    "  npm run dev -- admin-ui [--port 3100]",
+    "  npm run dev -- admin-password-hash --password <value>"
   ].join("\n");
 }
 
@@ -307,7 +309,10 @@ async function run(): Promise<void> {
     const verbose = args.verbose === true || env.verboseMode;
 
     if (oneShotMessage) {
-      const response = await runtime.respond({ tenantId, profileName, conversationId, llmModel }, oneShotMessage);
+      const response = await runtime.respond(
+        { tenantId, profileName, conversationId, llmModel, origin: { source: "cli" } },
+        oneShotMessage
+      );
       if (verbose) {
         output.write("\n");
         printVerboseDebug(response.debug);
@@ -336,7 +341,10 @@ async function run(): Promise<void> {
         break;
       }
       try {
-        const response = await runtime.respond({ tenantId, profileName, conversationId, llmModel }, message);
+        const response = await runtime.respond(
+          { tenantId, profileName, conversationId, llmModel, origin: { source: "cli" } },
+          message
+        );
         if (verbose) {
           output.write("\n");
           printVerboseDebug(response.debug);
@@ -384,7 +392,7 @@ async function run(): Promise<void> {
           output.write(`${warnText(`Q${questionIndex + 1}:`)} ${question}\n`);
           try {
             const response = await runtime.respond(
-              { tenantId, profileName, conversationId, llmModel },
+              { tenantId, profileName, conversationId, llmModel, origin: { source: "cli" } },
               question
             );
             const metrics = parseE2eTurnMetrics(response.text, response.debug);
@@ -554,6 +562,12 @@ async function run(): Promise<void> {
       port: Number.isFinite(port) ? port : 3100,
       appDataDir: env.appDataDir
     });
+    return;
+  }
+
+  if (command === "admin-password-hash") {
+    const password = getStringArg(args, "password");
+    output.write(`${hashAdminPassword(password)}\n`);
     return;
   }
 
