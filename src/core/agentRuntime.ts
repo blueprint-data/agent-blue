@@ -6,6 +6,7 @@ import {
   DbtRepositoryService,
   LlmMessage,
   LlmProvider,
+  TenantWarehouseProvider,
   WarehouseAdapter
 } from "./interfaces.js";
 import { AgentArtifact, AgentContext, AgentResponse, QueryResult } from "./types.js";
@@ -46,7 +47,7 @@ const chartRequestSchema = z.object({
 const toolDecisionSchema = z.object({
   type: z.enum(["tool_call", "final_answer"]),
   tool: z
-    .enum(["snowflake.query", "dbt.listModels", "dbt.getModelSql", "snowflake.lookupMetadata", "chartjs.build"])
+    .enum(["warehouse.query", "dbt.listModels", "dbt.getModelSql", "warehouse.lookupMetadata", "chartjs.build"])
     .optional(),
   args: z.record(z.string(), z.unknown()).optional(),
   answer: z.string().optional(),
@@ -57,7 +58,10 @@ function asJsonBlock(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
-function quoteSqlIdent(value: string): string {
+function quoteSqlIdent(value: string, provider?: TenantWarehouseProvider): string {
+  if (provider === "bigquery") {
+    return `\`${value.replace(/`/g, "\\`")}\``;
+  }
   return `"${value.replace(/"/g, '""')}"`;
 }
 
@@ -65,7 +69,27 @@ function sqlLiteral(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
 }
 
+function likeFilter(column: string, search: string, provider?: TenantWarehouseProvider): string {
+  if (provider === "bigquery") {
+    return `LOWER(${column}) LIKE LOWER(${sqlLiteral(`%${search}%`)})`;
+  }
+  return `${column} ILIKE ${sqlLiteral(`%${search}%`)}`;
+}
+
 function buildMetadataLookupSql(
+  lookup: z.infer<typeof metadataLookupSchema>,
+  defaultDatabase: string,
+  defaultSchema: string,
+  maxRows: number,
+  provider?: TenantWarehouseProvider
+): string | null {
+  if (provider === "bigquery") {
+    return buildBigQueryMetadataLookupSql(lookup, defaultDatabase, defaultSchema, maxRows);
+  }
+  return buildSnowflakeMetadataLookupSql(lookup, defaultDatabase, defaultSchema, maxRows);
+}
+
+function buildSnowflakeMetadataLookupSql(
   lookup: z.infer<typeof metadataLookupSchema>,
   defaultDatabase: string,
   defaultSchema: string,
@@ -108,6 +132,47 @@ function buildMetadataLookupSql(
   }
   const whereClause = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
   return `SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, DATA_TYPE FROM ${informationSchema}.COLUMNS ${whereClause} ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION LIMIT ${maxRows}`;
+}
+
+function buildBigQueryMetadataLookupSql(
+  lookup: z.infer<typeof metadataLookupSchema>,
+  defaultProject: string,
+  defaultDataset: string,
+  maxRows: number
+): string | null {
+  const project = lookup.database?.trim() || defaultProject;
+  const dataset = lookup.schema?.trim() || defaultDataset;
+  const table = lookup.table?.trim() || "";
+  const search = lookup.search?.trim();
+  if (!project) {
+    return null;
+  }
+
+  if (lookup.kind === "schemas") {
+    const where = search ? `WHERE ${likeFilter("schema_name", search, "bigquery")}` : "";
+    return `SELECT schema_name FROM \`${project}\`.INFORMATION_SCHEMA.SCHEMATA ${where} ORDER BY schema_name LIMIT ${maxRows}`;
+  }
+  if (lookup.kind === "tables") {
+    if (!dataset) {
+      return null;
+    }
+    const where: string[] = [];
+    if (search) {
+      where.push(likeFilter("table_name", search, "bigquery"));
+    }
+    const whereClause = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
+    return `SELECT table_name, table_type FROM \`${project}.${dataset}\`.INFORMATION_SCHEMA.TABLES ${whereClause} ORDER BY table_name LIMIT ${maxRows}`;
+  }
+
+  if (!dataset || !table) {
+    return null;
+  }
+  const where: string[] = [`table_name = ${sqlLiteral(table)}`];
+  if (search) {
+    where.push(likeFilter("column_name", search, "bigquery"));
+  }
+  const whereClause = `WHERE ${where.join(" AND ")}`;
+  return `SELECT table_name, column_name, data_type FROM \`${project}.${dataset}\`.INFORMATION_SCHEMA.COLUMNS ${whereClause} ORDER BY ordinal_position LIMIT ${maxRows}`;
 }
 
 function inferSchemaHintFromModelPath(relativePath: string, fallbackSchema: string): string {
@@ -226,18 +291,26 @@ export class AnalyticsAgentRuntime {
       const history = this.store.getMessages(context.conversationId, 12);
       const tenantRepo = this.store.getTenantRepo(context.tenantId);
       const tenantWhConfig = this.store.getTenantWarehouseConfig(context.tenantId);
-      const snowflakeDatabase =
-        tenantWhConfig?.snowflake?.database?.trim() ?? process.env.SNOWFLAKE_DATABASE?.trim() ?? "";
-      const snowflakeSchema =
-        tenantWhConfig?.snowflake?.schema?.trim() ?? process.env.SNOWFLAKE_SCHEMA?.trim() ?? "";
       const warehouse = this.resolveWarehouse(context.tenantId);
+      const whProvider: TenantWarehouseProvider = warehouse.provider ?? tenantWhConfig?.provider ?? "snowflake";
+      const isBigQuery = whProvider === "bigquery";
+
+      const whDatabase = isBigQuery
+        ? (tenantWhConfig?.bigquery?.projectId?.trim() ?? process.env.BIGQUERY_PROJECT_ID?.trim() ?? "")
+        : (tenantWhConfig?.snowflake?.database?.trim() ?? process.env.SNOWFLAKE_DATABASE?.trim() ?? "");
+      const whSchema = isBigQuery
+        ? (tenantWhConfig?.bigquery?.dataset?.trim() ?? process.env.BIGQUERY_DATASET?.trim() ?? "")
+        : (tenantWhConfig?.snowflake?.schema?.trim() ?? process.env.SNOWFLAKE_SCHEMA?.trim() ?? "");
+
       const llmModel = context.llmModel?.trim() || process.env.LLM_MODEL || "openai/gpt-4o-mini";
       const now = new Date();
       const currentDateIso = now.toISOString();
       const currentDate = currentDateIso.slice(0, 10);
-      const hasWarehouseDefaults = snowflakeDatabase.length > 0 && snowflakeSchema.length > 0;
+      const hasWarehouseDefaults = whDatabase.length > 0 && whSchema.length > 0;
       const fqPrefix = hasWarehouseDefaults
-        ? `${quoteSqlIdent(snowflakeDatabase)}.${quoteSqlIdent(snowflakeSchema)}`
+        ? isBigQuery
+          ? `\`${whDatabase}.${whSchema}\``
+          : `${quoteSqlIdent(whDatabase)}.${quoteSqlIdent(whSchema)}`
         : "";
       const dbtModels = await measure("dbtModelsMs", async () => {
         try {
@@ -251,13 +324,15 @@ export class AnalyticsAgentRuntime {
           return [];
         }
       });
-      const schemaCandidates = Array.from(
-        new Set(
-          [snowflakeSchema.toUpperCase(), "INT", "MARTS", "STAGING", "CORE", "PUBLIC"].filter(
-            (value) => value.length > 0
-          )
-        )
-      );
+      const schemaCandidates = isBigQuery
+        ? [whSchema].filter((v) => v.length > 0)
+        : Array.from(
+            new Set(
+              [whSchema.toUpperCase(), "INT", "MARTS", "STAGING", "CORE", "PUBLIC"].filter(
+                (value) => value.length > 0
+              )
+            )
+          );
 
       const historyMessages: LlmMessage[] = history
         .filter((m) => m.role !== "tool" && m.role !== "system")
@@ -265,6 +340,60 @@ export class AnalyticsAgentRuntime {
           role: m.role === "user" ? "user" : "assistant",
           content: m.content
         }));
+
+      const sqlGuidanceLines = isBigQuery
+        ? [
+            "SQL generation requirements (strict):",
+            "- The warehouse is Google BigQuery. Write Standard SQL (not Legacy SQL).",
+            "- Use fully-qualified BigQuery object names: `project.dataset.table`.",
+            "- Never use unqualified table names like `fct_transactions`.",
+            hasWarehouseDefaults
+              ? `- Start with ${fqPrefix} as a default guess, but verify with warehouse.lookupMetadata if unsure.`
+              : "- BigQuery project/dataset defaults are unavailable, so infer carefully and avoid guessing.",
+            `- Known dataset candidates: ${schemaCandidates.join(", ") || "(none)"}.`,
+            "- Use dbt model path hints and inspected dbt SQL to choose dataset.",
+            "- If table/dataset/column names are uncertain, use warehouse.lookupMetadata.",
+            "- If dbt lineage is uncertain, use dbt.getModelSql.",
+            "- If visualization is requested, call chartjs.build after at least one successful query.",
+            "- When a chart artifact is generated with chartjs.build, do NOT draw an ASCII/Markdown/text chart in the answer.",
+            "- With chart artifacts, keep the narrative concise: key takeaway(s), notable outliers, and caveats only.",
+            "- For chart queries with time on x-axis, ALWAYS return a normalized time label column:",
+            "  - monthly: FORMAT_TIMESTAMP('%Y-%m', TIMESTAMP_TRUNC(<timestamp_col>, MONTH)) AS period_label",
+            "  - daily: FORMAT_TIMESTAMP('%Y-%m-%d', TIMESTAMP_TRUNC(<timestamp_col>, DAY)) AS period_label",
+            "- Always ORDER BY the same normalized period label ascending.",
+            "- Prefer using the normalized label column as xKey for chartjs.build.",
+            "- Do not repeat the exact same failing SQL."
+          ]
+        : [
+            "SQL generation requirements (strict):",
+            "- The warehouse is Snowflake. Write Snowflake SQL.",
+            "- Use fully-qualified Snowflake object names in every query: DATABASE.SCHEMA.OBJECT.",
+            "- Never use unqualified table names like `fct_transactions`.",
+            hasWarehouseDefaults
+              ? `- Start with ${fqPrefix} as a default guess, but do not treat schema as fixed.`
+              : "- SNOWFLAKE_DATABASE/SCHEMA defaults are unavailable, so infer carefully and avoid guessing.",
+            `- Allowed/expected schema candidates to consider: ${schemaCandidates.join(", ")}.`,
+            "- Use dbt model path hints and inspected dbt SQL to choose schema.",
+            "- If table/schema/column names are uncertain, use warehouse.lookupMetadata.",
+            "- If dbt lineage is uncertain, use dbt.getModelSql.",
+            "- If visualization is requested, call chartjs.build after at least one successful query.",
+            "- When a chart artifact is generated with chartjs.build, do NOT draw an ASCII/Markdown/text chart in the answer.",
+            "- With chart artifacts, keep the narrative concise: key takeaway(s), notable outliers, and caveats only.",
+            "- For chart queries with time on x-axis, ALWAYS return a normalized time label column:",
+            "  - monthly: TO_CHAR(DATE_TRUNC('month', <timestamp_col>), 'YYYY-MM') AS period_label",
+            "  - daily: TO_CHAR(DATE_TRUNC('day', <timestamp_col>), 'YYYY-MM-DD') AS period_label",
+            "- Always ORDER BY the same normalized period label (or underlying truncated date) ascending.",
+            "- Prefer using the normalized label column as xKey for chartjs.build.",
+            "- Do not repeat the exact same failing SQL."
+          ];
+
+      const dbLabel = isBigQuery ? "project" : "database";
+      const schemaLabel = isBigQuery ? "dataset" : "schema";
+      const exampleRelation = hasWarehouseDefaults
+        ? isBigQuery
+          ? `- example fully-qualified relation: \`${whDatabase}.${whSchema}.fct_transactions\``
+          : `- example fully-qualified relation: ${fqPrefix}.${quoteSqlIdent("fct_transactions")}`
+        : "- fully-qualified relation prefix could not be derived from env.";
 
       const baseMessages = (): LlmMessage[] => [
       {
@@ -284,35 +413,17 @@ export class AnalyticsAgentRuntime {
           `Current date/time (UTC): ${currentDateIso}`,
           `Current date (UTC): ${currentDate}`,
           "",
-          "SQL generation requirements (strict):",
-          "- Use fully-qualified Snowflake object names in every query: DATABASE.SCHEMA.OBJECT.",
-          "- Never use unqualified table names like `fct_transactions`.",
-          hasWarehouseDefaults
-            ? `- Start with ${fqPrefix} as a default guess, but do not treat schema as fixed.`
-            : "- SNOWFLAKE_DATABASE/SCHEMA defaults are unavailable, so infer carefully and avoid guessing.",
-          `- Allowed/expected schema candidates to consider: ${schemaCandidates.join(", ")}.`,
-          "- Use dbt model path hints and inspected dbt SQL to choose schema.",
-          "- If table/schema/column names are uncertain, use snowflake.lookupMetadata.",
-          "- If dbt lineage is uncertain, use dbt.getModelSql.",
-          "- If visualization is requested, call chartjs.build after at least one successful query.",
-          "- When a chart artifact is generated with chartjs.build, do NOT draw an ASCII/Markdown/text chart in the answer.",
-          "- With chart artifacts, keep the narrative concise: key takeaway(s), notable outliers, and caveats only.",
-          "- For chart queries with time on x-axis, ALWAYS return a normalized time label column:",
-          "  - monthly: TO_CHAR(DATE_TRUNC('month', <timestamp_col>), 'YYYY-MM') AS period_label",
-          "  - daily: TO_CHAR(DATE_TRUNC('day', <timestamp_col>), 'YYYY-MM-DD') AS period_label",
-          "- Always ORDER BY the same normalized period label (or underlying truncated date) ascending.",
-          "- Prefer using the normalized label column as xKey for chartjs.build.",
-          "- Do not repeat the exact same failing SQL.",
+          ...sqlGuidanceLines,
           "",
           "Available tools and args:",
-          "- snowflake.query: { sql: string }",
+          "- warehouse.query: { sql: string }",
           "- dbt.listModels: {}",
           "- dbt.getModelSql: { modelName: string }",
-          '- snowflake.lookupMetadata: { kind: "schemas"|"tables"|"columns", database?: string, schema?: string, table?: string, search?: string }',
+          `- warehouse.lookupMetadata: { kind: "schemas"|"tables"|"columns", ${dbLabel}?: string, ${schemaLabel}?: string, table?: string, search?: string }`,
           '- chartjs.build: { type?: "bar"|"line"|"pie"|"doughnut", title?: string, xKey?: string, yKey?: string, seriesKey?: string, horizontal?: boolean, stacked?: boolean, grouped?: boolean, percentStacked?: boolean, sort?: "none"|"asc"|"desc"|"label_asc"|"label_desc", smooth?: boolean, tension?: number, fill?: boolean, step?: boolean, pointRadius?: number, donutCutout?: number, showPercentLabels?: boolean, topN?: number, otherLabel?: string, stackId?: string, maxPoints?: number }',
           "",
           "Return ONLY valid JSON in one of these shapes:",
-          '{ "type": "tool_call", "tool": "snowflake.query|dbt.listModels|dbt.getModelSql|snowflake.lookupMetadata|chartjs.build", "args": { ... }, "reasoning"?: string }',
+          '{ "type": "tool_call", "tool": "warehouse.query|dbt.listModels|dbt.getModelSql|warehouse.lookupMetadata|chartjs.build", "args": { ... }, "reasoning"?: string }',
           '{ "type": "final_answer", "answer": string, "reasoning"?: string }',
           "- If the user request is not analytical, ALWAYS return final_answer with the refusal text and do not call tools.",
           "",
@@ -323,17 +434,16 @@ export class AnalyticsAgentRuntime {
         role: "system",
         content: [
           "Warehouse context:",
+          `- provider: ${whProvider}`,
           `- current_date_utc: ${currentDate}`,
           `- current_datetime_utc: ${currentDateIso}`,
           `- tenantId: ${context.tenantId}`,
-          `- database: ${snowflakeDatabase || "(not set)"}`,
-          `- schema: ${snowflakeSchema || "(not set)"}`,
-          `- schema_candidates: ${schemaCandidates.join(", ")}`,
+          `- ${dbLabel}: ${whDatabase || "(not set)"}`,
+          `- ${schemaLabel}: ${whSchema || "(not set)"}`,
+          isBigQuery ? "" : `- schema_candidates: ${schemaCandidates.join(", ")}`,
           `- dbt subpath: ${tenantRepo?.dbtSubpath ?? "(unknown)"}`,
-          hasWarehouseDefaults
-            ? `- example fully-qualified relation: ${fqPrefix}.${quoteSqlIdent("fct_transactions")}`
-            : "- fully-qualified relation prefix could not be derived from env."
-        ].join("\n")
+          exampleRelation
+        ].filter(Boolean).join("\n")
       },
       {
         role: "system",
@@ -343,8 +453,11 @@ export class AnalyticsAgentRuntime {
             if (!hasWarehouseDefaults) {
               return `${m.name} -> ${m.relativePath}`;
             }
-            const hintedSchema = inferSchemaHintFromModelPath(m.relativePath, snowflakeSchema.toUpperCase());
-            return `${m.name} -> ${m.relativePath} -> "${snowflakeDatabase}"."${hintedSchema}".${quoteSqlIdent(m.name)}`;
+            if (isBigQuery) {
+              return `${m.name} -> ${m.relativePath} -> \`${whDatabase}.${whSchema}.${m.name}\``;
+            }
+            const hintedSchema = inferSchemaHintFromModelPath(m.relativePath, whSchema.toUpperCase());
+            return `${m.name} -> ${m.relativePath} -> "${whDatabase}"."${hintedSchema}".${quoteSqlIdent(m.name)}`;
           })
           .join("\n")}`
       },
@@ -480,22 +593,23 @@ export class AnalyticsAgentRuntime {
           continue;
         }
 
-        if (plan.tool === "snowflake.lookupMetadata") {
+        if (plan.tool === "warehouse.lookupMetadata") {
           const parsedLookup = metadataLookupSchema.safeParse(args);
           if (!parsedLookup.success) {
-            throw new Error("snowflake.lookupMetadata requires valid lookup args.");
+            throw new Error("warehouse.lookupMetadata requires valid lookup args.");
           }
           const metadataSql = buildMetadataLookupSql(
             parsedLookup.data,
-            snowflakeDatabase,
-            snowflakeSchema,
-            profile.maxRowsPerQuery
+            whDatabase,
+            whSchema,
+            profile.maxRowsPerQuery,
+            whProvider
           );
           if (!metadataSql) {
-            throw new Error("Metadata lookup requires database context.");
+            throw new Error(`Metadata lookup requires ${isBigQuery ? "project" : "database"} context.`);
           }
           const metadataResult = await runTool(
-            "snowflake.lookupMetadata",
+            "warehouse.lookupMetadata",
             { ...parsedLookup.data, sql: metadataSql },
             async () => warehouse.query(metadataSql),
             (result) => ({ rowCount: result.rowCount, columns: result.columns }),
@@ -507,7 +621,7 @@ export class AnalyticsAgentRuntime {
           );
           loopMessages.push({
             role: "user",
-            content: `Tool result (snowflake.lookupMetadata): ${asJsonBlock({
+            content: `Tool result (warehouse.lookupMetadata): ${asJsonBlock({
               columns: metadataResult.columns,
               rowCount: metadataResult.rowCount,
               rows: metadataResult.rows.slice(0, profile.maxRowsPerQuery)
@@ -522,7 +636,7 @@ export class AnalyticsAgentRuntime {
             throw new Error("chartjs.build requires valid chart args.");
           }
           if (!lastSuccessfulQuery) {
-            throw new Error("No successful query result available yet. Run snowflake.query first.");
+            throw new Error("No successful query result available yet. Run warehouse.query first.");
           }
           const successfulQuery = lastSuccessfulQuery;
           const chartBuild = await runTool(
@@ -550,10 +664,10 @@ export class AnalyticsAgentRuntime {
           continue;
         }
 
-        if (plan.tool === "snowflake.query") {
+        if (plan.tool === "warehouse.query") {
           const sql = typeof args.sql === "string" ? args.sql.trim() : "";
           if (!sql) {
-            throw new Error("snowflake.query requires args.sql.");
+            throw new Error("warehouse.query requires args.sql.");
           }
           const normalizedSql = this.sqlGuard
             .normalize(sql)
@@ -563,9 +677,9 @@ export class AnalyticsAgentRuntime {
           }
           attemptedSql.add(normalizedSql);
           finalSql = normalizedSql;
-          const queryResult = await measure("snowflakeMs", async () =>
+          const queryResult = await measure("warehouseMs", async () =>
             runTool(
-              "snowflake.query",
+              "warehouse.query",
               { sql: normalizedSql },
               async () => warehouse.query(normalizedSql),
               (result) => ({ rowCount: result.rowCount, columns: result.columns }),
@@ -579,7 +693,7 @@ export class AnalyticsAgentRuntime {
           lastSuccessfulQuery = { sql: normalizedSql, result: queryResult };
           loopMessages.push({
             role: "user",
-            content: `Tool result (snowflake.query): ${asJsonBlock({
+            content: `Tool result (warehouse.query): ${asJsonBlock({
               sql: normalizedSql,
               columns: queryResult.columns,
               rowCount: queryResult.rowCount,

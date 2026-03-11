@@ -15,6 +15,7 @@ import { initializeTenant } from "../../../bootstrap/initTenant.js";
 import { buildWarehouseFromTenantConfig } from "../../../app.js";
 import { GitDbtRepositoryService } from "../../dbt/dbtRepoService.js";
 import type { SlackBotSupervisor } from "./slackBotSupervisor.js";
+import type { TelegramBotSupervisor } from "./telegramBotSupervisor.js";
 
 function param(req: Request, name: string): string {
   const value = req.params[name];
@@ -25,10 +26,11 @@ export interface AdminApiRouterOptions {
   store: ConversationStore;
   appDataDir: string;
   slackBotSupervisor?: SlackBotSupervisor;
+  telegramBotSupervisor?: TelegramBotSupervisor;
 }
 
 export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
-  const { store, appDataDir, slackBotSupervisor } = options;
+  const { store, appDataDir, slackBotSupervisor, telegramBotSupervisor } = options;
   const router = Router();
   const dbtRepo = new GitDbtRepositoryService(store);
 
@@ -128,13 +130,25 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
     }
   });
 
-  const maxP8Size = 64 * 1024;
+  const maxKeySize = 64 * 1024;
   const uploadP8 = multer({
     storage: multer.memoryStorage(),
-    limits: { fileSize: maxP8Size },
+    limits: { fileSize: maxKeySize },
     fileFilter(_req, file, cb) {
       if (path.extname(file.originalname || "").toLowerCase() !== ".p8") {
         cb(new Error("Only .p8 files are allowed"));
+        return;
+      }
+      cb(null, true);
+    }
+  });
+
+  const uploadJson = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: maxKeySize },
+    fileFilter(_req, file, cb) {
+      if (path.extname(file.originalname || "").toLowerCase() !== ".json") {
+        cb(new Error("Only .json files are allowed"));
         return;
       }
       cb(null, true);
@@ -198,6 +212,82 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
           uploadedAt,
           fingerprint,
           message: "Key uploaded. Warehouse config updated to use keypair auth."
+        });
+      } catch (error) {
+        res.status(500).json({ error: (error as Error).message });
+      }
+    }
+  );
+
+  router.post(
+    "/tenants/:tenantId/bq-key-upload",
+    (req: Request, res: Response, next: NextFunction) => {
+      uploadJson.single("file")(req, res, (error: unknown) => {
+        if (error) {
+          const message = error instanceof Error ? error.message : "Upload failed";
+          res.status(400).json({ error: message });
+          return;
+        }
+        next();
+      });
+    },
+    (req: Request, res: Response) => {
+      try {
+        const tenantId = param(req, "tenantId");
+        const repo = store.getTenantRepo(tenantId);
+        if (!repo) {
+          res.status(404).json({ error: "Tenant not found" });
+          return;
+        }
+        const file = req.file;
+        if (!file?.buffer) {
+          res.status(400).json({ error: "No file uploaded. Use form field 'file' with a .json service account key file." });
+          return;
+        }
+        let parsed: Record<string, unknown>;
+        try {
+          parsed = JSON.parse(file.buffer.toString("utf-8")) as Record<string, unknown>;
+        } catch {
+          res.status(400).json({ error: "File is not valid JSON." });
+          return;
+        }
+        if (parsed.type !== "service_account") {
+          res.status(400).json({ error: "JSON file must be a Google Cloud service account key (type: \"service_account\")." });
+          return;
+        }
+        const keysDir = path.join(appDataDir, "keys", tenantId);
+        fs.mkdirSync(keysDir, { recursive: true, mode: 0o700 });
+        const filePath = path.join(keysDir, `bigquery_sa_${Date.now()}.json`);
+        fs.writeFileSync(filePath, file.buffer, { mode: 0o600 });
+        const fingerprint = crypto.createHash("sha256").update(file.buffer).digest("hex").slice(0, 16);
+        const uploadedAt = new Date().toISOString();
+        const existing = store.getTenantKeyMetadata(tenantId);
+        if (existing?.filePath && existing.filePath !== filePath && fs.existsSync(existing.filePath)) {
+          try {
+            fs.unlinkSync(existing.filePath);
+          } catch {
+            // ignore cleanup errors
+          }
+        }
+        store.upsertTenantKeyMetadata({ tenantId, filePath, uploadedAt, fingerprint });
+        const warehouseConfig = store.getTenantWarehouseConfig(tenantId);
+        if (warehouseConfig?.provider === "bigquery" && warehouseConfig.bigquery) {
+          store.upsertTenantWarehouseConfig({
+            ...warehouseConfig,
+            bigquery: {
+              ...warehouseConfig.bigquery,
+              authType: "service-account-key",
+              serviceAccountKeyPath: filePath
+            }
+          });
+        }
+        res.status(201).json({
+          tenantId,
+          filePath,
+          uploadedAt,
+          fingerprint,
+          clientEmail: typeof parsed.client_email === "string" ? parsed.client_email : undefined,
+          message: "BigQuery service account key uploaded. Warehouse config updated."
         });
       } catch (error) {
         res.status(500).json({ error: (error as Error).message });
@@ -409,6 +499,146 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
       };
       store.upsertTenantCredentialsRef(merged);
       res.json(merged);
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.get("/tenants/:tenantId/warehouse", (req: Request, res: Response) => {
+    try {
+      const tenantId = param(req, "tenantId");
+      if (!store.getTenantRepo(tenantId)) {
+        res.status(404).json({ error: "Tenant not found" });
+        return;
+      }
+      const config = store.getTenantWarehouseConfig(tenantId);
+      if (!config) {
+        res.json({ tenantId, provider: null });
+        return;
+      }
+      const sanitized: Record<string, unknown> = {
+        tenantId: config.tenantId,
+        provider: config.provider,
+        updatedAt: config.updatedAt
+      };
+      if (config.provider === "snowflake" && config.snowflake) {
+        sanitized.snowflake = {
+          account: config.snowflake.account,
+          username: config.snowflake.username,
+          warehouse: config.snowflake.warehouse,
+          database: config.snowflake.database,
+          schema: config.snowflake.schema,
+          role: config.snowflake.role,
+          authType: config.snowflake.authType
+        };
+      }
+      if (config.provider === "bigquery" && config.bigquery) {
+        sanitized.bigquery = {
+          projectId: config.bigquery.projectId,
+          dataset: config.bigquery.dataset,
+          location: config.bigquery.location,
+          authType: config.bigquery.authType ?? "adc"
+        };
+      }
+      res.json(sanitized);
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.get("/telegram-mappings", (_req: Request, res: Response) => {
+    try {
+      res.json(store.listTelegramChatMappings());
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.put("/telegram-mappings/:chatId", (req: Request, res: Response) => {
+    try {
+      const chatId = param(req, "chatId");
+      const { tenantId } = req.body as { tenantId?: string };
+      if (!tenantId) {
+        res.status(400).json({ error: "tenantId required" });
+        return;
+      }
+      if (!store.getTenantRepo(tenantId)) {
+        res.status(400).json({ error: "Tenant not found" });
+        return;
+      }
+      store.upsertTelegramChatTenant(chatId, tenantId, "manual");
+      res.json({ chatId, tenantId, source: "manual" });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.delete("/telegram-mappings/:chatId", (req: Request, res: Response) => {
+    try {
+      store.deleteTelegramChatMapping(param(req, "chatId"));
+      res.status(204).send();
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.get("/telegram-bot/status", (_req: Request, res: Response) => {
+    try {
+      if (!telegramBotSupervisor) {
+        res.status(503).json({ error: "Telegram bot supervisor unavailable" });
+        return;
+      }
+      res.json(telegramBotSupervisor.getStatus());
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.get("/telegram-bot/events", (req: Request, res: Response) => {
+    try {
+      if (!telegramBotSupervisor) {
+        res.status(503).json({ error: "Telegram bot supervisor unavailable" });
+        return;
+      }
+      const limitRaw = typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : 100;
+      const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 500) : 100;
+      res.json(telegramBotSupervisor.listEvents(limit));
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.post("/telegram-bot/start", async (_req: Request, res: Response) => {
+    try {
+      if (!telegramBotSupervisor) {
+        res.status(503).json({ error: "Telegram bot supervisor unavailable" });
+        return;
+      }
+      res.json(await telegramBotSupervisor.start());
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.post("/telegram-bot/stop", async (_req: Request, res: Response) => {
+    try {
+      if (!telegramBotSupervisor) {
+        res.status(503).json({ error: "Telegram bot supervisor unavailable" });
+        return;
+      }
+      res.json(await telegramBotSupervisor.stop());
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.post("/telegram-bot/restart", async (_req: Request, res: Response) => {
+    try {
+      if (!telegramBotSupervisor) {
+        res.status(503).json({ error: "Telegram bot supervisor unavailable" });
+        return;
+      }
+      res.json(await telegramBotSupervisor.restart());
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }
@@ -649,13 +879,23 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
           snowflake.passwordEnvVar = "SNOWFLAKE_PASSWORD";
         }
       }
-      if (provider === "bigquery" && !body.bigquery?.projectId) {
-        res.status(400).json({
-          status: "failed",
-          step: "warehouse",
-          error: "BigQuery config requires projectId."
-        });
-        return;
+      if (provider === "bigquery") {
+        if (!body.bigquery?.projectId) {
+          res.status(400).json({
+            status: "failed",
+            step: "warehouse",
+            error: "BigQuery config requires projectId."
+          });
+          return;
+        }
+        if (body.bigquery.authType === "service-account-key" && !body.bigquery.serviceAccountKeyPath) {
+          res.status(400).json({
+            status: "failed",
+            step: "warehouse",
+            error: "serviceAccountKeyPath required for service-account-key auth. Upload a key file first."
+          });
+          return;
+        }
       }
       store.upsertTenantWarehouseConfig({
         tenantId,
@@ -685,18 +925,11 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
         });
         return;
       }
-      if (config.provider === "bigquery") {
-        res.status(400).json({
-          status: "failed",
-          step: "warehouse_test",
-          error: "BigQuery warehouse test is not implemented yet."
-        });
-        return;
-      }
       const warehouse = buildWarehouseFromTenantConfig(config);
-      const result = await warehouse.query(
-        "SELECT CURRENT_ACCOUNT() AS account, CURRENT_ROLE() AS role, CURRENT_DATABASE() AS database_name, CURRENT_SCHEMA() AS schema_name LIMIT 1"
-      );
+      const testQuery = config.provider === "bigquery"
+        ? "SELECT 1 AS test"
+        : "SELECT CURRENT_ACCOUNT() AS account, CURRENT_ROLE() AS role, CURRENT_DATABASE() AS database_name, CURRENT_SCHEMA() AS schema_name LIMIT 1";
+      const result = await warehouse.query(testQuery);
       res.json({
         status: "passed",
         step: "warehouse_test",
@@ -709,7 +942,7 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
         status: "failed",
         step: "warehouse_test",
         error: (error as Error).message,
-        hint: "For Snowflake keypair: ensure privateKeyPath is correct. For password: set the passwordEnvVar in env."
+        hint: "For Snowflake keypair: ensure privateKeyPath is correct. For password: set the passwordEnvVar in env. For BigQuery SA key: ensure the key file exists and has correct permissions."
       });
     }
   });
@@ -787,10 +1020,13 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
         checks.push({ name: "repo_sync", passed: false, message: (error as Error).message });
       }
 
-      if (warehouseConfig && warehouseConfig.provider === "snowflake") {
+      if (warehouseConfig) {
         try {
           const warehouse = buildWarehouseFromTenantConfig(warehouseConfig);
-          await warehouse.query("SELECT 1 AS ok LIMIT 1");
+          const testQuery = warehouseConfig.provider === "bigquery"
+            ? "SELECT 1 AS ok"
+            : "SELECT 1 AS ok LIMIT 1";
+          await warehouse.query(testQuery);
           warehouseOk = true;
           checks.push({ name: "warehouse_connect", passed: true });
         } catch (error) {
@@ -800,7 +1036,7 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
         checks.push({
           name: "warehouse_connect",
           passed: false,
-          message: "Warehouse config missing or BigQuery not supported."
+          message: "Warehouse config missing."
         });
       }
 
