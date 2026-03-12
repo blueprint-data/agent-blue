@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { buildLlmProvider, buildRuntime, buildSnowflakeWarehouse, buildStore } from "./app.js";
+import { buildLlmProvider, buildRuntime, buildSnowflakeWarehouse, buildStore, buildWarehouseResolver } from "./app.js";
 import { initializeTenant } from "./bootstrap/initTenant.js";
 import { GitDbtRepositoryService } from "./adapters/dbt/dbtRepoService.js";
 import { parseSlackTeamTenantMap, startSlackAgentServer } from "./adapters/channel/slack/slackAgentServer.js";
@@ -12,6 +12,7 @@ import { hashAdminPassword } from "./adapters/api/admin/adminAuth.js";
 import { createId } from "./utils/id.js";
 import { getStringArg, parseArgs } from "./utils/args.js";
 import { env } from "./config/env.js";
+import { runContextInit } from "./context/contextInit.js";
 
 const canUseAnsi = Boolean(output.isTTY) && process.env.NO_COLOR !== "1";
 
@@ -253,6 +254,7 @@ function usage(): string {
     "Usage:",
     "  npm run dev -- init --tenant <id> --repo-url <git@...> [--dbt-subpath models] [--force]",
     "  npm run dev -- sync-dbt --tenant <id>",
+    "  npm run dev -- context --tenant <id>",
     "  npm run dev -- e2e-loop --tenant <id> [--profile default] [--model <provider/model>] [--models <m1,m2>] [--runs 1] [--verbose]",
     "  npm run dev -- prod-smoke --tenant <id> [--model <provider/model>]",
     "  npm run dev -- chat --tenant <id> [--profile default] [--conversation <id>] [--message \"...\"] [--verbose] [--model <provider/model>]",
@@ -305,6 +307,14 @@ async function run(): Promise<void> {
     await dbt.syncRepo(tenantId);
     const models = await dbt.listModels(tenantId);
     output.write(`Synced dbt repo for tenant "${tenantId}". Models found: ${models.length}\n`);
+    return;
+  }
+
+  if (command === "context") {
+    const tenantId = getStringArg(args, "tenant");
+    const llm = buildLlmProvider();
+    const warehouseResolver = buildWarehouseResolver(store);
+    await runContextInit(tenantId, { store, llm, warehouseResolver });
     return;
   }
 
