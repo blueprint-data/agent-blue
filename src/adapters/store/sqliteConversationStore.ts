@@ -19,7 +19,8 @@ import {
   AgentProfile,
   ConversationMessage,
   ConversationOrigin,
-  ConversationSource
+  ConversationSource,
+  TenantMemory
 } from "../../core/types.js";
 import { createId } from "../../utils/id.js";
 
@@ -31,6 +32,18 @@ const DEFAULT_SOUL_PROMPT = [
   "Be precise, avoid hallucinations, and communicate assumptions.",
   "Prefer concise summaries with clear numbers and caveats."
 ].join(" ");
+
+function tokenizeMemorySearch(value: string): string[] {
+  return Array.from(
+    new Set(
+      value
+        .toLowerCase()
+        .split(/[^a-z0-9]+/i)
+        .map((token) => token.trim())
+        .filter((token) => token.length >= 3)
+    )
+  );
+}
 
 export class SqliteConversationStore implements ConversationStore {
   private readonly db: Database.Database;
@@ -58,6 +71,20 @@ export class SqliteConversationStore implements ConversationStore {
         content TEXT NOT NULL,
         created_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS tenant_memories (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        source_conversation_id TEXT,
+        source_message_id TEXT,
+        last_used_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_tenant_memories_tenant_status_updated
+        ON tenant_memories (tenant_id, status, updated_at DESC);
 
       CREATE TABLE IF NOT EXISTS agent_profiles (
         id TEXT PRIMARY KEY,
@@ -267,6 +294,204 @@ export class SqliteConversationStore implements ConversationStore {
         content: r.content,
         createdAt: r.created_at
       }));
+  }
+
+  private mapTenantMemoryRow(row: {
+    id: string;
+    tenant_id: string;
+    summary: string;
+    status: TenantMemory["status"];
+    created_at: string;
+    updated_at: string;
+    source_conversation_id: string | null;
+    source_message_id: string | null;
+    last_used_at: string | null;
+  }): TenantMemory {
+    return {
+      id: row.id,
+      tenantId: row.tenant_id,
+      summary: row.summary,
+      status: row.status,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      sourceConversationId: row.source_conversation_id ?? undefined,
+      sourceMessageId: row.source_message_id ?? undefined,
+      lastUsedAt: row.last_used_at ?? undefined
+    };
+  }
+
+  createTenantMemory(input: {
+    tenantId: string;
+    summary: string;
+    sourceConversationId?: string;
+    sourceMessageId?: string;
+  }): TenantMemory {
+    const id = createId("mem");
+    const createdAt = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO tenant_memories
+         (id, tenant_id, summary, status, created_at, updated_at, source_conversation_id, source_message_id, last_used_at)
+         VALUES (?, ?, ?, 'active', ?, ?, ?, ?, NULL)`
+      )
+      .run(
+        id,
+        input.tenantId,
+        input.summary,
+        createdAt,
+        createdAt,
+        input.sourceConversationId ?? null,
+        input.sourceMessageId ?? null
+      );
+    return this.getTenantMemory(id, input.tenantId) as TenantMemory;
+  }
+
+  getTenantMemory(memoryId: string, tenantId: string): TenantMemory | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, tenant_id, summary, status, created_at, updated_at, source_conversation_id, source_message_id, last_used_at
+         FROM tenant_memories
+         WHERE id = ? AND tenant_id = ?`
+      )
+      .get(memoryId, tenantId) as
+      | {
+          id: string;
+          tenant_id: string;
+          summary: string;
+          status: TenantMemory["status"];
+          created_at: string;
+          updated_at: string;
+          source_conversation_id: string | null;
+          source_message_id: string | null;
+          last_used_at: string | null;
+        }
+      | undefined;
+    return row ? this.mapTenantMemoryRow(row) : null;
+  }
+
+  listTenantMemories(input: { tenantId: string; includeDeleted?: boolean; limit?: number }): TenantMemory[] {
+    const limit = input.limit ?? 100;
+    const whereClause = input.includeDeleted ? "tenant_id = ?" : "tenant_id = ? AND status = 'active'";
+    const rows = this.db
+      .prepare(
+        `SELECT id, tenant_id, summary, status, created_at, updated_at, source_conversation_id, source_message_id, last_used_at
+         FROM tenant_memories
+         WHERE ${whereClause}
+         ORDER BY updated_at DESC
+         LIMIT ?`
+      )
+      .all(input.tenantId, limit) as Array<{
+      id: string;
+      tenant_id: string;
+      summary: string;
+      status: TenantMemory["status"];
+      created_at: string;
+      updated_at: string;
+      source_conversation_id: string | null;
+      source_message_id: string | null;
+      last_used_at: string | null;
+    }>;
+    return rows.map((row) => this.mapTenantMemoryRow(row));
+  }
+
+  updateTenantMemory(input: { id: string; tenantId: string; summary: string }): TenantMemory | null {
+    const existing = this.getTenantMemory(input.id, input.tenantId);
+    if (!existing || existing.status !== "active") {
+      return null;
+    }
+    const updatedAt = new Date().toISOString();
+    this.db
+      .prepare(
+        `UPDATE tenant_memories
+         SET summary = ?, updated_at = ?
+         WHERE id = ? AND tenant_id = ? AND status = 'active'`
+      )
+      .run(input.summary, updatedAt, input.id, input.tenantId);
+    return this.getTenantMemory(input.id, input.tenantId);
+  }
+
+  deleteTenantMemory(memoryId: string, tenantId: string): TenantMemory | null {
+    const existing = this.getTenantMemory(memoryId, tenantId);
+    if (!existing || existing.status === "deleted") {
+      return null;
+    }
+    const updatedAt = new Date().toISOString();
+    this.db
+      .prepare(
+        `UPDATE tenant_memories
+         SET status = 'deleted', updated_at = ?
+         WHERE id = ? AND tenant_id = ? AND status = 'active'`
+      )
+      .run(updatedAt, memoryId, tenantId);
+    return this.getTenantMemory(memoryId, tenantId);
+  }
+
+  getTenantMemoriesForPrompt(input: { tenantId: string; queryText?: string; limit?: number }): TenantMemory[] {
+    const limit = Math.max(1, Math.min(input.limit ?? 5, 20));
+    const rows = this.db
+      .prepare(
+        `SELECT id, tenant_id, summary, status, created_at, updated_at, source_conversation_id, source_message_id, last_used_at
+         FROM tenant_memories
+         WHERE tenant_id = ? AND status = 'active'
+         ORDER BY
+           CASE WHEN last_used_at IS NULL THEN 1 ELSE 0 END ASC,
+           last_used_at DESC,
+           updated_at DESC
+         LIMIT 200`
+      )
+      .all(input.tenantId) as Array<{
+      id: string;
+      tenant_id: string;
+      summary: string;
+      status: TenantMemory["status"];
+      created_at: string;
+      updated_at: string;
+      source_conversation_id: string | null;
+      source_message_id: string | null;
+      last_used_at: string | null;
+    }>;
+    const memories = rows.map((row) => this.mapTenantMemoryRow(row));
+    const searchTokens = tokenizeMemorySearch(input.queryText ?? "");
+    if (searchTokens.length === 0) {
+      return memories.slice(0, limit);
+    }
+    return memories
+      .map((memory, index) => {
+        const haystack = memory.summary.toLowerCase();
+        let score = 0;
+        for (const token of searchTokens) {
+          if (haystack.includes(token)) {
+            score += 1;
+          }
+        }
+        return { memory, score, index };
+      })
+      .sort((a, b) => {
+        if (b.score !== a.score) {
+          return b.score - a.score;
+        }
+        return a.index - b.index;
+      })
+      .slice(0, limit)
+      .map((entry) => entry.memory);
+  }
+
+  markTenantMemoriesUsed(tenantId: string, memoryIds: string[], usedAt = new Date().toISOString()): void {
+    if (memoryIds.length === 0) {
+      return;
+    }
+    const uniqueIds = Array.from(new Set(memoryIds));
+    const statement = this.db.prepare(
+      `UPDATE tenant_memories
+       SET last_used_at = ?
+       WHERE tenant_id = ? AND id = ? AND status = 'active'`
+    );
+    const transaction = this.db.transaction((ids: string[]) => {
+      for (const memoryId of ids) {
+        statement.run(usedAt, tenantId, memoryId);
+      }
+    });
+    transaction(uniqueIds);
   }
 
   getOrCreateProfile(tenantId: string, profileName: string): AgentProfile {
@@ -560,6 +785,7 @@ export class SqliteConversationStore implements ConversationStore {
     this.db.prepare("DELETE FROM tenant_credentials_ref WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM tenant_warehouse_config WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM tenant_key_metadata WHERE tenant_id = ?").run(tenantId);
+    this.db.prepare("DELETE FROM tenant_memories WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM messages WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM conversations WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM agent_profiles WHERE tenant_id = ?").run(tenantId);

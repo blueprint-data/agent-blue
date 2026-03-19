@@ -10,7 +10,8 @@ import {
   ConversationOrigin,
   ConversationSource,
   DbtModelInfo,
-  QueryResult
+  QueryResult,
+  TenantMemory
 } from "./types.js";
 
 export interface LlmMessage {
@@ -159,6 +160,18 @@ export interface ConversationStore {
   getTenantKeyMetadata(tenantId: string): TenantKeyMetadata | null;
   upsertTenantKeyMetadata(input: TenantKeyMetadata): void;
   deleteTenantKeyMetadata(tenantId: string): void;
+  createTenantMemory(input: {
+    tenantId: string;
+    summary: string;
+    sourceConversationId?: string;
+    sourceMessageId?: string;
+  }): TenantMemory;
+  getTenantMemory(memoryId: string, tenantId: string): TenantMemory | null;
+  listTenantMemories(input: { tenantId: string; includeDeleted?: boolean; limit?: number }): TenantMemory[];
+  updateTenantMemory(input: { id: string; tenantId: string; summary: string }): TenantMemory | null;
+  deleteTenantMemory(memoryId: string, tenantId: string): TenantMemory | null;
+  getTenantMemoriesForPrompt(input: { tenantId: string; queryText?: string; limit?: number }): TenantMemory[];
+  markTenantMemoriesUsed(tenantId: string, memoryIds: string[], usedAt?: string): void;
   upsertConversationOrigin(conversationId: string, tenantId: string, origin: ConversationOrigin): void;
   getConversationOrigin(conversationId: string): ConversationOrigin | null;
   createExecutionTurn(input: Omit<AgentExecutionTurn, "id" | "createdAt" | "updatedAt">): AgentExecutionTurn;

@@ -43,10 +43,37 @@ const chartRequestSchema = z.object({
   maxPoints: z.number().int().positive().max(500).optional()
 });
 
+const memoryCreateSchema = z.object({
+  summary: z.string().trim().min(1).max(240)
+});
+
+const memoryListSchema = z.object({
+  includeDeleted: z.boolean().optional()
+});
+
+const memoryUpdateSchema = z.object({
+  id: z.string().trim().min(1),
+  summary: z.string().trim().min(1).max(240)
+});
+
+const memoryDeleteSchema = z.object({
+  id: z.string().trim().min(1)
+});
+
 const toolDecisionSchema = z.object({
   type: z.enum(["tool_call", "final_answer"]),
   tool: z
-    .enum(["snowflake.query", "dbt.listModels", "dbt.getModelSql", "snowflake.lookupMetadata", "chartjs.build"])
+    .enum([
+      "snowflake.query",
+      "dbt.listModels",
+      "dbt.getModelSql",
+      "snowflake.lookupMetadata",
+      "chartjs.build",
+      "memory.create",
+      "memory.list",
+      "memory.update",
+      "memory.delete"
+    ])
     .optional(),
   args: z.record(z.string(), z.unknown()).optional(),
   answer: z.string().optional(),
@@ -127,6 +154,15 @@ function inferSchemaHintFromModelPath(relativePath: string, fallbackSchema: stri
   return fallbackSchema || "PUBLIC";
 }
 
+function buildTenantMemorySystemMessage(summaries: string[]): string {
+  return [
+    "Tenant memory (shared business context from prior conversations):",
+    "- Treat these as tenant-specific conventions and definitions unless the user explicitly corrects them.",
+    "- Prefer these definitions when answering analytics questions for this tenant.",
+    ...summaries.map((summary) => `- ${summary}`)
+  ].join("\n");
+}
+
 export type WarehouseResolver = WarehouseAdapter | ((tenantId: string) => WarehouseAdapter);
 
 export interface RuntimeRespondOptions {
@@ -205,7 +241,7 @@ export class AnalyticsAgentRuntime {
     if (context.origin) {
       this.store.upsertConversationOrigin(context.conversationId, context.tenantId, context.origin);
     }
-    this.store.addMessage({
+    const userMessage = this.store.addMessage({
       tenantId: context.tenantId,
       conversationId: context.conversationId,
       role: "user",
@@ -224,6 +260,11 @@ export class AnalyticsAgentRuntime {
       const profile = this.store.getOrCreateProfile(context.tenantId, context.profileName);
       timings.profileMs = Date.now() - startedAt;
       const history = this.store.getMessages(context.conversationId, 12);
+      const tenantMemories = this.store.getTenantMemoriesForPrompt({
+        tenantId: context.tenantId,
+        queryText: persistedUserText,
+        limit: 5
+      });
       const tenantRepo = this.store.getTenantRepo(context.tenantId);
       const tenantWhConfig = this.store.getTenantWarehouseConfig(context.tenantId);
       const snowflakeDatabase =
@@ -265,6 +306,10 @@ export class AnalyticsAgentRuntime {
           role: m.role === "user" ? "user" : "assistant",
           content: m.content
         }));
+      const selectedMemorySummaries = tenantMemories
+        .map((memory) => memory.summary.trim())
+        .filter((summary) => summary.length > 0)
+        .slice(0, 8);
 
       const baseMessages = (): LlmMessage[] => [
       {
@@ -275,7 +320,11 @@ export class AnalyticsAgentRuntime {
           "- Your owner is Blueprintdata (https://blueprintdata.xyz/).",
           "- Tenant context may change per request, but your identity and owner never change.",
           "- You ONLY answer analytical questions related to data, metrics, SQL, BI, dbt models, and business performance analysis.",
-          "- For any non-analytical or unrelated request, do not call tools and return final_answer refusing the request.",
+          "- Exception: you may use tenant memory tools when the user explicitly asks to save, list, update, or delete shared tenant memory.",
+          "- Users may ask for tenant memory operations in any language. Infer intent from meaning, not only English wording.",
+          "- Never create, update, or delete memory unless the user explicitly asks you to do so.",
+          "- Do not auto-save facts from normal analytics conversations.",
+          "- For any non-analytical or unrelated request outside explicit tenant memory management, do not call tools and return final_answer refusing the request.",
           '- Refusal text for non-analytical requests: "I can only help with analytical questions about data and business metrics."',
           "",
           profile.soulPrompt,
@@ -310,11 +359,17 @@ export class AnalyticsAgentRuntime {
           "- dbt.getModelSql: { modelName: string }",
           '- snowflake.lookupMetadata: { kind: "schemas"|"tables"|"columns", database?: string, schema?: string, table?: string, search?: string }',
           '- chartjs.build: { type?: "bar"|"line"|"pie"|"doughnut", title?: string, xKey?: string, yKey?: string, seriesKey?: string, horizontal?: boolean, stacked?: boolean, grouped?: boolean, percentStacked?: boolean, sort?: "none"|"asc"|"desc"|"label_asc"|"label_desc", smooth?: boolean, tension?: number, fill?: boolean, step?: boolean, pointRadius?: number, donutCutout?: number, showPercentLabels?: boolean, topN?: number, otherLabel?: string, stackId?: string, maxPoints?: number }',
+          '- memory.create: { summary: string }',
+          '- memory.list: { includeDeleted?: boolean }',
+          '- memory.update: { id: string, summary: string }',
+          '- memory.delete: { id: string }',
           "",
           "Return ONLY valid JSON in one of these shapes:",
-          '{ "type": "tool_call", "tool": "snowflake.query|dbt.listModels|dbt.getModelSql|snowflake.lookupMetadata|chartjs.build", "args": { ... }, "reasoning"?: string }',
+          '{ "type": "tool_call", "tool": "snowflake.query|dbt.listModels|dbt.getModelSql|snowflake.lookupMetadata|chartjs.build|memory.create|memory.list|memory.update|memory.delete", "args": { ... }, "reasoning"?: string }',
           '{ "type": "final_answer", "answer": string, "reasoning"?: string }',
-          "- If the user request is not analytical, ALWAYS return final_answer with the refusal text and do not call tools.",
+          "- If the user request is not analytical and is not an explicit tenant memory management request, ALWAYS return final_answer with the refusal text and do not call tools.",
+          "- If you call memory.create or memory.update, rewrite the stored summary into one concise line, plain text only, preserving the business meaning.",
+          "- Prefer memory.list before memory.update or memory.delete when the user references a memory ambiguously and no exact id is known.",
           "",
           `Max query rows per profile: ${profile.maxRowsPerQuery}.`
         ].join("\n")
@@ -348,6 +403,14 @@ export class AnalyticsAgentRuntime {
           })
           .join("\n")}`
       },
+      ...(selectedMemorySummaries.length > 0
+        ? [
+            {
+              role: "system" as const,
+              content: buildTenantMemorySystemMessage(selectedMemorySummaries)
+            }
+          ]
+        : []),
       ...historyMessages,
       {
         role: "user",
@@ -360,6 +423,12 @@ export class AnalyticsAgentRuntime {
         debug: Record<string, unknown>,
         artifacts?: AgentArtifact[]
       ): AgentResponse => {
+        if (tenantMemories.length > 0) {
+          this.store.markTenantMemoriesUsed(
+            context.tenantId,
+            tenantMemories.map((memory) => memory.id)
+          );
+        }
         this.store.addMessage({
           tenantId: context.tenantId,
           conversationId: context.conversationId,
@@ -419,6 +488,11 @@ export class AnalyticsAgentRuntime {
             sql: finalSql,
             toolCalls,
             mode: "direct_tool_loop",
+            userMessageId: userMessage.id,
+            tenantMemoriesInjected: tenantMemories.map((memory) => ({
+              id: memory.id,
+              summary: memory.summary
+            })),
             timings: { ...timings, totalMs: Date.now() - startedAt }
           },
           latestChartArtifact ? [latestChartArtifact] : undefined
@@ -550,6 +624,137 @@ export class AnalyticsAgentRuntime {
           continue;
         }
 
+        if (plan.tool === "memory.create") {
+          const parsedMemory = memoryCreateSchema.safeParse(args);
+          if (!parsedMemory.success) {
+            throw new Error("memory.create requires args.summary with 1-240 characters.");
+          }
+          const memory = await runTool(
+            "memory.create",
+            parsedMemory.data,
+            async () =>
+              this.store.createTenantMemory({
+                tenantId: context.tenantId,
+                summary: parsedMemory.data.summary,
+                sourceConversationId: context.conversationId,
+                sourceMessageId: userMessage.id
+              }),
+            (value) => ({ id: value.id, summary: value.summary, status: value.status }),
+            (value) => value
+          );
+          loopMessages.push({
+            role: "user",
+            content: `Tool result (memory.create): ${asJsonBlock({
+              id: memory.id,
+              summary: memory.summary,
+              status: memory.status
+            })}`
+          });
+          continue;
+        }
+
+        if (plan.tool === "memory.list") {
+          const parsedList = memoryListSchema.safeParse(args);
+          if (!parsedList.success) {
+            throw new Error("memory.list requires valid args.");
+          }
+          const memories = await runTool(
+            "memory.list",
+            { tenantId: context.tenantId, includeDeleted: parsedList.data.includeDeleted ?? false },
+            async () =>
+              this.store.listTenantMemories({
+                tenantId: context.tenantId,
+                includeDeleted: parsedList.data.includeDeleted ?? false,
+                limit: 100
+              }),
+            (value) => ({ memoryCount: value.length }),
+            (value) => ({
+              memoryCount: value.length,
+              memories: value.map((memory) => ({
+                id: memory.id,
+                summary: memory.summary,
+                status: memory.status,
+                updatedAt: memory.updatedAt
+              }))
+            })
+          );
+          loopMessages.push({
+            role: "user",
+            content: `Tool result (memory.list): ${asJsonBlock({
+              memoryCount: memories.length,
+              memories: memories.map((memory) => ({
+                id: memory.id,
+                summary: memory.summary,
+                status: memory.status,
+                updatedAt: memory.updatedAt
+              }))
+            })}`
+          });
+          continue;
+        }
+
+        if (plan.tool === "memory.update") {
+          const parsedUpdate = memoryUpdateSchema.safeParse(args);
+          if (!parsedUpdate.success) {
+            throw new Error("memory.update requires args.id and args.summary.");
+          }
+          const updated = await runTool(
+            "memory.update",
+            parsedUpdate.data,
+            async () => {
+              const value = this.store.updateTenantMemory({
+                id: parsedUpdate.data.id,
+                tenantId: context.tenantId,
+                summary: parsedUpdate.data.summary
+              });
+              if (!value) {
+                throw new Error(`Tenant memory "${parsedUpdate.data.id}" was not found.`);
+              }
+              return value;
+            },
+            (value) => ({ id: value.id, summary: value.summary, status: value.status }),
+            (value) => value
+          );
+          loopMessages.push({
+            role: "user",
+            content: `Tool result (memory.update): ${asJsonBlock({
+              id: updated.id,
+              summary: updated.summary,
+              status: updated.status
+            })}`
+          });
+          continue;
+        }
+
+        if (plan.tool === "memory.delete") {
+          const parsedDelete = memoryDeleteSchema.safeParse(args);
+          if (!parsedDelete.success) {
+            throw new Error("memory.delete requires args.id.");
+          }
+          const deleted = await runTool(
+            "memory.delete",
+            parsedDelete.data,
+            async () => {
+              const value = this.store.deleteTenantMemory(parsedDelete.data.id, context.tenantId);
+              if (!value) {
+                throw new Error(`Tenant memory "${parsedDelete.data.id}" was not found.`);
+              }
+              return value;
+            },
+            (value) => ({ id: value.id, summary: value.summary, status: value.status }),
+            (value) => value
+          );
+          loopMessages.push({
+            role: "user",
+            content: `Tool result (memory.delete): ${asJsonBlock({
+              id: deleted.id,
+              summary: deleted.summary,
+              status: deleted.status
+            })}`
+          });
+          continue;
+        }
+
         if (plan.tool === "snowflake.query") {
           const sql = typeof args.sql === "string" ? args.sql.trim() : "";
           if (!sql) {
@@ -653,6 +858,11 @@ export class AnalyticsAgentRuntime {
             sql: lastSuccessfulQuery.sql,
             toolCalls,
             mode: "direct_tool_loop",
+            userMessageId: userMessage.id,
+            tenantMemoriesInjected: tenantMemories.map((memory) => ({
+              id: memory.id,
+              summary: memory.summary
+            })),
             timings: { ...timings, totalMs: Date.now() - startedAt },
             finalizedFromLastSuccessfulQuery: true
           },
@@ -669,6 +879,11 @@ export class AnalyticsAgentRuntime {
           sql: finalSql,
           toolCalls,
           mode: "direct_tool_loop",
+          userMessageId: userMessage.id,
+          tenantMemoriesInjected: tenantMemories.map((memory) => ({
+            id: memory.id,
+            summary: memory.summary
+          })),
           timings: { ...timings, totalMs: Date.now() - startedAt }
         },
         latestChartArtifact ? [latestChartArtifact] : undefined
@@ -681,6 +896,8 @@ export class AnalyticsAgentRuntime {
         debug: {
           plannerAttempts,
           toolCalls,
+          userMessageId: userMessage.id,
+          tenantMemoriesInjected: [],
           timings: { ...timings, totalMs: Date.now() - startedAt }
         }
       });

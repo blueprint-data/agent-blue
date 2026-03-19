@@ -19,6 +19,20 @@ export interface AgentProfile {
   createdAt: string;
 }
 
+export type TenantMemoryStatus = "active" | "deleted";
+
+export interface TenantMemory {
+  id: string;
+  tenantId: string;
+  summary: string;
+  status: TenantMemoryStatus;
+  createdAt: string;
+  updatedAt: string;
+  sourceConversationId?: string;
+  sourceMessageId?: string;
+  lastUsedAt?: string;
+}
+
 export interface QueryResult {
   columns: string[];
   rows: Record<string, unknown>[];

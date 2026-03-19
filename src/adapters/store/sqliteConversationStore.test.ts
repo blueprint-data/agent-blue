@@ -133,3 +133,45 @@ describe("SqliteConversationStore admin telemetry", () => {
     ]);
   });
 });
+
+describe("SqliteConversationStore tenant memories", () => {
+  it("creates, updates, deletes, and retrieves tenant memories for prompts", () => {
+    const store = createStore();
+
+    const older = store.createTenantMemory({
+      tenantId: "acme",
+      summary: "TDV means total dollar volume net of refunds"
+    });
+    const newer = store.createTenantMemory({
+      tenantId: "acme",
+      summary: "Fiscal week starts on Monday"
+    });
+    const otherTenant = store.createTenantMemory({
+      tenantId: "globex",
+      summary: "Ignore me"
+    });
+
+    expect(store.listTenantMemories({ tenantId: "acme", includeDeleted: true })).toHaveLength(2);
+    expect(store.getTenantMemory(older.id, "acme")?.summary).toContain("TDV");
+
+    const updated = store.updateTenantMemory({
+      id: older.id,
+      tenantId: "acme",
+      summary: "TDV means total demand value net of refunds"
+    });
+    expect(updated?.summary).toContain("total demand value");
+
+    store.markTenantMemoriesUsed("acme", [older.id]);
+    const promptMemories = store.getTenantMemoriesForPrompt({
+      tenantId: "acme",
+      queryText: "How should I calculate TDV?"
+    });
+    expect(promptMemories.map((memory) => memory.id)).toContain(older.id);
+    expect(promptMemories.map((memory) => memory.id)).not.toContain(otherTenant.id);
+
+    const deleted = store.deleteTenantMemory(newer.id, "acme");
+    expect(deleted?.status).toBe("deleted");
+    expect(store.listTenantMemories({ tenantId: "acme" })).toHaveLength(1);
+    expect(store.listTenantMemories({ tenantId: "acme", includeDeleted: true })).toHaveLength(2);
+  });
+});

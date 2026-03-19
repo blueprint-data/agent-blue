@@ -231,6 +231,88 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
     }
   });
 
+  router.get("/tenants/:tenantId/memories", (req: Request, res: Response) => {
+    try {
+      const tenantId = param(req, "tenantId");
+      if (!store.getTenantRepo(tenantId)) {
+        res.status(404).json({ error: "Tenant not found" });
+        return;
+      }
+      const includeDeleted = req.query.includeDeleted === "1" || req.query.includeDeleted === "true";
+      res.json(store.listTenantMemories({ tenantId, includeDeleted, limit: 200 }));
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.post("/tenants/:tenantId/memories", (req: Request, res: Response) => {
+    try {
+      const tenantId = param(req, "tenantId");
+      if (!store.getTenantRepo(tenantId)) {
+        res.status(404).json({ error: "Tenant not found" });
+        return;
+      }
+      const { summary } = req.body as { summary?: string };
+      if (!summary?.trim()) {
+        res.status(400).json({ error: "summary required" });
+        return;
+      }
+      res.status(201).json(
+        store.createTenantMemory({
+          tenantId,
+          summary: summary.trim()
+        })
+      );
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.patch("/tenants/:tenantId/memories/:memoryId", (req: Request, res: Response) => {
+    try {
+      const tenantId = param(req, "tenantId");
+      if (!store.getTenantRepo(tenantId)) {
+        res.status(404).json({ error: "Tenant not found" });
+        return;
+      }
+      const { summary } = req.body as { summary?: string };
+      if (!summary?.trim()) {
+        res.status(400).json({ error: "summary required" });
+        return;
+      }
+      const updated = store.updateTenantMemory({
+        id: param(req, "memoryId"),
+        tenantId,
+        summary: summary.trim()
+      });
+      if (!updated) {
+        res.status(404).json({ error: "Memory not found" });
+        return;
+      }
+      res.json(updated);
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.delete("/tenants/:tenantId/memories/:memoryId", (req: Request, res: Response) => {
+    try {
+      const tenantId = param(req, "tenantId");
+      if (!store.getTenantRepo(tenantId)) {
+        res.status(404).json({ error: "Tenant not found" });
+        return;
+      }
+      const deleted = store.deleteTenantMemory(param(req, "memoryId"), tenantId);
+      if (!deleted) {
+        res.status(404).json({ error: "Memory not found" });
+        return;
+      }
+      res.json(deleted);
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
   router.get("/slack-mappings", (_req: Request, res: Response) => {
     try {
       res.json({
