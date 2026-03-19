@@ -152,7 +152,7 @@ export class AnalyticsAgentRuntime {
     const persistedUserText = userText;
     const effectivePromptText = options.promptText?.trim() ? options.promptText : persistedUserText;
     const timings: Record<string, number> = {};
-    const maxToolSteps = 8;
+    const maxToolSteps = 35;
     const plannerAttempts: Array<{ step: number; raw?: string; parseError?: string; plan?: Record<string, unknown> }> = [];
     const attemptedSql = new Set<string>();
     const toolCalls: Array<{
