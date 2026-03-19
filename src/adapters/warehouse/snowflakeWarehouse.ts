@@ -1,6 +1,6 @@
 import snowflake from "snowflake-sdk";
-import { WarehouseAdapter } from "../../core/interfaces.js";
-import { QueryResult } from "../../core/types.js";
+import type { TenantWarehouseProvider, WarehouseAdapter } from "../../core/interfaces.js";
+import type { QueryResult } from "../../core/types.js";
 
 export interface SnowflakeConfig {
   account: string;
@@ -23,6 +23,7 @@ export interface SnowflakeConfig {
 }
 
 export class SnowflakeWarehouseAdapter implements WarehouseAdapter {
+  readonly provider: TenantWarehouseProvider = "snowflake";
   private readonly connection: snowflake.Connection;
   private connected = false;
 
