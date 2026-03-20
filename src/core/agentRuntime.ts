@@ -120,8 +120,53 @@ function buildTenantMemorySystemMessage(memories: TenantMemory[]): LlmMessage[] 
 }
 
 function userExplicitlyAskedToSaveMemory(userText: string): boolean {
-  const patterns = [/\bremember\b/i, /\bmemorize\b/i, /\bdon'?t forget\b/i, /\bstore\b.+\b(for later|as memory|this|that|it)\b/i, /\bsave\b.+\b(for later|as memory|this|that|it)\b/i];
+  const patterns = [
+    /\bremember\b/i,
+    /\bmemorize\b/i,
+    /\bdon'?t forget\b/i,
+    /\bstore\b.+\b(for later|as memory|this|that|it)\b/i,
+    /\bsave\b.+\b(for later|as memory|this|that|it)\b/i,
+    /\bguarda(?:r|me|lo|la)?\b.*\b(memoria|memory|para (?:despu[eé]s|luego)|esto|eso)\b/i,
+    /\bguardar\b.*\b(memoria|memory|para (?:despu[eé]s|luego)|esto|eso)\b/i,
+    /\brecuerda\b.*\b(esto|eso|para (?:despu[eé]s|luego)|memoria|memory)\b/i,
+    /\bmemoriza\b/i,
+    /\bno te olvides\b/i
+  ];
   return patterns.some((pattern) => pattern.test(userText));
+}
+
+const positiveTenantMemorySaveClaimPatterns = [
+  /\bI saved\b/i,
+  /\bI(?: have|'ve)\s+saved\b/i,
+  /\bI(?:'ll| will) remember that\b/i,
+  /\bHe guardado\b/i,
+  /\bLo he guardado\b/i,
+  /\bQued[oa]\s+guardad[oa]\b/i,
+  /\bguardad[oa]\s+en\s+la\s+memoria\b/i,
+  /\bguardad[oa]\s+en\s+memoria\b/i
+];
+
+function claimsTenantMemoryWasSaved(text: string): boolean {
+  return positiveTenantMemorySaveClaimPatterns.some((pattern) => pattern.test(text));
+}
+
+function removeTenantMemorySaveClaimLines(text: string): string {
+  return text
+    .split("\n")
+    .filter((line) => !claimsTenantMemoryWasSaved(line))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function ensureAccurateTenantMemorySaveText(text: string, memorySaveSucceededThisTurn: boolean): string {
+  if (memorySaveSucceededThisTurn || !claimsTenantMemoryWasSaved(text)) {
+    return text;
+  }
+
+  const stripped = removeTenantMemorySaveClaimLines(text);
+  const note = "I could not confirm that the tenant memory was saved, so treat it as not persisted.";
+  return stripped ? `${stripped}\n\n${note}` : note;
 }
 
 function quoteSqlIdent(value: string, provider?: TenantWarehouseProvider): string {
@@ -373,6 +418,7 @@ export class AnalyticsAgentRuntime {
       const now = new Date();
       const currentDateIso = now.toISOString();
       const currentDate = currentDateIso.slice(0, 10);
+      const userAskedToSaveMemory = userExplicitlyAskedToSaveMemory(persistedUserText);
       const hasWarehouseDefaults = whDatabase.length > 0 && whSchema.length > 0;
       const fqPrefix = hasWarehouseDefaults
         ? isBigQuery
@@ -484,10 +530,13 @@ export class AnalyticsAgentRuntime {
           "",
           "Tenant memory rules:",
           "- Tenant memories are shared across this tenant and may be injected into future prompts.",
+          "- If the user explicitly asks in any language to remember/save/store a durable fact or preference, prefer tenantMemory.save before final_answer.",
           "- Use tenantMemory.save only when the user explicitly asks you to remember/save/store a durable fact or preference for later.",
           "- Save one concise durable fact or preference, not a transcript or large passage.",
           "- Never save secrets, credentials, access tokens, or long blobs.",
           "- If the user did not explicitly ask, do not call tenantMemory.save.",
+          "- Never claim that memory was saved unless you already received a successful Tool result (tenantMemory.save) in this turn.",
+          "- If tenantMemory.save fails or is rejected, explicitly say that the save did not happen.",
           "",
           "Available tools and args:",
           "- warehouse.query: { sql: string }",
@@ -573,6 +622,8 @@ export class AnalyticsAgentRuntime {
       let finalSql: string | undefined;
       let lastSuccessfulQuery: { sql: string; result: QueryResult } | undefined;
       let latestChartArtifact: AgentArtifact | undefined;
+      let memorySaveAttemptedThisTurn = false;
+      let memorySaveSucceededThisTurn = false;
 
       for (let step = 1; step <= maxToolSteps; step += 1) {
       const planRaw = await measure(`plannerMs_step${step}`, async () =>
@@ -599,7 +650,17 @@ export class AnalyticsAgentRuntime {
       loopMessages.push({ role: "assistant", content: planRaw });
 
       if (plan.type === "final_answer") {
-        const text = plan.answer?.trim() ? plan.answer : "I need more details to answer that.";
+        const candidateText = plan.answer?.trim() ? plan.answer : "I need more details to answer that.";
+        if (claimsTenantMemoryWasSaved(candidateText) && !memorySaveSucceededThisTurn && step < maxToolSteps) {
+          loopMessages.push({
+            role: "user",
+            content: userAskedToSaveMemory
+              ? "You claimed that tenant memory was saved, but there is no successful Tool result (tenantMemory.save) in this turn. Before claiming success, call tenantMemory.save and wait for its tool result. If you cannot save it, return final_answer explicitly saying the save did not happen."
+              : "You claimed that tenant memory was saved, but there is no successful Tool result (tenantMemory.save) in this turn. Do not claim success. Return a corrected final_answer, or only use tenantMemory.save if the user explicitly asked for memory persistence."
+          });
+          continue;
+        }
+        const text = ensureAccurateTenantMemorySaveText(candidateText, memorySaveSucceededThisTurn);
         return finalizeSuccess(
           text,
           {
@@ -707,11 +768,12 @@ export class AnalyticsAgentRuntime {
         }
 
         if (plan.tool === "tenantMemory.save") {
+          memorySaveAttemptedThisTurn = true;
           const parsedMemory = tenantMemorySaveSchema.safeParse(args);
           if (!parsedMemory.success) {
             throw new Error("tenantMemory.save requires args.content as a short string.");
           }
-          if (!userExplicitlyAskedToSaveMemory(persistedUserText)) {
+          if (!userAskedToSaveMemory) {
             throw new Error("tenantMemory.save can only be used when the user explicitly asks to remember or save something.");
           }
           const normalizedContent = normalizeMemoryContent(parsedMemory.data.content);
@@ -738,6 +800,7 @@ export class AnalyticsAgentRuntime {
                 (memory) => ({ saved: true, deduped: false, memoryId: memory.id }),
                 (memory) => ({ saved: true, deduped: false, memoryId: memory.id, content: memory.content })
               );
+          memorySaveSucceededThisTurn = true;
           tenantMemories = this.store.listTenantMemories(context.tenantId, 500);
           loopMessages.push({
             role: "user",
@@ -828,7 +891,9 @@ export class AnalyticsAgentRuntime {
       } catch (error) {
         loopMessages.push({
           role: "user",
-          content: `Tool error (${plan.tool}): ${(error as Error).message}. Choose a corrected tool call or final_answer.`
+          content: plan.tool === "tenantMemory.save"
+            ? `Tool error (tenantMemory.save): ${(error as Error).message}. Do NOT claim that memory was saved. Either issue a corrected tenantMemory.save call or return final_answer explicitly saying the save did not happen.`
+            : `Tool error (${plan.tool}): ${(error as Error).message}. Choose a corrected tool call or final_answer.`
         });
       }
       }

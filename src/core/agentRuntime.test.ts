@@ -172,6 +172,79 @@ describe("AnalyticsAgentRuntime tenant memory", () => {
     ).toBe(true);
   });
 
+  it("treats explicit Spanish save requests as valid tenant memory saves", async () => {
+    const store = createStore();
+    const llm = new StubLlmProvider([
+      JSON.stringify({
+        type: "tool_call",
+        tool: "tenantMemory.save",
+        args: { content: "TDV uses inflow transactions and excludes internal transaction types." }
+      }),
+      JSON.stringify({
+        type: "final_answer",
+        answer: "He guardado esa memoria para futuros turnos."
+      })
+    ]);
+    const runtime = createRuntime(llm, store);
+
+    const response = await runtime.respond(
+      {
+        tenantId: "acme",
+        profileName: "default",
+        conversationId: "conv_memory_save_es",
+        llmModel: "test-model",
+        origin: { source: "cli" }
+      },
+      "Guarda en memoria que el TDV usa inflow y excluye transaction_type internal."
+    );
+
+    expect(response.text).toBe("He guardado esa memoria para futuros turnos.");
+    expect(store.listTenantMemories("acme")).toEqual([
+      expect.objectContaining({
+        tenantId: "acme",
+        content: "TDV uses inflow transactions and excludes internal transaction types.",
+        source: "agent"
+      })
+    ]);
+  });
+
+  it("does not accept final answers that claim memory was saved without a successful save tool result", async () => {
+    const store = createStore();
+    const llm = new StubLlmProvider([
+      JSON.stringify({
+        type: "final_answer",
+        answer: "I'll remember that for future turns."
+      }),
+      JSON.stringify({
+        type: "final_answer",
+        answer: "I could not confirm that the tenant memory was saved, so treat it as not persisted."
+      })
+    ]);
+    const runtime = createRuntime(llm, store);
+
+    const response = await runtime.respond(
+      {
+        tenantId: "acme",
+        profileName: "default",
+        conversationId: "conv_memory_claim_guard",
+        llmModel: "test-model",
+        origin: { source: "cli" }
+      },
+      "Remember that our fiscal week starts on Monday."
+    );
+
+    expect(response.text).toBe("I could not confirm that the tenant memory was saved, so treat it as not persisted.");
+    expect(store.listTenantMemories("acme")).toHaveLength(0);
+    expect(llm.calls).toHaveLength(2);
+    expect(
+      llm.calls[1]?.messages.some(
+        (message) =>
+          message.role === "user" &&
+          message.content.includes("You claimed that tenant memory was saved")
+      )
+    ).toBe(true);
+  });
+
   it("injects a bounded, deduplicated tenant memory block into the planner prompt", async () => {
     const store = createStore();
     const repeated = "Revenue means gross revenue unless the user explicitly asks for net revenue.";
