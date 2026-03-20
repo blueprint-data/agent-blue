@@ -19,6 +19,17 @@ export interface AgentProfile {
   createdAt: string;
 }
 
+export type TenantMemorySource = "agent" | "manual";
+
+export interface TenantMemory {
+  id: string;
+  tenantId: string;
+  content: string;
+  source: TenantMemorySource;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface QueryResult {
   columns: string[];
   rows: Record<string, unknown>[];

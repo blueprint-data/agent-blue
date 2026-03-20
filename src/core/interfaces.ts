@@ -10,7 +10,9 @@ import {
   ConversationOrigin,
   ConversationSource,
   DbtModelInfo,
-  QueryResult
+  QueryResult,
+  TenantMemory,
+  TenantMemorySource
 } from "./types.js";
 
 export interface LlmMessage {
@@ -96,6 +98,10 @@ export interface ConversationStore {
   createConversation(context: AgentContext): void;
   addMessage(message: Omit<ConversationMessage, "id" | "createdAt">): ConversationMessage;
   getMessages(conversationId: string, limit?: number): ConversationMessage[];
+  listTenantMemories(tenantId: string, limit?: number): TenantMemory[];
+  getTenantMemory(tenantId: string, memoryId: string): TenantMemory | null;
+  createTenantMemory(input: { tenantId: string; content: string; source: TenantMemorySource }): TenantMemory;
+  deleteTenantMemory(memoryId: string): void;
   getOrCreateProfile(tenantId: string, profileName: string): AgentProfile;
   upsertTenantRepo(input: {
     tenantId: string;

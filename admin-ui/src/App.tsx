@@ -144,6 +144,15 @@ interface WarehouseConfigResponse {
   };
 }
 
+interface TenantMemory {
+  id: string;
+  tenantId: string;
+  content: string;
+  source: "agent" | "manual";
+  createdAt: string;
+  updatedAt: string;
+}
+
 interface TelegramMapping {
   chatId: string;
   tenantId: string;
@@ -805,10 +814,14 @@ function TenantsPage({ notify }: { notify: (value: NotificationState | null) => 
   const [credentials, setCredentials] = useState<CredentialReference | null>(null);
   const [wizardState, setWizardState] = useState<WizardStateResponse | null>(null);
   const [warehouseConfig, setWarehouseConfig] = useState<WarehouseConfigResponse | null>(null);
+  const [tenantMemories, setTenantMemories] = useState<TenantMemory[]>([]);
+  const [memoryDraft, setMemoryDraft] = useState("");
   const [form, setForm] = useState({ tenantId: "", repoUrl: "", dbtSubpath: "models" });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [savingWarehouse, setSavingWarehouse] = useState(false);
+  const [savingMemory, setSavingMemory] = useState(false);
+  const [deletingMemoryId, setDeletingMemoryId] = useState<string | null>(null);
   const [whProvider, setWhProvider] = useState<"snowflake" | "bigquery">("snowflake");
   const [whSnowflake, setWhSnowflake] = useState({ account: "", username: "", warehouse: "", database: "", schema: "", role: "", authType: "keypair" as "keypair" | "password", privateKeyPath: "", passwordEnvVar: "SNOWFLAKE_PASSWORD" });
   const [whBigQuery, setWhBigQuery] = useState({ projectId: "", dataset: "", location: "", authType: "adc" as "adc" | "service-account-key" });
@@ -845,19 +858,24 @@ function TenantsPage({ notify }: { notify: (value: NotificationState | null) => 
       setCredentials(null);
       setWizardState(null);
       setWarehouseConfig(null);
+      setTenantMemories([]);
+      setMemoryDraft("");
       setWhEditing(false);
       return;
     }
     void (async () => {
       try {
-        const [nextCredentials, nextWizardState, nextWarehouse] = await Promise.all([
+        const [nextCredentials, nextWizardState, nextWarehouse, nextMemories] = await Promise.all([
           apiRequest<CredentialReference>(`/api/admin/credentials-ref/${selectedTenantId}`),
           apiRequest<WizardStateResponse>(`/api/admin/wizard/tenant/${selectedTenantId}/state`),
-          apiRequest<WarehouseConfigResponse>(`/api/admin/tenants/${selectedTenantId}/warehouse`)
+          apiRequest<WarehouseConfigResponse>(`/api/admin/tenants/${selectedTenantId}/warehouse`),
+          apiRequest<TenantMemory[]>(`/api/admin/tenants/${selectedTenantId}/memories?limit=100`)
         ]);
         setCredentials(nextCredentials);
         setWizardState(nextWizardState);
         setWarehouseConfig(nextWarehouse);
+        setTenantMemories(nextMemories);
+        setMemoryDraft("");
         setWhEditing(false);
         if (nextWarehouse.provider === "snowflake" && nextWarehouse.snowflake) {
           setWhProvider("snowflake");
@@ -1033,6 +1051,48 @@ function TenantsPage({ notify }: { notify: (value: NotificationState | null) => 
     }
   }
 
+  async function loadTenantMemories(tenantId: string) {
+    const nextMemories = await apiRequest<TenantMemory[]>(`/api/admin/tenants/${tenantId}/memories?limit=100`);
+    setTenantMemories(nextMemories);
+  }
+
+  async function addTenantMemory() {
+    if (!selectedTenant) return;
+    const content = memoryDraft.trim();
+    if (!content) return;
+    setSavingMemory(true);
+    try {
+      await apiRequest<TenantMemory>(`/api/admin/tenants/${selectedTenant.tenantId}/memories`, {
+        method: "POST",
+        body: { content }
+      });
+      setMemoryDraft("");
+      await loadTenantMemories(selectedTenant.tenantId);
+      notify({ type: "success", text: "Tenant memory added." });
+    } catch (caught) {
+      notify({ type: "error", text: sectionError(caught) });
+    } finally {
+      setSavingMemory(false);
+    }
+  }
+
+  async function deleteTenantMemory(memoryId: string) {
+    if (!selectedTenant) return;
+    if (!window.confirm("Delete this tenant memory?")) return;
+    setDeletingMemoryId(memoryId);
+    try {
+      await apiRequest(`/api/admin/tenants/${selectedTenant.tenantId}/memories/${memoryId}`, {
+        method: "DELETE"
+      });
+      await loadTenantMemories(selectedTenant.tenantId);
+      notify({ type: "success", text: "Tenant memory deleted." });
+    } catch (caught) {
+      notify({ type: "error", text: sectionError(caught) });
+    } finally {
+      setDeletingMemoryId(null);
+    }
+  }
+
   function warehouseSummary(): string {
     if (!warehouseConfig?.provider) return "Not configured";
     if (warehouseConfig.provider === "snowflake" && warehouseConfig.snowflake) {
@@ -1184,6 +1244,56 @@ function TenantsPage({ notify }: { notify: (value: NotificationState | null) => 
               </div>
             ) : (
               <div className="empty-state">Create or select a tenant to inspect operational state.</div>
+            )}
+          </AppShellCard>
+
+          <AppShellCard title="Tenant memories" subtitle="View the saved tenant facts that will be available to future conversations.">
+            {!selectedTenant ? (
+              <div className="empty-state">Select a tenant to manage tenant memories.</div>
+            ) : (
+              <div className="stack">
+                <label>
+                  Add manual memory
+                  <textarea
+                    rows={3}
+                    value={memoryDraft}
+                    maxLength={300}
+                    onChange={(event) => setMemoryDraft(event.target.value)}
+                    placeholder="Example: Revenue means gross revenue unless the user explicitly asks for net revenue."
+                  />
+                </label>
+                <div className="button-row">
+                  <button onClick={() => void addTenantMemory()} disabled={savingMemory || memoryDraft.trim().length === 0}>
+                    {savingMemory ? "Adding…" : "Add memory"}
+                  </button>
+                  <span className="muted">{memoryDraft.trim().length}/300</span>
+                </div>
+                {tenantMemories.length === 0 ? (
+                  <div className="empty-state">No tenant memories saved yet.</div>
+                ) : (
+                  <div className="stack">
+                    {tenantMemories.map((memory) => (
+                      <div key={memory.id} className="turn-card">
+                        <div className="turn-header">
+                          <div>
+                            <strong>{memory.content}</strong>
+                            <div className="muted">
+                              {memory.source} · created {formatDate(memory.createdAt)} · updated {formatDate(memory.updatedAt)}
+                            </div>
+                          </div>
+                          <button
+                            className="danger-button small"
+                            onClick={() => void deleteTenantMemory(memory.id)}
+                            disabled={deletingMemoryId === memory.id}
+                          >
+                            {deletingMemoryId === memory.id ? "Deleting…" : "Delete"}
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             )}
           </AppShellCard>
 

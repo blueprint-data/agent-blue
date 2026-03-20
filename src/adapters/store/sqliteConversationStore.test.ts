@@ -26,6 +26,103 @@ function createStore(): SqliteConversationStore {
 }
 
 describe("SqliteConversationStore admin telemetry", () => {
+  it("stores tenant memories and keeps newest entries first", () => {
+    const store = createStore();
+
+    const first = store.createTenantMemory({
+      tenantId: "acme",
+      content: "Billing week starts on Monday.",
+      source: "agent"
+    });
+    const second = store.createTenantMemory({
+      tenantId: "acme",
+      content: "Use gross revenue unless the user asks for net revenue.",
+      source: "manual"
+    });
+
+    expect(store.listTenantMemories("acme")).toEqual([
+      expect.objectContaining({
+        id: second.id,
+        tenantId: "acme",
+        content: "Use gross revenue unless the user asks for net revenue.",
+        source: "manual"
+      }),
+      expect.objectContaining({
+        id: first.id,
+        tenantId: "acme",
+        content: "Billing week starts on Monday.",
+        source: "agent"
+      })
+    ]);
+  });
+
+  it("prunes tenant memories to the newest 50 entries", () => {
+    const store = createStore();
+
+    for (let index = 1; index <= 55; index += 1) {
+      store.createTenantMemory({
+        tenantId: "acme",
+        content: `memory-${index}`,
+        source: "agent"
+      });
+    }
+
+    const memories = store.listTenantMemories("acme", 100);
+    expect(memories).toHaveLength(50);
+    expect(memories.some((memory) => memory.content === "memory-1")).toBe(false);
+    expect(memories.some((memory) => memory.content === "memory-2")).toBe(false);
+    expect(memories.some((memory) => memory.content === "memory-3")).toBe(false);
+    expect(memories.some((memory) => memory.content === "memory-4")).toBe(false);
+    expect(memories.some((memory) => memory.content === "memory-5")).toBe(false);
+    expect(memories[0]?.content).toBe("memory-55");
+  });
+
+  it("deletes tenant memories when deleting a tenant", () => {
+    const store = createStore();
+
+    store.createTenantMemory({
+      tenantId: "acme",
+      content: "This tenant prefers UTC dates.",
+      source: "agent"
+    });
+    store.createTenantMemory({
+      tenantId: "other",
+      content: "Keep this other tenant memory.",
+      source: "agent"
+    });
+
+    store.deleteTenant("acme");
+
+    expect(store.listTenantMemories("acme")).toHaveLength(0);
+    expect(store.listTenantMemories("other")).toEqual([
+      expect.objectContaining({
+        tenantId: "other",
+        content: "Keep this other tenant memory."
+      })
+    ]);
+  });
+
+  it("looks up tenant memories by tenant and id", () => {
+    const store = createStore();
+
+    const memory = store.createTenantMemory({
+      tenantId: "acme",
+      content: "Use fiscal month naming in admin reports.",
+      source: "manual"
+    });
+
+    expect(store.getTenantMemory("acme", memory.id)).toEqual(
+      expect.objectContaining({
+        id: memory.id,
+        tenantId: "acme",
+        content: "Use fiscal month naming in admin reports.",
+        source: "manual"
+      })
+    );
+    expect(store.getTenantMemory("other", memory.id)).toBeNull();
+    expect(store.getTenantMemory("acme", "missing")).toBeNull();
+  });
+
   it("stores conversation origin and execution telemetry", () => {
     const store = createStore();
 

@@ -33,6 +33,7 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
   const { store, appDataDir, slackBotSupervisor, telegramBotSupervisor } = options;
   const router = Router();
   const dbtRepo = new GitDbtRepositoryService(store);
+  const maxTenantMemoryChars = 300;
 
   router.get("/tenants", (_req: Request, res: Response) => {
     try {
@@ -124,6 +125,69 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
         }
       }
       store.deleteTenant(tenantId);
+      res.status(204).send();
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.get("/tenants/:tenantId/memories", (req: Request, res: Response) => {
+    try {
+      const tenantId = param(req, "tenantId");
+      if (!store.getTenantRepo(tenantId)) {
+        res.status(404).json({ error: "Tenant not found" });
+        return;
+      }
+      const limitRaw = typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : 100;
+      const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 500) : 100;
+      res.json(store.listTenantMemories(tenantId, limit));
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.post("/tenants/:tenantId/memories", (req: Request, res: Response) => {
+    try {
+      const tenantId = param(req, "tenantId");
+      if (!store.getTenantRepo(tenantId)) {
+        res.status(404).json({ error: "Tenant not found" });
+        return;
+      }
+      const rawContent = typeof req.body?.content === "string" ? req.body.content : "";
+      const content = rawContent.trim();
+      if (!content) {
+        res.status(400).json({ error: "content is required" });
+        return;
+      }
+      if (content.length > maxTenantMemoryChars) {
+        res.status(400).json({ error: `content must be at most ${maxTenantMemoryChars} characters` });
+        return;
+      }
+      const memory = store.createTenantMemory({
+        tenantId,
+        content,
+        source: "manual"
+      });
+      res.status(201).json(memory);
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.delete("/tenants/:tenantId/memories/:memoryId", (req: Request, res: Response) => {
+    try {
+      const tenantId = param(req, "tenantId");
+      if (!store.getTenantRepo(tenantId)) {
+        res.status(404).json({ error: "Tenant not found" });
+        return;
+      }
+      const memoryId = param(req, "memoryId");
+      const memory = store.getTenantMemory(tenantId, memoryId);
+      if (!memory) {
+        res.status(404).json({ error: "Tenant memory not found" });
+        return;
+      }
+      store.deleteTenantMemory(memory.id);
       res.status(204).send();
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });

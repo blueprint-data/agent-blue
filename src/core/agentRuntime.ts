@@ -9,8 +9,12 @@ import {
   TenantWarehouseProvider,
   WarehouseAdapter
 } from "./interfaces.js";
-import { AgentArtifact, AgentContext, AgentResponse, QueryResult } from "./types.js";
+import { AgentArtifact, AgentContext, AgentResponse, QueryResult, TenantMemory } from "./types.js";
 import { SqlGuard } from "./sqlGuard.js";
+
+export const TENANT_MEMORY_MAX_CONTENT_CHARS = 300;
+export const TENANT_MEMORY_MAX_PROMPT_ITEMS = 10;
+export const TENANT_MEMORY_MAX_PROMPT_CHARS = 1800;
 
 const metadataLookupSchema = z.object({
   kind: z.enum(["schemas", "tables", "columns"]),
@@ -44,10 +48,21 @@ const chartRequestSchema = z.object({
   maxPoints: z.number().int().positive().max(500).optional()
 });
 
+const tenantMemorySaveSchema = z.object({
+  content: z.string().trim().min(1).max(TENANT_MEMORY_MAX_CONTENT_CHARS)
+});
+
 const toolDecisionSchema = z.object({
   type: z.enum(["tool_call", "final_answer"]),
   tool: z
-    .enum(["warehouse.query", "dbt.listModels", "dbt.getModelSql", "warehouse.lookupMetadata", "chartjs.build"])
+    .enum([
+      "warehouse.query",
+      "dbt.listModels",
+      "dbt.getModelSql",
+      "warehouse.lookupMetadata",
+      "chartjs.build",
+      "tenantMemory.save"
+    ])
     .optional(),
   args: z.record(z.string(), z.unknown()).optional(),
   answer: z.string().optional(),
@@ -56,6 +71,57 @@ const toolDecisionSchema = z.object({
 
 function asJsonBlock(value: unknown): string {
   return JSON.stringify(value, null, 2);
+}
+
+function normalizeMemoryContent(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function memoryDedupKey(value: string): string {
+  return normalizeMemoryContent(value).toLowerCase();
+}
+
+function buildTenantMemoryPromptBlock(memories: TenantMemory[]): string | null {
+  const selected: string[] = [];
+  const seen = new Set<string>();
+  let totalChars = 0;
+
+  for (const memory of memories) {
+    const normalized = normalizeMemoryContent(memory.content);
+    if (!normalized) {
+      continue;
+    }
+    const key = memoryDedupKey(normalized);
+    if (seen.has(key)) {
+      continue;
+    }
+    if (selected.length >= TENANT_MEMORY_MAX_PROMPT_ITEMS) {
+      break;
+    }
+    const projectedChars = totalChars + normalized.length;
+    if (selected.length > 0 && projectedChars > TENANT_MEMORY_MAX_PROMPT_CHARS) {
+      break;
+    }
+    selected.push(normalized);
+    seen.add(key);
+    totalChars = projectedChars;
+  }
+
+  if (selected.length === 0) {
+    return null;
+  }
+
+  return ["Tenant memory (user-saved facts, newest first):", ...selected.map((item) => `- ${item}`)].join("\n");
+}
+
+function buildTenantMemorySystemMessage(memories: TenantMemory[]): LlmMessage[] {
+  const content = buildTenantMemoryPromptBlock(memories);
+  return content ? [{ role: "system", content }] : [];
+}
+
+function userExplicitlyAskedToSaveMemory(userText: string): boolean {
+  const patterns = [/\bremember\b/i, /\bmemorize\b/i, /\bdon'?t forget\b/i, /\bstore\b.+\b(for later|as memory|this|that|it)\b/i, /\bsave\b.+\b(for later|as memory|this|that|it)\b/i];
+  return patterns.some((pattern) => pattern.test(userText));
 }
 
 function quoteSqlIdent(value: string, provider?: TenantWarehouseProvider): string {
@@ -289,6 +355,7 @@ export class AnalyticsAgentRuntime {
       const profile = this.store.getOrCreateProfile(context.tenantId, context.profileName);
       timings.profileMs = Date.now() - startedAt;
       const history = this.store.getMessages(context.conversationId, 12);
+      let tenantMemories = this.store.listTenantMemories(context.tenantId, 500);
       const tenantRepo = this.store.getTenantRepo(context.tenantId);
       const tenantWhConfig = this.store.getTenantWarehouseConfig(context.tenantId);
       const warehouse = this.resolveWarehouse(context.tenantId);
@@ -415,15 +482,23 @@ export class AnalyticsAgentRuntime {
           "",
           ...sqlGuidanceLines,
           "",
+          "Tenant memory rules:",
+          "- Tenant memories are shared across this tenant and may be injected into future prompts.",
+          "- Use tenantMemory.save only when the user explicitly asks you to remember/save/store a durable fact or preference for later.",
+          "- Save one concise durable fact or preference, not a transcript or large passage.",
+          "- Never save secrets, credentials, access tokens, or long blobs.",
+          "- If the user did not explicitly ask, do not call tenantMemory.save.",
+          "",
           "Available tools and args:",
           "- warehouse.query: { sql: string }",
           "- dbt.listModels: {}",
           "- dbt.getModelSql: { modelName: string }",
           `- warehouse.lookupMetadata: { kind: "schemas"|"tables"|"columns", ${dbLabel}?: string, ${schemaLabel}?: string, table?: string, search?: string }`,
+          "- tenantMemory.save: { content: string }",
           '- chartjs.build: { type?: "bar"|"line"|"pie"|"doughnut", title?: string, xKey?: string, yKey?: string, seriesKey?: string, horizontal?: boolean, stacked?: boolean, grouped?: boolean, percentStacked?: boolean, sort?: "none"|"asc"|"desc"|"label_asc"|"label_desc", smooth?: boolean, tension?: number, fill?: boolean, step?: boolean, pointRadius?: number, donutCutout?: number, showPercentLabels?: boolean, topN?: number, otherLabel?: string, stackId?: string, maxPoints?: number }',
           "",
           "Return ONLY valid JSON in one of these shapes:",
-          '{ "type": "tool_call", "tool": "warehouse.query|dbt.listModels|dbt.getModelSql|warehouse.lookupMetadata|chartjs.build", "args": { ... }, "reasoning"?: string }',
+          '{ "type": "tool_call", "tool": "warehouse.query|dbt.listModels|dbt.getModelSql|warehouse.lookupMetadata|tenantMemory.save|chartjs.build", "args": { ... }, "reasoning"?: string }',
           '{ "type": "final_answer", "answer": string, "reasoning"?: string }',
           "- If the user request is not analytical, ALWAYS return final_answer with the refusal text and do not call tools.",
           "",
@@ -445,6 +520,7 @@ export class AnalyticsAgentRuntime {
           exampleRelation
         ].filter(Boolean).join("\n")
       },
+      ...buildTenantMemorySystemMessage(tenantMemories),
       {
         role: "system",
         content: `dbt models currently available (name -> path, suggested relation):\n${dbtModels
@@ -630,6 +706,51 @@ export class AnalyticsAgentRuntime {
           continue;
         }
 
+        if (plan.tool === "tenantMemory.save") {
+          const parsedMemory = tenantMemorySaveSchema.safeParse(args);
+          if (!parsedMemory.success) {
+            throw new Error("tenantMemory.save requires args.content as a short string.");
+          }
+          if (!userExplicitlyAskedToSaveMemory(persistedUserText)) {
+            throw new Error("tenantMemory.save can only be used when the user explicitly asks to remember or save something.");
+          }
+          const normalizedContent = normalizeMemoryContent(parsedMemory.data.content);
+          const existingMemory = this.store
+            .listTenantMemories(context.tenantId, 500)
+            .find((memory) => memoryDedupKey(memory.content) === memoryDedupKey(normalizedContent));
+          const savedMemory = existingMemory
+            ? await runTool(
+                "tenantMemory.save",
+                { content: normalizedContent, deduped: true },
+                async () => existingMemory,
+                (memory) => ({ saved: false, deduped: true, memoryId: memory.id }),
+                (memory) => ({ saved: false, deduped: true, memoryId: memory.id, content: memory.content })
+              )
+            : await runTool(
+                "tenantMemory.save",
+                { content: normalizedContent },
+                async () =>
+                  this.store.createTenantMemory({
+                    tenantId: context.tenantId,
+                    content: normalizedContent,
+                    source: "agent"
+                  }),
+                (memory) => ({ saved: true, deduped: false, memoryId: memory.id }),
+                (memory) => ({ saved: true, deduped: false, memoryId: memory.id, content: memory.content })
+              );
+          tenantMemories = this.store.listTenantMemories(context.tenantId, 500);
+          loopMessages.push({
+            role: "user",
+            content: `Tool result (tenantMemory.save): ${asJsonBlock({
+              saved: !existingMemory,
+              deduped: Boolean(existingMemory),
+              memoryId: savedMemory.id,
+              content: savedMemory.content
+            })}`
+          });
+          continue;
+        }
+
         if (plan.tool === "chartjs.build") {
           const parsedRequest = chartRequestSchema.safeParse(args);
           if (!parsedRequest.success) {
@@ -734,6 +855,7 @@ export class AnalyticsAgentRuntime {
                   "Answer using business language and include caveats when sample size or nulls matter."
                 ].join("\n")
               },
+              ...buildTenantMemorySystemMessage(tenantMemories),
               {
                 role: "user",
                 content: [
