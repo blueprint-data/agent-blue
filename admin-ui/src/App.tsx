@@ -822,6 +822,8 @@ function TenantsPage({ notify }: { notify: (value: NotificationState | null) => 
   const [savingWarehouse, setSavingWarehouse] = useState(false);
   const [savingMemory, setSavingMemory] = useState(false);
   const [deletingMemoryId, setDeletingMemoryId] = useState<string | null>(null);
+  const [refreshingRepo, setRefreshingRepo] = useState(false);
+  const [lastRepoRefresh, setLastRepoRefresh] = useState<{ message: string; refreshedAt?: string } | null>(null);
   const [whProvider, setWhProvider] = useState<"snowflake" | "bigquery">("snowflake");
   const [whSnowflake, setWhSnowflake] = useState({ account: "", username: "", warehouse: "", database: "", schema: "", role: "", authType: "keypair" as "keypair" | "password", privateKeyPath: "", passwordEnvVar: "SNOWFLAKE_PASSWORD" });
   const [whBigQuery, setWhBigQuery] = useState({ projectId: "", dataset: "", location: "", authType: "adc" as "adc" | "service-account-key" });
@@ -852,6 +854,10 @@ function TenantsPage({ notify }: { notify: (value: NotificationState | null) => 
   useEffect(() => {
     void loadTenants();
   }, [loadTenants]);
+
+  useEffect(() => {
+    setLastRepoRefresh(null);
+  }, [selectedTenantId]);
 
   useEffect(() => {
     if (!selectedTenantId) {
@@ -1012,13 +1018,23 @@ function TenantsPage({ notify }: { notify: (value: NotificationState | null) => 
 
   async function refreshRepo() {
     if (!selectedTenant) return;
+    setRefreshingRepo(true);
     try {
-      const result = await apiRequest<{ message: string }>(`/api/admin/tenants/${selectedTenant.tenantId}/repo-refresh`, {
-        method: "POST"
+      const result = await apiRequest<{ message: string; refreshedAt?: string }>(
+        `/api/admin/tenants/${selectedTenant.tenantId}/repo-refresh`,
+        {
+          method: "POST"
+        }
+      );
+      setLastRepoRefresh({
+        message: result.message,
+        refreshedAt: result.refreshedAt
       });
       notify({ type: "success", text: result.message });
     } catch (caught) {
       notify({ type: "error", text: sectionError(caught) });
+    } finally {
+      setRefreshingRepo(false);
     }
   }
 
@@ -1197,10 +1213,16 @@ function TenantsPage({ notify }: { notify: (value: NotificationState | null) => 
               </label>
             </div>
             {selectedTenant ? (
-              <div className="button-row">
-                <button className="secondary-button" onClick={() => void refreshRepo()}>
-                  Refresh repo
-                </button>
+              <div className="stack">
+                <div className="button-row">
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    onClick={() => void refreshRepo()}
+                    disabled={refreshingRepo || saving}
+                  >
+                    {refreshingRepo ? "Refreshing…" : "Refresh repo"}
+                  </button>
                 {warehouseConfig?.provider === "snowflake" ? (
                   <>
                     <button className="secondary-button" onClick={() => fileInputRef.current?.click()}>
@@ -1241,9 +1263,16 @@ function TenantsPage({ notify }: { notify: (value: NotificationState | null) => 
                     />
                   </>
                 ) : null}
-                <button className="danger-button" onClick={() => void deleteTenant()}>
-                  Delete tenant
-                </button>
+                  <button className="danger-button" onClick={() => void deleteTenant()}>
+                    Delete tenant
+                  </button>
+                </div>
+                {lastRepoRefresh ? (
+                  <p className="muted">
+                    {lastRepoRefresh.message}
+                    {lastRepoRefresh.refreshedAt ? ` · ${formatDate(lastRepoRefresh.refreshedAt)}` : ""}
+                  </p>
+                ) : null}
               </div>
             ) : null}
           </AppShellCard>

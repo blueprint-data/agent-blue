@@ -12,8 +12,9 @@ export type ApiRequestInit = Omit<RequestInit, "body"> & {
 async function readErrorMessage(response: Response): Promise<string> {
   const contentType = response.headers.get("content-type") ?? "";
   if (contentType.includes("application/json")) {
-    const data = (await response.json()) as { error?: string };
-    return data.error ?? response.statusText;
+    const data = (await response.json()) as { error?: string; hint?: string };
+    const base = data.error ?? response.statusText;
+    return data.hint ? `${base} — ${data.hint}` : base;
   }
   const text = await response.text();
   return text || response.statusText;
