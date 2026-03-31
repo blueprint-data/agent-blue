@@ -914,9 +914,35 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
         snowflake?: TenantSnowflakeConfig;
         bigquery?: TenantBigQueryConfig;
       };
+      const existing = store.getTenantWarehouseConfig(tenantId);
+
       const provider = body.provider ?? "snowflake";
+      let snowflake = body.snowflake;
+      let bigquery = body.bigquery;
+
+      // GET /tenants/:id/warehouse strips paths for the admin UI; merge stored paths so edits (e.g. role) persist.
+      if (provider === "snowflake" && snowflake && existing?.provider === "snowflake" && existing.snowflake) {
+        const prev = existing.snowflake;
+        if (snowflake.authType === "keypair" && !snowflake.privateKeyPath && prev.privateKeyPath) {
+          snowflake = { ...snowflake, privateKeyPath: prev.privateKeyPath };
+        }
+        if (snowflake.authType === "password" && !snowflake.passwordEnvVar && prev.passwordEnvVar) {
+          snowflake = { ...snowflake, passwordEnvVar: prev.passwordEnvVar };
+        }
+      }
+
+      if (provider === "bigquery" && bigquery && existing?.provider === "bigquery" && existing.bigquery) {
+        const prev = existing.bigquery;
+        if (
+          bigquery.authType === "service-account-key" &&
+          !bigquery.serviceAccountKeyPath &&
+          prev.serviceAccountKeyPath
+        ) {
+          bigquery = { ...bigquery, serviceAccountKeyPath: prev.serviceAccountKeyPath };
+        }
+      }
+
       if (provider === "snowflake") {
-        const snowflake = body.snowflake;
         if (
           !snowflake?.account ||
           !snowflake.username ||
@@ -944,7 +970,7 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
         }
       }
       if (provider === "bigquery") {
-        if (!body.bigquery?.projectId) {
+        if (!bigquery?.projectId) {
           res.status(400).json({
             status: "failed",
             step: "warehouse",
@@ -952,7 +978,7 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
           });
           return;
         }
-        if (body.bigquery.authType === "service-account-key" && !body.bigquery.serviceAccountKeyPath) {
+        if (bigquery.authType === "service-account-key" && !bigquery.serviceAccountKeyPath) {
           res.status(400).json({
             status: "failed",
             step: "warehouse",
@@ -964,8 +990,8 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
       store.upsertTenantWarehouseConfig({
         tenantId,
         provider,
-        snowflake: body.snowflake,
-        bigquery: body.bigquery
+        snowflake,
+        bigquery
       });
       res.json({
         status: "passed",

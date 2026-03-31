@@ -916,8 +916,48 @@ function TenantsPage({ notify }: { notify: (value: NotificationState | null) => 
     });
   }, [selectedTenant]);
 
+  function buildWarehousePutBody():
+    | { provider: "snowflake"; snowflake: NonNullable<WarehouseConfigResponse["snowflake"]> & { privateKeyPath?: string; passwordEnvVar?: string } }
+    | { provider: "bigquery"; bigquery: NonNullable<WarehouseConfigResponse["bigquery"]> & { serviceAccountKeyPath?: string } } {
+    return whProvider === "snowflake"
+      ? {
+          provider: "snowflake",
+          snowflake: {
+            account: whSnowflake.account,
+            username: whSnowflake.username,
+            warehouse: whSnowflake.warehouse,
+            database: whSnowflake.database,
+            schema: whSnowflake.schema,
+            role: whSnowflake.role || undefined,
+            authType: whSnowflake.authType,
+            privateKeyPath: whSnowflake.authType === "keypair" ? whSnowflake.privateKeyPath || undefined : undefined,
+            passwordEnvVar: whSnowflake.authType === "password" ? whSnowflake.passwordEnvVar || undefined : undefined
+          }
+        }
+      : {
+          provider: "bigquery",
+          bigquery: {
+            projectId: whBigQuery.projectId,
+            dataset: whBigQuery.dataset || undefined,
+            location: whBigQuery.location || undefined,
+            authType: whBigQuery.authType
+          }
+        };
+  }
+
+  async function putWarehouseConfig(tenantId: string): Promise<void> {
+    await apiRequest(`/api/admin/wizard/tenant/${tenantId}/warehouse`, {
+      method: "PUT",
+      body: buildWarehousePutBody()
+    });
+    const nextWarehouse = await apiRequest<WarehouseConfigResponse>(`/api/admin/tenants/${tenantId}/warehouse`);
+    setWarehouseConfig(nextWarehouse);
+    setWhEditing(false);
+  }
+
   async function handleSave() {
     setSaving(true);
+    const persistWarehouseToo = Boolean(selectedTenant && whEditing);
     try {
       if (selectedTenant) {
         await apiRequest(`/api/admin/tenants/${selectedTenant.tenantId}`, {
@@ -927,7 +967,20 @@ function TenantsPage({ notify }: { notify: (value: NotificationState | null) => 
             dbtSubpath: form.dbtSubpath
           }
         });
-        notify({ type: "success", text: `Updated ${selectedTenant.tenantId}.` });
+        if (persistWarehouseToo) {
+          setSavingWarehouse(true);
+          try {
+            await putWarehouseConfig(selectedTenant.tenantId);
+          } finally {
+            setSavingWarehouse(false);
+          }
+        }
+        notify({
+          type: "success",
+          text: persistWarehouseToo
+            ? `Updated ${selectedTenant.tenantId} and warehouse configuration.`
+            : `Updated ${selectedTenant.tenantId}.`
+        });
       } else {
         await apiRequest("/api/admin/tenants", {
           method: "POST",
@@ -948,38 +1001,8 @@ function TenantsPage({ notify }: { notify: (value: NotificationState | null) => 
     if (!selectedTenant) return;
     setSavingWarehouse(true);
     try {
-      const body = whProvider === "snowflake"
-        ? {
-            provider: "snowflake" as const,
-            snowflake: {
-              account: whSnowflake.account,
-              username: whSnowflake.username,
-              warehouse: whSnowflake.warehouse,
-              database: whSnowflake.database,
-              schema: whSnowflake.schema,
-              role: whSnowflake.role || undefined,
-              authType: whSnowflake.authType,
-              privateKeyPath: whSnowflake.authType === "keypair" ? whSnowflake.privateKeyPath || undefined : undefined,
-              passwordEnvVar: whSnowflake.authType === "password" ? whSnowflake.passwordEnvVar || undefined : undefined
-            }
-          }
-        : {
-            provider: "bigquery" as const,
-            bigquery: {
-              projectId: whBigQuery.projectId,
-              dataset: whBigQuery.dataset || undefined,
-              location: whBigQuery.location || undefined,
-              authType: whBigQuery.authType
-            }
-          };
-      await apiRequest(`/api/admin/wizard/tenant/${selectedTenant.tenantId}/warehouse`, {
-        method: "PUT",
-        body
-      });
+      await putWarehouseConfig(selectedTenant.tenantId);
       notify({ type: "success", text: "Warehouse config saved." });
-      const nextWarehouse = await apiRequest<WarehouseConfigResponse>(`/api/admin/tenants/${selectedTenant.tenantId}/warehouse`);
-      setWarehouseConfig(nextWarehouse);
-      setWhEditing(false);
     } catch (caught) {
       notify({ type: "error", text: sectionError(caught) });
     } finally {

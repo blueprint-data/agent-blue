@@ -1,0 +1,3 @@
+- Google login
+- Swap slack bot per tenant
+- Superadmin
