@@ -25,7 +25,7 @@ export function AppSidebar({ username, method, onLogout }: AppSidebarProps) {
       <SidebarHeader>
         <div className="sidebar-brand">
           <span className="eyebrow">Operator console</span>
-          <h1>Agent Blue Admin</h1>
+          <h1 className="brand-gradient-title">Agent Blue Admin</h1>
           <p>Secure tenant operations, Slack bot control, and execution visibility.</p>
         </div>
       </SidebarHeader>

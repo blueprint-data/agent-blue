@@ -221,7 +221,7 @@ function App(): ReactElement {
       <div className="screen-center">
         <div className="splash-card">
           <span className="eyebrow">Agent Blue Admin</span>
-          <h1>Loading admin session…</h1>
+          <h1 className="hero-title">Loading admin session…</h1>
         </div>
       </div>
     );
@@ -269,7 +269,7 @@ function LoginScreen({
       <div className="login-shell">
         <div className="login-card">
           <span className="eyebrow">Agent Blue Admin</span>
-          <h1>Sign in</h1>
+          <h1 className="hero-title">Sign in</h1>
           <p>Secure, session-based admin access for tenant operations and Slack bot observability.</p>
           {!session.loginEnabled ? (
             <div className="banner error">Browser login is not configured. Set ADMIN_PASSWORD_HASH or ADMIN_BASIC_PASSWORD.</div>
@@ -307,10 +307,32 @@ function AdminShell({
   onLoggedOut: () => Promise<void>;
 }): ReactElement {
   const [notification, setNotification] = useState<NotificationState | null>(null);
+  const contentRef = useRef<HTMLElement>(null);
+  const [scrollProgress, setScrollProgress] = useState(0);
 
   const notify = useCallback((next: NotificationState | null) => {
     setNotification(next);
   }, []);
+
+  const updateScrollProgress = useCallback(() => {
+    const el = contentRef.current;
+    if (!el) return;
+    const maxScroll = el.scrollHeight - el.clientHeight;
+    setScrollProgress(maxScroll > 0 ? el.scrollTop / maxScroll : 0);
+  }, []);
+
+  useEffect(() => {
+    const el = contentRef.current;
+    if (!el) return;
+    updateScrollProgress();
+    el.addEventListener("scroll", updateScrollProgress, { passive: true });
+    const ro = new ResizeObserver(updateScrollProgress);
+    ro.observe(el);
+    return () => {
+      el.removeEventListener("scroll", updateScrollProgress);
+      ro.disconnect();
+    };
+  }, [updateScrollProgress]);
 
   async function handleLogout() {
     await apiRequest("/api/admin/auth/logout", {
@@ -325,12 +347,22 @@ function AdminShell({
   return (
     <SidebarProvider>
       <div className="app-shell">
+        <a href="#admin-main" className="skip-link">
+          Skip to main content
+        </a>
         <AppSidebar username={session.username} method={session.method} onLogout={() => void handleLogout()} />
         <SidebarInset>
           <header className="content-header">
-            <SidebarTrigger className="secondary-button" />
+            <div className="content-header-bar">
+              <SidebarTrigger className="secondary-button" />
+            </div>
+            <div
+              className="scroll-progress"
+              style={{ transform: `scaleX(${scrollProgress})` }}
+              aria-hidden
+            />
           </header>
-          <main className="content">
+          <main ref={contentRef} id="admin-main" className="content" tabIndex={-1}>
             {notification ? <div className={`banner ${notification.type}`}>{notification.text}</div> : null}
             <Routes>
               <Route path="/" element={<OverviewPage notify={notify} />} />
