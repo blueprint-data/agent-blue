@@ -153,14 +153,49 @@ export function serializeSessionCookie(
   return parts.join("; ");
 }
 
-export function serializeClearedSessionCookie(cookieName: string, secure: boolean): string {
+export function serializeClearedSessionCookie(
+  cookieName: string,
+  secure: boolean,
+  extra?: Pick<AdminCookieOptions, "path" | "sameSite">
+): string {
   return serializeSessionCookie(cookieName, "", {
     maxAgeSeconds: 0,
-    sameSite: "Strict",
-    secure
+    sameSite: extra?.sameSite ?? "Strict",
+    secure,
+    path: extra?.path
   });
 }
 
 export function createSessionId(): string {
   return crypto.randomBytes(32).toString("base64url");
+}
+
+function timingSafeStringEqual(left: string, right: string): boolean {
+  const a = Buffer.from(left);
+  const b = Buffer.from(right);
+  if (a.length !== b.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(a, b);
+}
+
+/** Signed opaque value for OAuth `state` and matching cookie. */
+export function createOAuthStateToken(secret: string): string {
+  const raw = createSessionId();
+  return createSignedSessionCookie(raw, secret);
+}
+
+export function verifyOAuthStateToken(params: {
+  cookieValue: string | undefined;
+  queryState: string | undefined;
+  secret: string;
+}): boolean {
+  const { cookieValue, queryState, secret } = params;
+  if (!cookieValue || !queryState) {
+    return false;
+  }
+  if (!timingSafeStringEqual(cookieValue, queryState)) {
+    return false;
+  }
+  return verifySignedSessionCookie(queryState, secret) !== null;
 }

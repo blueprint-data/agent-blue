@@ -10,6 +10,10 @@ function required(name: string): string {
   return value;
 }
 
+function truthyEnv(value: string | undefined): boolean {
+  return value === "1" || value?.toLowerCase() === "true";
+}
+
 export const env = {
   appDataDir: process.env.APP_DATA_DIR ?? "data",
   llmBaseUrl: process.env.LLM_BASE_URL ?? "https://openrouter.ai/api/v1",
@@ -51,6 +55,14 @@ export const env = {
   adminBasicUser: process.env.ADMIN_BASIC_USER ?? "admin",
   adminBasicPassword: process.env.ADMIN_BASIC_PASSWORD ?? "",
   adminUiToken: process.env.ADMIN_UI_TOKEN ?? process.env.ADMIN_BEARER_TOKEN ?? "",
+  adminAuthGoogleEnabled: truthyEnv(process.env.ADMIN_AUTH_GOOGLE_ENABLED),
+  googleOAuthClientId: process.env.GOOGLE_OAUTH_CLIENT_ID ?? "",
+  googleOAuthClientSecret: process.env.GOOGLE_OAUTH_CLIENT_SECRET ?? "",
+  googleOAuthRedirectUri: process.env.GOOGLE_OAUTH_REDIRECT_URI ?? "",
+  /** Optional; when unset, OAuth success/error redirects use the incoming request Origin. */
+  adminPublicOrigin: (process.env.ADMIN_PUBLIC_ORIGIN ?? "").replace(/\/$/, ""),
+  adminAuthSuperadminEmailDomainsRaw: process.env.ADMIN_AUTH_SUPERADMIN_EMAIL_DOMAINS ?? "",
+  adminAuthTenantEmailDomainMapRaw: process.env.ADMIN_AUTH_TENANT_EMAIL_DOMAIN_MAP ?? "",
   require(name: string): string {
     return required(name);
   }

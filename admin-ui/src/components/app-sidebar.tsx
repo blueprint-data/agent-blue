@@ -1,9 +1,17 @@
 import { NavLink } from "react-router-dom";
-import { Sidebar, SidebarContent, SidebarFooter, SidebarHeader, SidebarMenu } from "./ui/sidebar";
+import {
+  Sidebar,
+  SidebarContent,
+  SidebarFooter,
+  SidebarHeader,
+  SidebarMenu,
+  SidebarMenuItem
+} from "./ui/sidebar";
 
 type AppSidebarProps = {
   username?: string;
   method?: string;
+  isSuperadmin?: boolean;
   onLogout: () => void;
 };
 
@@ -19,25 +27,51 @@ function NavItem({ to, children }: { to: string; children: string }) {
   );
 }
 
-export function AppSidebar({ username, method, onLogout }: AppSidebarProps) {
+export function AppSidebar({ username, method, isSuperadmin = true, onLogout }: AppSidebarProps) {
   return (
     <Sidebar>
       <SidebarHeader>
         <div className="sidebar-brand">
-          <span className="eyebrow">Operator console</span>
-          <h1 className="brand-gradient-title">Agent Blue Admin</h1>
-          <p>Secure tenant operations, Slack bot control, and execution visibility.</p>
+          <div className="sidebar-brand-row">
+            <div className="sidebar-brand-mark" aria-hidden>
+              <span>AB</span>
+            </div>
+            <div className="sidebar-brand-text">
+              <span className="eyebrow sidebar-brand-eyebrow">Console</span>
+              <h1 className="sidebar-brand-title">Agent Blue</h1>
+            </div>
+          </div>
+          <p className="sidebar-brand-sub">Operator admin</p>
         </div>
       </SidebarHeader>
       <SidebarContent>
+        <p className="sidebar-nav-label">Navigation</p>
         <SidebarMenu>
-          <NavItem to="/">Overview</NavItem>
-          <NavItem to="/new-tenant">New Tenant</NavItem>
-          <NavItem to="/tenants">Tenants</NavItem>
-          <NavItem to="/conversations">Conversations</NavItem>
-          <NavItem to="/slack-bot">Slack Bot</NavItem>
-          <NavItem to="/telegram-bot">Telegram Bot</NavItem>
-          <NavItem to="/settings">Settings</NavItem>
+          <SidebarMenuItem>
+            <NavItem to="/">Overview</NavItem>
+          </SidebarMenuItem>
+          {isSuperadmin ? (
+            <SidebarMenuItem>
+              <NavItem to="/new-tenant">New Tenant</NavItem>
+            </SidebarMenuItem>
+          ) : null}
+          <SidebarMenuItem>
+            <NavItem to="/tenants">Tenants</NavItem>
+          </SidebarMenuItem>
+          <SidebarMenuItem>
+            <NavItem to="/conversations">Conversations</NavItem>
+          </SidebarMenuItem>
+          <SidebarMenuItem>
+            <NavItem to="/slack-bot">Slack Bot</NavItem>
+          </SidebarMenuItem>
+          <SidebarMenuItem>
+            <NavItem to="/telegram-bot">Telegram Bot</NavItem>
+          </SidebarMenuItem>
+          {isSuperadmin ? (
+            <SidebarMenuItem>
+              <NavItem to="/settings">Settings</NavItem>
+            </SidebarMenuItem>
+          ) : null}
         </SidebarMenu>
       </SidebarContent>
       <SidebarFooter>
@@ -45,7 +79,7 @@ export function AppSidebar({ username, method, onLogout }: AppSidebarProps) {
           <span>{username}</span>
           <StatusBadge label={method ?? "session"} tone="accent" />
         </div>
-        <button className="secondary-button" onClick={onLogout}>
+        <button type="button" className="sidebar-logout-button" onClick={onLogout}>
           Log out
         </button>
       </SidebarFooter>

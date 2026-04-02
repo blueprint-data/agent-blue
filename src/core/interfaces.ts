@@ -200,6 +200,11 @@ export interface ConversationStore {
   touchAdminSession(sessionId: string, lastSeenAt: string, expiresAt?: string): void;
   deleteAdminSession(sessionId: string): void;
   deleteExpiredAdminSessions(nowIso?: string): number;
+  /** domain (lowercase) -> tenantId for Google admin login; DB rows only (use merge with env in API). */
+  getAdminLoginDomainTenantMap(): Record<string, string>;
+  listAdminLoginDomainsForTenant(tenantId: string): string[];
+  /** Replaces all DB domains for the tenant. Domains must be unique globally. Throws if tenant missing or domain owned by another tenant. */
+  setAdminLoginDomainsForTenant(tenantId: string, domains: string[]): void;
 }
 
 export interface AdminGuardrails {
@@ -256,6 +261,10 @@ export interface TenantWarehouseConfig {
   updatedAt: string;
 }
 
+export type AdminPrincipalRole = "superadmin" | "tenant_admin";
+
+export type AdminAuthProvider = "password" | "google";
+
 export interface AdminSession {
   sessionId: string;
   username: string;
@@ -264,6 +273,12 @@ export interface AdminSession {
   lastSeenAt: string;
   userAgent?: string;
   ipAddress?: string;
+  authProvider: AdminAuthProvider;
+  email?: string;
+  googleSub?: string;
+  role: AdminPrincipalRole;
+  /** When role is tenant_admin, the only tenant this principal may access. */
+  scopedTenantId?: string | null;
 }
 
 export interface ChannelAdapter {

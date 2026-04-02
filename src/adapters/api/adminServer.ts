@@ -3,17 +3,26 @@ import fs from "node:fs";
 import path from "node:path";
 import express, { NextFunction, Request, Response } from "express";
 import { fileURLToPath } from "node:url";
+import { OAuth2Client } from "google-auth-library";
 import { buildRuntime } from "../../app.js";
 import type { ConversationStore } from "../../core/interfaces.js";
+import {
+  parseSuperadminEmailDomains,
+  parseTenantEmailDomainMap,
+  resolveGoogleLoginAccess
+} from "../../config/adminAuthPolicy.js";
 import { env } from "../../config/env.js";
 import { SqliteConversationStore } from "../store/sqliteConversationStore.js";
+import type { AdminRequestAuth } from "./admin/adminAccess.js";
 import {
+  createOAuthStateToken,
   createSessionId,
   createSignedSessionCookie,
   parseCookieHeader,
   serializeClearedSessionCookie,
   serializeSessionCookie,
   verifyAdminPassword,
+  verifyOAuthStateToken,
   verifySignedSessionCookie
 } from "./admin/adminAuth.js";
 import { createAdminApiRouter } from "./admin/adminApiRouter.js";
@@ -22,6 +31,7 @@ import { TelegramBotSupervisor } from "./admin/telegramBotSupervisor.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const adminSessionCookieName = "agent_blue_admin_session";
+const oauthStateCookieName = "agent_blue_oauth_state";
 const randomFallbackSecret = crypto.randomBytes(32).toString("base64url");
 
 export interface AdminServerOptions {
@@ -30,15 +40,39 @@ export interface AdminServerOptions {
   appDataDir: string;
 }
 
-type AdminAuthMethod = "session" | "basic" | "bearer";
-
-interface AdminRequestAuth {
-  method: AdminAuthMethod;
-  username: string;
-}
-
 function requestWithAdminAuth(req: Request): Request & { adminAuth?: AdminRequestAuth } {
   return req as Request & { adminAuth?: AdminRequestAuth };
+}
+
+function isGoogleOAuthConfigured(): boolean {
+  return (
+    env.adminAuthGoogleEnabled &&
+    Boolean(env.googleOAuthClientId) &&
+    Boolean(env.googleOAuthClientSecret) &&
+    Boolean(env.googleOAuthRedirectUri)
+  );
+}
+
+function adminPublicRedirectBase(req: Request): string {
+  if (env.adminPublicOrigin) {
+    return env.adminPublicOrigin;
+  }
+  const forwardedHost = req.get("x-forwarded-host")?.split(",")[0]?.trim();
+  const forwardedProto = req.get("x-forwarded-proto")?.split(",")[0]?.trim();
+  const host = forwardedHost ?? req.get("host") ?? "localhost";
+  const proto = forwardedProto ?? (isSecureRequest(req) ? "https" : req.protocol);
+  return `${proto}://${host}`;
+}
+
+function createGoogleOAuthClient(): OAuth2Client | null {
+  if (!isGoogleOAuthConfigured()) {
+    return null;
+  }
+  return new OAuth2Client(
+    env.googleOAuthClientId,
+    env.googleOAuthClientSecret,
+    env.googleOAuthRedirectUri
+  );
 }
 
 function getSessionSecret(): string {
@@ -105,7 +139,11 @@ function readAuthenticatedSession(req: Request, store: ConversationStore): Admin
   store.touchAdminSession(sessionId, nowIso, extendedExpiryIso);
   return {
     method: "session",
-    username: session.username
+    username: session.username,
+    role: session.role,
+    email: session.email,
+    scopedTenantId: session.scopedTenantId ?? null,
+    authProvider: session.authProvider
   };
 }
 
@@ -117,7 +155,10 @@ function readAuthenticatedHeader(req: Request): AdminRequestAuth | null {
     if (bearerToken && timingSafeStringEqual(token, bearerToken)) {
       return {
         method: "bearer",
-        username: env.adminUsername
+        username: env.adminUsername,
+        role: "superadmin",
+        scopedTenantId: null,
+        authProvider: "password"
       };
     }
   }
@@ -135,7 +176,10 @@ function readAuthenticatedHeader(req: Request): AdminRequestAuth | null {
       ) {
         return {
           method: "basic",
-          username
+          username,
+          role: "superadmin",
+          scopedTenantId: null,
+          authProvider: "password"
         };
       }
     } catch {
@@ -239,7 +283,9 @@ export function startAdminServer(options: AdminServerOptions): void {
   const { store, port, appDataDir } = options;
   const app = express();
   const sessionTtlSeconds = getSessionTtlSeconds();
-  const loginEnabled = Boolean(env.adminPasswordHash || env.adminBasicPassword);
+  const passwordLoginEnabled = Boolean(env.adminPasswordHash || env.adminBasicPassword);
+  const googleLoginEnabled = isGoogleOAuthConfigured();
+  const loginEnabled = passwordLoginEnabled || googleLoginEnabled;
   const authMiddleware = requireAdminAuth(store);
   const slackBotSupervisor = new SlackBotSupervisor({
     store,
@@ -254,9 +300,9 @@ export function startAdminServer(options: AdminServerOptions): void {
   app.use(express.json());
 
   app.post("/api/admin/auth/login", (req: Request, res: Response) => {
-    if (!loginEnabled) {
+    if (!passwordLoginEnabled) {
       res.status(503).json({
-        error: "Admin login is not configured. Set ADMIN_PASSWORD_HASH or ADMIN_BASIC_PASSWORD."
+        error: "Password login is not configured. Set ADMIN_PASSWORD_HASH or ADMIN_BASIC_PASSWORD, or use Google sign-in."
       });
       return;
     }
@@ -283,7 +329,10 @@ export function startAdminServer(options: AdminServerOptions): void {
       lastSeenAt: nowIso,
       expiresAt,
       userAgent: req.get("user-agent") ?? undefined,
-      ipAddress: req.ip || undefined
+      ipAddress: req.ip || undefined,
+      authProvider: "password",
+      role: "superadmin",
+      scopedTenantId: null
     });
     res.setHeader(
       "Set-Cookie",
@@ -297,21 +346,174 @@ export function startAdminServer(options: AdminServerOptions): void {
       authenticated: true,
       username,
       method: "session",
-      expiresAt
+      expiresAt,
+      role: "superadmin",
+      authProvider: "password",
+      googleLoginEnabled,
+      passwordLoginEnabled,
+      loginEnabled
     });
+  });
+
+  app.get("/api/admin/auth/google/start", (req: Request, res: Response) => {
+    const client = createGoogleOAuthClient();
+    if (!client) {
+      res.status(503).json({ error: "Google login is not configured." });
+      return;
+    }
+    const secret = getSessionSecret();
+    const state = createOAuthStateToken(secret);
+    const secure = isSecureRequest(req);
+    res.setHeader(
+      "Set-Cookie",
+      serializeSessionCookie(oauthStateCookieName, state, {
+        maxAgeSeconds: 600,
+        sameSite: "Lax",
+        secure,
+        path: "/"
+      })
+    );
+    const url = client.generateAuthUrl({
+      access_type: "online",
+      scope: ["openid", "email", "profile"],
+      state,
+      prompt: "select_account"
+    });
+    res.redirect(302, url);
+  });
+
+  app.get("/api/admin/auth/google/callback", async (req: Request, res: Response) => {
+    const base = adminPublicRedirectBase(req);
+    const adminHome = `${base}/admin/`;
+    const secure = isSecureRequest(req);
+    const secret = getSessionSecret();
+    const cookies = parseCookieHeader(req.headers.cookie);
+    const oauthCookie = cookies[oauthStateCookieName];
+
+    const redirectWithError = (code: string): void => {
+      res.setHeader(
+        "Set-Cookie",
+        serializeClearedSessionCookie(oauthStateCookieName, secure, { path: "/" })
+      );
+      res.redirect(302, `${adminHome}?error=${encodeURIComponent(code)}`);
+    };
+
+    const client = createGoogleOAuthClient();
+    if (!client) {
+      redirectWithError("google_not_configured");
+      return;
+    }
+
+    const oauthError = typeof req.query.error === "string" ? req.query.error : undefined;
+    if (oauthError) {
+      redirectWithError(`google_${oauthError}`);
+      return;
+    }
+
+    const code = typeof req.query.code === "string" ? req.query.code : "";
+    const state = typeof req.query.state === "string" ? req.query.state : "";
+    if (!code || !verifyOAuthStateToken({ cookieValue: oauthCookie, queryState: state, secret })) {
+      redirectWithError("oauth_state_invalid");
+      return;
+    }
+
+    try {
+      const { tokens } = await client.getToken({
+        code,
+        redirect_uri: env.googleOAuthRedirectUri
+      });
+      const idToken = tokens.id_token;
+      if (!idToken) {
+        redirectWithError("missing_id_token");
+        return;
+      }
+      const ticket = await client.verifyIdToken({
+        idToken,
+        audience: env.googleOAuthClientId
+      });
+      const payload = ticket.getPayload();
+      const email = payload?.email?.trim();
+      const emailVerified = Boolean(payload?.email_verified);
+      const hostedDomain = typeof payload?.hd === "string" ? payload.hd : null;
+      const sub = payload?.sub;
+      if (!email || !sub) {
+        redirectWithError("missing_profile");
+        return;
+      }
+
+      const superadminDomains = parseSuperadminEmailDomains(env.adminAuthSuperadminEmailDomainsRaw);
+      const envTenantDomainMap = parseTenantEmailDomainMap(env.adminAuthTenantEmailDomainMapRaw);
+      const dbTenantDomainMap = store.getAdminLoginDomainTenantMap();
+      const tenantDomainToTenantId = { ...envTenantDomainMap, ...dbTenantDomainMap };
+      const resolution = resolveGoogleLoginAccess({
+        email,
+        emailVerified,
+        hostedDomain,
+        superadminDomains,
+        tenantDomainToTenantId,
+        tenantExists: (tid) => Boolean(store.getTenantRepo(tid))
+      });
+
+      if (!resolution.ok) {
+        redirectWithError(resolution.code);
+        return;
+      }
+
+      const sessionId = createSessionId();
+      const signedCookie = createSignedSessionCookie(sessionId, secret);
+      const nowIso = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + sessionTtlSeconds * 1000).toISOString();
+      store.createAdminSession({
+        sessionId,
+        username: email,
+        email,
+        googleSub: sub,
+        createdAt: nowIso,
+        lastSeenAt: nowIso,
+        expiresAt,
+        userAgent: req.get("user-agent") ?? undefined,
+        ipAddress: req.ip || undefined,
+        authProvider: "google",
+        role: resolution.role,
+        scopedTenantId: resolution.scopedTenantId
+      });
+
+      res.setHeader("Set-Cookie", [
+        serializeClearedSessionCookie(oauthStateCookieName, secure, { path: "/" }),
+        serializeSessionCookie(adminSessionCookieName, signedCookie, {
+          maxAgeSeconds: sessionTtlSeconds,
+          sameSite: "Strict",
+          secure
+        })
+      ]);
+      res.redirect(302, adminHome);
+    } catch {
+      redirectWithError("token_exchange_failed");
+    }
   });
 
   app.get("/api/admin/auth/session", (req: Request, res: Response) => {
     const auth = getAuthenticatedAdmin(req, store);
     if (!auth) {
-      res.json({ authenticated: false, loginEnabled });
+      res.json({
+        authenticated: false,
+        loginEnabled,
+        googleLoginEnabled,
+        passwordLoginEnabled
+      });
       return;
     }
     res.json({
       authenticated: true,
       username: auth.username,
       method: auth.method,
-      loginEnabled
+      loginEnabled,
+      googleLoginEnabled,
+      passwordLoginEnabled,
+      role: auth.role,
+      email: auth.email,
+      scopedTenantId: auth.scopedTenantId ?? undefined,
+      authProvider: auth.authProvider
     });
   });
 
@@ -349,11 +551,14 @@ export function startAdminServer(options: AdminServerOptions): void {
       console.log(`Admin login enabled for username "${env.adminUsername}" via hashed password.`);
     } else if (env.adminBasicPassword) {
       console.warn("Admin login is using ADMIN_BASIC_PASSWORD fallback. Prefer ADMIN_PASSWORD_HASH.");
-    } else {
-      console.warn("Admin login is disabled. Configure ADMIN_PASSWORD_HASH or ADMIN_BASIC_PASSWORD.");
+    } else if (!googleLoginEnabled) {
+      console.warn("Admin browser login is disabled. Configure Google OAuth and/or ADMIN_PASSWORD_HASH / ADMIN_BASIC_PASSWORD.");
     }
     if (env.adminUiToken || env.adminBearerToken) {
       console.log("Admin API bearer auth enabled for non-browser/API clients.");
+    }
+    if (googleLoginEnabled) {
+      console.log("Google OAuth admin login enabled.");
     }
   });
 }

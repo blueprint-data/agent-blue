@@ -16,6 +16,8 @@ import { buildWarehouseFromTenantConfig } from "../../../app.js";
 import { GitDbtRepositoryService } from "../../dbt/dbtRepoService.js";
 import type { SlackBotSupervisor } from "./slackBotSupervisor.js";
 import type { TelegramBotSupervisor } from "./telegramBotSupervisor.js";
+import type { AdminRequestAuth } from "./adminAccess.js";
+import { adminAuthFromRequest, denyUnlessSuperadmin, denyUnlessTenantAccess } from "./adminApiAuth.js";
 
 function param(req: Request, name: string): string {
   const value = req.params[name];
@@ -35,8 +37,42 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
   const dbtRepo = new GitDbtRepositoryService(store);
   const maxTenantMemoryChars = 300;
 
-  router.get("/tenants", (_req: Request, res: Response) => {
+  function filterSlackMappingsForAuth(auth: AdminRequestAuth) {
+    const full = {
+      channels: store.listSlackChannelMappings(),
+      users: store.listSlackUserMappings(),
+      sharedTeams: store.listSlackSharedTeamMappings()
+    };
+    if (auth.role === "superadmin") {
+      return full;
+    }
+    const tid = auth.scopedTenantId;
+    if (!tid) {
+      return { channels: [] as typeof full.channels, users: [] as typeof full.users, sharedTeams: [] as typeof full.sharedTeams };
+    }
+    return {
+      channels: full.channels.filter((c) => c.tenantId === tid),
+      users: full.users.filter((u) => u.tenantId === tid),
+      sharedTeams: full.sharedTeams.filter((s) => s.tenantId === tid)
+    };
+  }
+
+  router.get("/tenants", (req: Request, res: Response) => {
     try {
+      const auth = adminAuthFromRequest(req);
+      if (auth.role === "tenant_admin") {
+        const tid = auth.scopedTenantId;
+        if (!tid) {
+          res.json([]);
+          return;
+        }
+        if (denyUnlessTenantAccess(req, res, tid)) {
+          return;
+        }
+        const all = store.listTenants();
+        res.json(all.filter((t) => t.tenantId === tid));
+        return;
+      }
       res.json(store.listTenants());
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
@@ -46,6 +82,9 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
   router.get("/tenants/:tenantId", (req: Request, res: Response) => {
     try {
       const tenantId = param(req, "tenantId");
+      if (denyUnlessTenantAccess(req, res, tenantId)) {
+        return;
+      }
       const repo = store.getTenantRepo(tenantId);
       if (!repo) {
         res.status(404).json({ error: "Tenant not found" });
@@ -60,6 +99,9 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
 
   router.post("/tenants", (req: Request, res: Response) => {
     try {
+      if (denyUnlessSuperadmin(req, res)) {
+        return;
+      }
       const { tenantId, repoUrl, dbtSubpath = "models" } = req.body as {
         tenantId?: string;
         repoUrl?: string;
@@ -85,6 +127,9 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
   router.patch("/tenants/:tenantId", (req: Request, res: Response) => {
     try {
       const tenantId = param(req, "tenantId");
+      if (denyUnlessTenantAccess(req, res, tenantId)) {
+        return;
+      }
       const repo = store.getTenantRepo(tenantId);
       if (!repo) {
         res.status(404).json({ error: "Tenant not found" });
@@ -110,6 +155,9 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
 
   router.delete("/tenants/:tenantId", (req: Request, res: Response) => {
     try {
+      if (denyUnlessSuperadmin(req, res)) {
+        return;
+      }
       const tenantId = param(req, "tenantId");
       const repo = store.getTenantRepo(tenantId);
       if (!repo) {
@@ -134,6 +182,9 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
   router.get("/tenants/:tenantId/memories", (req: Request, res: Response) => {
     try {
       const tenantId = param(req, "tenantId");
+      if (denyUnlessTenantAccess(req, res, tenantId)) {
+        return;
+      }
       if (!store.getTenantRepo(tenantId)) {
         res.status(404).json({ error: "Tenant not found" });
         return;
@@ -149,6 +200,9 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
   router.post("/tenants/:tenantId/memories", (req: Request, res: Response) => {
     try {
       const tenantId = param(req, "tenantId");
+      if (denyUnlessTenantAccess(req, res, tenantId)) {
+        return;
+      }
       if (!store.getTenantRepo(tenantId)) {
         res.status(404).json({ error: "Tenant not found" });
         return;
@@ -177,6 +231,9 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
   router.delete("/tenants/:tenantId/memories/:memoryId", (req: Request, res: Response) => {
     try {
       const tenantId = param(req, "tenantId");
+      if (denyUnlessTenantAccess(req, res, tenantId)) {
+        return;
+      }
       if (!store.getTenantRepo(tenantId)) {
         res.status(404).json({ error: "Tenant not found" });
         return;
@@ -189,6 +246,54 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
       }
       store.deleteTenantMemory(memory.id);
       res.status(204).send();
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.get("/tenants/:tenantId/admin-login-domains", (req: Request, res: Response) => {
+    try {
+      const tenantId = param(req, "tenantId");
+      if (denyUnlessTenantAccess(req, res, tenantId)) {
+        return;
+      }
+      if (!store.getTenantRepo(tenantId)) {
+        res.status(404).json({ error: "Tenant not found" });
+        return;
+      }
+      res.json({ domains: store.listAdminLoginDomainsForTenant(tenantId) });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.put("/tenants/:tenantId/admin-login-domains", (req: Request, res: Response) => {
+    try {
+      if (denyUnlessSuperadmin(req, res)) {
+        return;
+      }
+      const tenantId = param(req, "tenantId");
+      if (!store.getTenantRepo(tenantId)) {
+        res.status(404).json({ error: "Tenant not found" });
+        return;
+      }
+      const body = req.body as { domains?: unknown };
+      const raw = body.domains;
+      let domains: string[] = [];
+      if (Array.isArray(raw)) {
+        domains = raw.filter((x): x is string => typeof x === "string");
+      } else if (typeof raw === "string") {
+        domains = raw
+          .split(/[\n,]+/)
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0);
+      }
+      try {
+        store.setAdminLoginDomainsForTenant(tenantId, domains);
+        res.json({ domains: store.listAdminLoginDomainsForTenant(tenantId) });
+      } catch (err) {
+        res.status(400).json({ error: (err as Error).message });
+      }
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }
@@ -234,6 +339,9 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
     (req: Request, res: Response) => {
       try {
         const tenantId = param(req, "tenantId");
+        if (denyUnlessTenantAccess(req, res, tenantId)) {
+          return;
+        }
         const repo = store.getTenantRepo(tenantId);
         if (!repo) {
           res.status(404).json({ error: "Tenant not found" });
@@ -298,6 +406,9 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
     (req: Request, res: Response) => {
       try {
         const tenantId = param(req, "tenantId");
+        if (denyUnlessTenantAccess(req, res, tenantId)) {
+          return;
+        }
         const repo = store.getTenantRepo(tenantId);
         if (!repo) {
           res.status(404).json({ error: "Tenant not found" });
@@ -362,6 +473,9 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
   router.post("/tenants/:tenantId/repo-refresh", async (req: Request, res: Response) => {
     try {
       const tenantId = param(req, "tenantId");
+      if (denyUnlessTenantAccess(req, res, tenantId)) {
+        return;
+      }
       const repo = store.getTenantRepo(tenantId);
       if (!repo) {
         res.status(404).json({ status: "failed", error: "Tenant not found", refreshedAt: null });
@@ -385,13 +499,10 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
     }
   });
 
-  router.get("/slack-mappings", (_req: Request, res: Response) => {
+  router.get("/slack-mappings", (req: Request, res: Response) => {
     try {
-      res.json({
-        channels: store.listSlackChannelMappings(),
-        users: store.listSlackUserMappings(),
-        sharedTeams: store.listSlackSharedTeamMappings()
-      });
+      const auth = adminAuthFromRequest(req);
+      res.json(filterSlackMappingsForAuth(auth));
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }
@@ -403,6 +514,9 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
       const { tenantId } = req.body as { tenantId?: string };
       if (!tenantId) {
         res.status(400).json({ error: "tenantId required" });
+        return;
+      }
+      if (denyUnlessTenantAccess(req, res, tenantId)) {
         return;
       }
       if (!store.getTenantRepo(tenantId)) {
@@ -418,7 +532,12 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
 
   router.delete("/slack-mappings/channels/:channelId", (req: Request, res: Response) => {
     try {
-      store.deleteSlackChannelMapping(param(req, "channelId"));
+      const channelId = param(req, "channelId");
+      const existing = store.listSlackChannelMappings().find((c) => c.channelId === channelId);
+      if (existing && denyUnlessTenantAccess(req, res, existing.tenantId)) {
+        return;
+      }
+      store.deleteSlackChannelMapping(channelId);
       res.status(204).send();
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
@@ -431,6 +550,9 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
       const { tenantId } = req.body as { tenantId?: string };
       if (!tenantId) {
         res.status(400).json({ error: "tenantId required" });
+        return;
+      }
+      if (denyUnlessTenantAccess(req, res, tenantId)) {
         return;
       }
       if (!store.getTenantRepo(tenantId)) {
@@ -446,7 +568,12 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
 
   router.delete("/slack-mappings/users/:userId", (req: Request, res: Response) => {
     try {
-      store.deleteSlackUserMapping(param(req, "userId"));
+      const userId = param(req, "userId");
+      const existing = store.listSlackUserMappings().find((u) => u.userId === userId);
+      if (existing && denyUnlessTenantAccess(req, res, existing.tenantId)) {
+        return;
+      }
+      store.deleteSlackUserMapping(userId);
       res.status(204).send();
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
@@ -459,6 +586,9 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
       const { tenantId } = req.body as { tenantId?: string };
       if (!tenantId) {
         res.status(400).json({ error: "tenantId required" });
+        return;
+      }
+      if (denyUnlessTenantAccess(req, res, tenantId)) {
         return;
       }
       if (!store.getTenantRepo(tenantId)) {
@@ -474,15 +604,23 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
 
   router.delete("/slack-mappings/shared-teams/:teamId", (req: Request, res: Response) => {
     try {
-      store.deleteSlackSharedTeamMapping(param(req, "teamId"));
+      const teamId = param(req, "teamId");
+      const existing = store.listSlackSharedTeamMappings().find((s) => s.sharedTeamId === teamId);
+      if (existing && denyUnlessTenantAccess(req, res, existing.tenantId)) {
+        return;
+      }
+      store.deleteSlackSharedTeamMapping(teamId);
       res.status(204).send();
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }
   });
 
-  router.get("/guardrails", (_req: Request, res: Response) => {
+  router.get("/guardrails", (req: Request, res: Response) => {
     try {
+      if (denyUnlessSuperadmin(req, res)) {
+        return;
+      }
       res.json(
         store.getGuardrails() ?? {
           ownerTeamIds: [],
@@ -498,6 +636,9 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
 
   router.patch("/guardrails", (req: Request, res: Response) => {
     try {
+      if (denyUnlessSuperadmin(req, res)) {
+        return;
+      }
       const body = req.body as Partial<AdminGuardrails>;
       const current = store.getGuardrails();
       const merged: AdminGuardrails = {
@@ -527,6 +668,9 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
   router.get("/credentials-ref/:tenantId", (req: Request, res: Response) => {
     try {
       const tenantId = param(req, "tenantId");
+      if (denyUnlessTenantAccess(req, res, tenantId)) {
+        return;
+      }
       const repo = store.getTenantRepo(tenantId);
       if (!repo) {
         res.status(404).json({ error: "Tenant not found" });
@@ -549,6 +693,9 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
   router.patch("/credentials-ref/:tenantId", (req: Request, res: Response) => {
     try {
       const tenantId = param(req, "tenantId");
+      if (denyUnlessTenantAccess(req, res, tenantId)) {
+        return;
+      }
       const repo = store.getTenantRepo(tenantId);
       if (!repo) {
         res.status(404).json({ error: "Tenant not found" });
@@ -571,6 +718,9 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
   router.get("/tenants/:tenantId/warehouse", (req: Request, res: Response) => {
     try {
       const tenantId = param(req, "tenantId");
+      if (denyUnlessTenantAccess(req, res, tenantId)) {
+        return;
+      }
       if (!store.getTenantRepo(tenantId)) {
         res.status(404).json({ error: "Tenant not found" });
         return;
@@ -610,9 +760,20 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
     }
   });
 
-  router.get("/telegram-mappings", (_req: Request, res: Response) => {
+  router.get("/telegram-mappings", (req: Request, res: Response) => {
     try {
-      res.json(store.listTelegramChatMappings());
+      const auth = adminAuthFromRequest(req);
+      const all = store.listTelegramChatMappings();
+      if (auth.role === "superadmin") {
+        res.json(all);
+        return;
+      }
+      const tid = auth.scopedTenantId;
+      if (!tid) {
+        res.json([]);
+        return;
+      }
+      res.json(all.filter((m) => m.tenantId === tid));
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }
@@ -624,6 +785,9 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
       const { tenantId } = req.body as { tenantId?: string };
       if (!tenantId) {
         res.status(400).json({ error: "tenantId required" });
+        return;
+      }
+      if (denyUnlessTenantAccess(req, res, tenantId)) {
         return;
       }
       if (!store.getTenantRepo(tenantId)) {
@@ -639,7 +803,12 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
 
   router.delete("/telegram-mappings/:chatId", (req: Request, res: Response) => {
     try {
-      store.deleteTelegramChatMapping(param(req, "chatId"));
+      const chatId = param(req, "chatId");
+      const existing = store.listTelegramChatMappings().find((m) => m.chatId === chatId);
+      if (existing && denyUnlessTenantAccess(req, res, existing.tenantId)) {
+        return;
+      }
+      store.deleteTelegramChatMapping(chatId);
       res.status(204).send();
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
@@ -672,8 +841,11 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
     }
   });
 
-  router.post("/telegram-bot/start", async (_req: Request, res: Response) => {
+  router.post("/telegram-bot/start", async (req: Request, res: Response) => {
     try {
+      if (denyUnlessSuperadmin(req, res)) {
+        return;
+      }
       if (!telegramBotSupervisor) {
         res.status(503).json({ error: "Telegram bot supervisor unavailable" });
         return;
@@ -684,8 +856,11 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
     }
   });
 
-  router.post("/telegram-bot/stop", async (_req: Request, res: Response) => {
+  router.post("/telegram-bot/stop", async (req: Request, res: Response) => {
     try {
+      if (denyUnlessSuperadmin(req, res)) {
+        return;
+      }
       if (!telegramBotSupervisor) {
         res.status(503).json({ error: "Telegram bot supervisor unavailable" });
         return;
@@ -696,8 +871,11 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
     }
   });
 
-  router.post("/telegram-bot/restart", async (_req: Request, res: Response) => {
+  router.post("/telegram-bot/restart", async (req: Request, res: Response) => {
     try {
+      if (denyUnlessSuperadmin(req, res)) {
+        return;
+      }
       if (!telegramBotSupervisor) {
         res.status(503).json({ error: "Telegram bot supervisor unavailable" });
         return;
@@ -710,7 +888,11 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
 
   router.get("/conversations", (req: Request, res: Response) => {
     try {
-      const tenantId = typeof req.query.tenantId === "string" ? req.query.tenantId : undefined;
+      const auth = adminAuthFromRequest(req);
+      let tenantId = typeof req.query.tenantId === "string" ? req.query.tenantId : undefined;
+      if (auth.role === "tenant_admin" && auth.scopedTenantId) {
+        tenantId = auth.scopedTenantId;
+      }
       const source = typeof req.query.source === "string" ? req.query.source : undefined;
       const search = typeof req.query.search === "string" ? req.query.search : undefined;
       const limitRaw = typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : 100;
@@ -735,6 +917,9 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
         res.status(404).json({ error: "Conversation not found" });
         return;
       }
+      if (denyUnlessTenantAccess(req, res, detail.summary.tenantId)) {
+        return;
+      }
       res.json(detail);
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
@@ -746,6 +931,9 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
       const turn = store.getExecutionTurn(param(req, "turnId"));
       if (!turn) {
         res.status(404).json({ error: "Execution turn not found" });
+        return;
+      }
+      if (denyUnlessTenantAccess(req, res, turn.tenantId)) {
         return;
       }
       res.json(turn);
@@ -782,6 +970,9 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
 
   router.post("/bot/start", async (req: Request, res: Response) => {
     try {
+      if (denyUnlessSuperadmin(req, res)) {
+        return;
+      }
       if (!slackBotSupervisor) {
         res.status(503).json({ error: "Slack bot supervisor unavailable" });
         return;
@@ -794,8 +985,11 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
     }
   });
 
-  router.post("/bot/stop", async (_req: Request, res: Response) => {
+  router.post("/bot/stop", async (req: Request, res: Response) => {
     try {
+      if (denyUnlessSuperadmin(req, res)) {
+        return;
+      }
       if (!slackBotSupervisor) {
         res.status(503).json({ error: "Slack bot supervisor unavailable" });
         return;
@@ -808,6 +1002,9 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
 
   router.post("/bot/restart", async (req: Request, res: Response) => {
     try {
+      if (denyUnlessSuperadmin(req, res)) {
+        return;
+      }
       if (!slackBotSupervisor) {
         res.status(503).json({ error: "Slack bot supervisor unavailable" });
         return;
@@ -821,6 +1018,9 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
 
   router.post("/wizard/tenant/init", (req: Request, res: Response) => {
     try {
+      if (denyUnlessSuperadmin(req, res)) {
+        return;
+      }
       const { tenantId, repoUrl, dbtSubpath = "models", warehouseProvider = "snowflake" } = req.body as {
         tenantId?: string;
         repoUrl?: string;
@@ -851,6 +1051,9 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
   router.post("/wizard/tenant/:tenantId/repo-verify", async (req: Request, res: Response) => {
     try {
       const tenantId = param(req, "tenantId");
+      if (denyUnlessTenantAccess(req, res, tenantId)) {
+        return;
+      }
       if (!store.getTenantRepo(tenantId)) {
         res.status(404).json({
           status: "failed",
@@ -880,6 +1083,9 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
   router.get("/wizard/tenant/:tenantId/state", (req: Request, res: Response) => {
     try {
       const tenantId = param(req, "tenantId");
+      if (denyUnlessTenantAccess(req, res, tenantId)) {
+        return;
+      }
       if (!store.getTenantRepo(tenantId)) {
         res.status(404).json({ error: "Tenant not found" });
         return;
@@ -905,6 +1111,9 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
   router.put("/wizard/tenant/:tenantId/warehouse", (req: Request, res: Response) => {
     try {
       const tenantId = param(req, "tenantId");
+      if (denyUnlessTenantAccess(req, res, tenantId)) {
+        return;
+      }
       if (!store.getTenantRepo(tenantId)) {
         res.status(404).json({ status: "failed", step: "warehouse", error: "Tenant not found. Run init first." });
         return;
@@ -1006,6 +1215,9 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
   router.post("/wizard/tenant/:tenantId/warehouse-test", async (req: Request, res: Response) => {
     try {
       const tenantId = param(req, "tenantId");
+      if (denyUnlessTenantAccess(req, res, tenantId)) {
+        return;
+      }
       const config = store.getTenantWarehouseConfig(tenantId);
       if (!config) {
         res.status(404).json({
@@ -1040,6 +1252,9 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
   router.put("/wizard/tenant/:tenantId/slack-mappings", (req: Request, res: Response) => {
     try {
       const tenantId = param(req, "tenantId");
+      if (denyUnlessTenantAccess(req, res, tenantId)) {
+        return;
+      }
       if (!store.getTenantRepo(tenantId)) {
         res.status(404).json({
           status: "failed",
@@ -1087,6 +1302,9 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
   router.post("/wizard/tenant/:tenantId/final-validate", async (req: Request, res: Response) => {
     try {
       const tenantId = param(req, "tenantId");
+      if (denyUnlessTenantAccess(req, res, tenantId)) {
+        return;
+      }
       if (!store.getTenantRepo(tenantId)) {
         res.status(404).json({ ready: false, error: "Tenant not found.", checks: [] });
         return;

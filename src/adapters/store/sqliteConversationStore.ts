@@ -24,6 +24,7 @@ import {
   TenantMemorySource
 } from "../../core/types.js";
 import { createId } from "../../utils/id.js";
+import { normalizeDomainPart } from "../../config/adminAuthPolicy.js";
 
 const DEFAULT_SOUL_PROMPT = [
   "You are Agent Blue, an analytical assistant for business stakeholders.",
@@ -171,6 +172,14 @@ export class SqliteConversationStore implements ConversationStore {
         updated_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS tenant_admin_login_domains (
+        domain TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_tenant_admin_login_domains_tenant ON tenant_admin_login_domains(tenant_id);
+
       CREATE TABLE IF NOT EXISTS admin_sessions (
         session_id TEXT PRIMARY KEY,
         username TEXT NOT NULL,
@@ -178,7 +187,12 @@ export class SqliteConversationStore implements ConversationStore {
         expires_at TEXT NOT NULL,
         last_seen_at TEXT NOT NULL,
         user_agent TEXT,
-        ip_address TEXT
+        ip_address TEXT,
+        auth_provider TEXT NOT NULL DEFAULT 'password',
+        email TEXT,
+        google_sub TEXT,
+        role TEXT NOT NULL DEFAULT 'superadmin',
+        scoped_tenant_id TEXT
       );
 
       CREATE TABLE IF NOT EXISTS conversation_origins (
@@ -231,6 +245,164 @@ export class SqliteConversationStore implements ConversationStore {
         created_at TEXT NOT NULL
       );
     `);
+    this.migrateAdminSessionsColumns();
+    this.migrateTenantMemoriesTable();
+    this.migrateMessagesTable();
+  }
+
+  private migrateAdminSessionsColumns(): void {
+    const rows = this.db.prepare("PRAGMA table_info(admin_sessions)").all() as Array<{ name: string }>;
+    const names = new Set(rows.map((r) => r.name));
+    if (!names.has("auth_provider")) {
+      this.db.exec(`ALTER TABLE admin_sessions ADD COLUMN auth_provider TEXT NOT NULL DEFAULT 'password'`);
+    }
+    if (!names.has("email")) {
+      this.db.exec(`ALTER TABLE admin_sessions ADD COLUMN email TEXT`);
+    }
+    if (!names.has("google_sub")) {
+      this.db.exec(`ALTER TABLE admin_sessions ADD COLUMN google_sub TEXT`);
+    }
+    if (!names.has("role")) {
+      this.db.exec(`ALTER TABLE admin_sessions ADD COLUMN role TEXT NOT NULL DEFAULT 'superadmin'`);
+    }
+    if (!names.has("scoped_tenant_id")) {
+      this.db.exec(`ALTER TABLE admin_sessions ADD COLUMN scoped_tenant_id TEXT`);
+    }
+  }
+
+  /** Align legacy DBs: `CREATE TABLE IF NOT EXISTS` never adds missing columns. */
+  private migrateTenantMemoriesTable(): void {
+    const exists = this.db
+      .prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tenant_memories'`)
+      .get() as { 1: number } | undefined;
+    if (!exists) {
+      return;
+    }
+    let names = new Set(
+      (this.db.prepare("PRAGMA table_info(tenant_memories)").all() as Array<{ name: string }>).map((r) => r.name)
+    );
+    if (!names.has("content")) {
+      if (names.has("body")) {
+        this.db.exec(`ALTER TABLE tenant_memories RENAME COLUMN body TO content`);
+      } else if (names.has("text")) {
+        this.db.exec(`ALTER TABLE tenant_memories RENAME COLUMN text TO content`);
+      } else {
+        this.db.exec(`ALTER TABLE tenant_memories ADD COLUMN content TEXT NOT NULL DEFAULT ''`);
+      }
+      names = new Set(
+        (this.db.prepare("PRAGMA table_info(tenant_memories)").all() as Array<{ name: string }>).map((r) => r.name)
+      );
+    }
+    if (!names.has("source")) {
+      this.db.exec(`ALTER TABLE tenant_memories ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'`);
+    }
+    names = new Set(
+      (this.db.prepare("PRAGMA table_info(tenant_memories)").all() as Array<{ name: string }>).map((r) => r.name)
+    );
+    if (!names.has("created_at")) {
+      this.db.exec(`ALTER TABLE tenant_memories ADD COLUMN created_at TEXT NOT NULL DEFAULT (datetime('now'))`);
+    }
+    if (!names.has("updated_at")) {
+      this.db.exec(`ALTER TABLE tenant_memories ADD COLUMN updated_at TEXT NOT NULL DEFAULT (datetime('now'))`);
+    }
+
+    this.normalizeTenantMemoriesToCanonicalSchema();
+  }
+
+  /**
+   * Legacy DBs may keep extra NOT NULL columns (e.g. `summary`) that inserts do not populate.
+   * Rebuild to exactly: id, tenant_id, content, source, created_at, updated_at.
+   */
+  private normalizeTenantMemoriesToCanonicalSchema(): void {
+    const exists = this.db
+      .prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tenant_memories'`)
+      .get() as { 1: number } | undefined;
+    if (!exists) {
+      return;
+    }
+    const colRows = this.db.prepare("PRAGMA table_info(tenant_memories)").all() as Array<{ name: string }>;
+    const names = new Set(colRows.map((r) => r.name));
+    const canonical = new Set(["id", "tenant_id", "content", "source", "created_at", "updated_at"]);
+    if (names.size === canonical.size && [...canonical].every((c) => names.has(c))) {
+      return;
+    }
+
+    const trimOrNull = (col: string) => `NULLIF(TRIM(COALESCE(${col}, '')), '')`;
+    const contentParts: string[] = [];
+    if (names.has("content")) {
+      contentParts.push(trimOrNull("content"));
+    }
+    if (names.has("summary")) {
+      contentParts.push(trimOrNull("summary"));
+    }
+    if (names.has("body")) {
+      contentParts.push(trimOrNull("body"));
+    }
+    if (names.has("text")) {
+      contentParts.push(trimOrNull("text"));
+    }
+    const contentExpr =
+      contentParts.length === 0 ? `''` : `COALESCE(${contentParts.join(", ")}, '')`;
+
+    const sourceExpr = names.has("source") ? `COALESCE(source, 'manual')` : `'manual'`;
+    const createdExpr = names.has("created_at") ? `COALESCE(created_at, datetime('now'))` : `datetime('now')`;
+    const updatedExpr = names.has("updated_at")
+      ? names.has("created_at")
+        ? `COALESCE(updated_at, created_at, datetime('now'))`
+        : `COALESCE(updated_at, datetime('now'))`
+      : names.has("created_at")
+        ? `COALESCE(created_at, datetime('now'))`
+        : `datetime('now')`;
+
+    const rebuild = this.db.transaction(() => {
+      this.db.exec(`
+        CREATE TABLE _tenant_memories_canonical (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          content TEXT NOT NULL,
+          source TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+      `);
+      this.db.exec(`
+        INSERT INTO _tenant_memories_canonical (id, tenant_id, content, source, created_at, updated_at)
+        SELECT id,
+               tenant_id,
+               ${contentExpr},
+               ${sourceExpr},
+               ${createdExpr},
+               ${updatedExpr}
+        FROM tenant_memories;
+      `);
+      this.db.exec(`DROP TABLE tenant_memories`);
+      this.db.exec(`ALTER TABLE _tenant_memories_canonical RENAME TO tenant_memories`);
+    });
+    rebuild();
+  }
+
+  private migrateMessagesTable(): void {
+    const exists = this.db
+      .prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages'`)
+      .get() as { 1: number } | undefined;
+    if (!exists) {
+      return;
+    }
+    const names = new Set(
+      (this.db.prepare("PRAGMA table_info(messages)").all() as Array<{ name: string }>).map((r) => r.name)
+    );
+    if (names.has("content")) {
+      return;
+    }
+    if (names.has("body")) {
+      this.db.exec(`ALTER TABLE messages RENAME COLUMN body TO content`);
+      return;
+    }
+    if (names.has("text")) {
+      this.db.exec(`ALTER TABLE messages RENAME COLUMN text TO content`);
+      return;
+    }
+    this.db.exec(`ALTER TABLE messages ADD COLUMN content TEXT NOT NULL DEFAULT ''`);
   }
 
   createConversation(context: AgentContext): void {
@@ -717,6 +889,7 @@ export class SqliteConversationStore implements ConversationStore {
     this.db.prepare("DELETE FROM tenant_credentials_ref WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM tenant_warehouse_config WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM tenant_key_metadata WHERE tenant_id = ?").run(tenantId);
+    this.db.prepare("DELETE FROM tenant_admin_login_domains WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM messages WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM conversations WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM agent_profiles WHERE tenant_id = ?").run(tenantId);
@@ -1349,12 +1522,66 @@ export class SqliteConversationStore implements ConversationStore {
     }));
   }
 
+  getAdminLoginDomainTenantMap(): Record<string, string> {
+    const rows = this.db
+      .prepare(`SELECT domain, tenant_id FROM tenant_admin_login_domains`)
+      .all() as Array<{ domain: string; tenant_id: string }>;
+    return Object.fromEntries(rows.map((r) => [r.domain, r.tenant_id]));
+  }
+
+  listAdminLoginDomainsForTenant(tenantId: string): string[] {
+    const rows = this.db
+      .prepare(`SELECT domain FROM tenant_admin_login_domains WHERE tenant_id = ? ORDER BY domain`)
+      .all(tenantId) as Array<{ domain: string }>;
+    return rows.map((r) => r.domain);
+  }
+
+  setAdminLoginDomainsForTenant(tenantId: string, domains: string[]): void {
+    if (!this.getTenantRepo(tenantId)) {
+      throw new Error(`Tenant "${tenantId}" does not exist.`);
+    }
+    const seen = new Set<string>();
+    const normalized: string[] = [];
+    for (const raw of domains) {
+      const d = normalizeDomainPart(raw);
+      if (!d) {
+        continue;
+      }
+      if (seen.has(d)) {
+        continue;
+      }
+      seen.add(d);
+      normalized.push(d);
+    }
+
+    const findOwner = this.db.prepare(`SELECT tenant_id FROM tenant_admin_login_domains WHERE domain = ?`);
+    const deleteForTenant = this.db.prepare(`DELETE FROM tenant_admin_login_domains WHERE tenant_id = ?`);
+    const insert = this.db.prepare(
+      `INSERT INTO tenant_admin_login_domains (domain, tenant_id, updated_at) VALUES (?, ?, datetime('now'))`
+    );
+
+    const txn = this.db.transaction(() => {
+      for (const domain of normalized) {
+        const row = findOwner.get(domain) as { tenant_id: string } | undefined;
+        if (row && row.tenant_id !== tenantId) {
+          throw new Error(`Domain "${domain}" is already mapped to tenant "${row.tenant_id}".`);
+        }
+      }
+      deleteForTenant.run(tenantId);
+      for (const domain of normalized) {
+        insert.run(domain, tenantId);
+      }
+    });
+    txn();
+  }
+
   createAdminSession(input: Omit<AdminSession, "lastSeenAt"> & { lastSeenAt?: string }): void {
     const lastSeenAt = input.lastSeenAt ?? input.createdAt;
     this.db
       .prepare(
-        `INSERT INTO admin_sessions (session_id, username, created_at, expires_at, last_seen_at, user_agent, ip_address)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO admin_sessions (session_id, username, created_at, expires_at, last_seen_at, user_agent, ip_address,
+            auth_provider, email, google_sub, role, scoped_tenant_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         input.sessionId,
@@ -1363,14 +1590,20 @@ export class SqliteConversationStore implements ConversationStore {
         input.expiresAt,
         lastSeenAt,
         input.userAgent ?? null,
-        input.ipAddress ?? null
+        input.ipAddress ?? null,
+        input.authProvider,
+        input.email ?? null,
+        input.googleSub ?? null,
+        input.role,
+        input.scopedTenantId ?? null
       );
   }
 
   getAdminSession(sessionId: string): AdminSession | null {
     const row = this.db
       .prepare(
-        `SELECT session_id, username, created_at, expires_at, last_seen_at, user_agent, ip_address
+        `SELECT session_id, username, created_at, expires_at, last_seen_at, user_agent, ip_address,
+            auth_provider, email, google_sub, role, scoped_tenant_id
          FROM admin_sessions
          WHERE session_id = ?`
       )
@@ -1383,6 +1616,11 @@ export class SqliteConversationStore implements ConversationStore {
           last_seen_at: string;
           user_agent: string | null;
           ip_address: string | null;
+          auth_provider: string | null;
+          email: string | null;
+          google_sub: string | null;
+          role: string | null;
+          scoped_tenant_id: string | null;
         }
       | undefined;
     if (!row) {
@@ -1395,7 +1633,12 @@ export class SqliteConversationStore implements ConversationStore {
       expiresAt: row.expires_at,
       lastSeenAt: row.last_seen_at,
       userAgent: row.user_agent ?? undefined,
-      ipAddress: row.ip_address ?? undefined
+      ipAddress: row.ip_address ?? undefined,
+      authProvider: (row.auth_provider === "google" ? "google" : "password") as AdminSession["authProvider"],
+      email: row.email ?? undefined,
+      googleSub: row.google_sub ?? undefined,
+      role: row.role === "tenant_admin" ? "tenant_admin" : "superadmin",
+      scopedTenantId: row.scoped_tenant_id ?? null
     };
   }
 

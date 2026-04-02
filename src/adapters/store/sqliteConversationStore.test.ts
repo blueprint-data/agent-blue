@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { SqliteConversationStore } from "./sqliteConversationStore.js";
 
@@ -228,5 +229,153 @@ describe("SqliteConversationStore admin telemetry", () => {
         metadata: { port: 3000 }
       })
     ]);
+  });
+
+  it("rebuilds tenant_memories when legacy NOT NULL summary column exists", () => {
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-blue-store-legacy-sum-"));
+    const dbPath = path.join(rootDir, "agent.db");
+    tempPaths.push(dbPath);
+    const raw = new Database(dbPath);
+    raw.exec(`
+      CREATE TABLE tenant_memories (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        source TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      INSERT INTO tenant_memories (id, tenant_id, summary, source, created_at, updated_at)
+      VALUES ('m1', 'acme', 'Revenue is net of refunds', 'manual', '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z');
+    `);
+    raw.close();
+
+    const store = new SqliteConversationStore(dbPath);
+    store.init();
+
+    expect(store.listTenantMemories("acme")).toEqual([
+      expect.objectContaining({
+        id: "m1",
+        tenantId: "acme",
+        content: "Revenue is net of refunds",
+        source: "manual"
+      })
+    ]);
+
+    const added = store.createTenantMemory({
+      tenantId: "acme",
+      content: "New fact from UI",
+      source: "manual"
+    });
+    expect(added.content).toBe("New fact from UI");
+    expect(store.listTenantMemories("acme", 10).some((m) => m.content === "New fact from UI")).toBe(true);
+  });
+
+  it("migrates tenant_memories when legacy column is named body", () => {
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-blue-store-legacy-mem-"));
+    const dbPath = path.join(rootDir, "agent.db");
+    tempPaths.push(dbPath);
+    const raw = new Database(dbPath);
+    raw.exec(`
+      CREATE TABLE tenant_memories (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        body TEXT NOT NULL,
+        source TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      INSERT INTO tenant_memories (id, tenant_id, body, source, created_at, updated_at)
+      VALUES ('m1', 'acme', 'persisted fact', 'manual', '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z');
+    `);
+    raw.close();
+
+    const store = new SqliteConversationStore(dbPath);
+    store.init();
+
+    expect(store.listTenantMemories("acme")).toEqual([
+      expect.objectContaining({
+        id: "m1",
+        tenantId: "acme",
+        content: "persisted fact",
+        source: "manual"
+      })
+    ]);
+  });
+
+  it("migrates messages when legacy column is named body", () => {
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-blue-store-legacy-msg-"));
+    const dbPath = path.join(rootDir, "agent.db");
+    tempPaths.push(dbPath);
+    const raw = new Database(dbPath);
+    raw.exec(`
+      CREATE TABLE messages (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        body TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      INSERT INTO messages (id, tenant_id, conversation_id, role, body, created_at)
+      VALUES ('msg1', 'acme', 'conv1', 'user', 'user said hi', '2020-01-01T00:00:00Z');
+    `);
+    raw.close();
+
+    const store = new SqliteConversationStore(dbPath);
+    store.init();
+
+    expect(store.getMessages("conv1")).toEqual([
+      expect.objectContaining({
+        id: "msg1",
+        tenantId: "acme",
+        conversationId: "conv1",
+        role: "user",
+        content: "user said hi"
+      })
+    ]);
+  });
+});
+
+describe("SqliteConversationStore admin login domains", () => {
+  function seedTenant(store: SqliteConversationStore, tenantId: string): void {
+    store.upsertTenantRepo({
+      tenantId,
+      repoUrl: "https://github.com/example/repo",
+      dbtSubpath: "models",
+      deployKeyPath: "/keys/x",
+      localPath: "/repos/x"
+    });
+  }
+
+  it("stores domains per tenant and exposes a flat map", () => {
+    const store = createStore();
+    seedTenant(store, "acme");
+    seedTenant(store, "other");
+    store.setAdminLoginDomainsForTenant("acme", ["Takenos.COM", " acme.org "]);
+    expect(store.listAdminLoginDomainsForTenant("acme")).toEqual(["acme.org", "takenos.com"]);
+    expect(store.getAdminLoginDomainTenantMap()).toEqual({
+      "acme.org": "acme",
+      "takenos.com": "acme"
+    });
+  });
+
+  it("replaces domains for a tenant and rejects cross-tenant conflicts", () => {
+    const store = createStore();
+    seedTenant(store, "a");
+    seedTenant(store, "b");
+    store.setAdminLoginDomainsForTenant("a", ["shared.com"]);
+    expect(() => store.setAdminLoginDomainsForTenant("b", ["shared.com"])).toThrow(/already mapped/);
+    store.setAdminLoginDomainsForTenant("a", ["other.net"]);
+    expect(store.listAdminLoginDomainsForTenant("a")).toEqual(["other.net"]);
+    expect(store.getAdminLoginDomainTenantMap()).toEqual({ "other.net": "a" });
+  });
+
+  it("removes login domains when tenant is deleted", () => {
+    const store = createStore();
+    seedTenant(store, "gone");
+    store.setAdminLoginDomainsForTenant("gone", ["x.com"]);
+    store.deleteTenant("gone");
+    expect(store.getAdminLoginDomainTenantMap()).toEqual({});
   });
 });

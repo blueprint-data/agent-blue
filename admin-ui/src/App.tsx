@@ -10,6 +10,12 @@ interface SessionState {
   username?: string;
   method?: string;
   loginEnabled: boolean;
+  googleLoginEnabled?: boolean;
+  passwordLoginEnabled?: boolean;
+  role?: "superadmin" | "tenant_admin";
+  scopedTenantId?: string;
+  email?: string;
+  authProvider?: "password" | "google";
 }
 
 interface TenantRecord {
@@ -234,6 +240,19 @@ function App(): ReactElement {
   return <AdminShell session={session} onLoggedOut={loadSession} />;
 }
 
+const OAUTH_ERROR_MESSAGES: Record<string, string> = {
+  oauth_state_invalid: "Sign-in session expired. Try Google sign-in again.",
+  google_not_configured: "Google sign-in is not configured on the server.",
+  google_access_denied: "Google sign-in was cancelled.",
+  missing_id_token: "Google did not return an ID token.",
+  missing_profile: "Google profile was incomplete.",
+  token_exchange_failed: "Could not complete Google sign-in.",
+  unverified_email: "Your Google email is not verified.",
+  hosted_domain_mismatch: "Hosted domain does not match your email.",
+  unknown_domain: "Your email domain is not allowed for this admin console.",
+  tenant_not_found: "Your tenant is not set up yet. Contact an administrator."
+};
+
 function LoginScreen({
   session,
   onLoggedIn
@@ -245,6 +264,17 @@ function LoginScreen({
   const [password, setPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get("error");
+    if (code) {
+      setError(OAUTH_ERROR_MESSAGES[code] ?? `Sign-in error: ${code}`);
+      params.delete("error");
+      const next = `${window.location.pathname}${params.toString() ? `?${params.toString()}` : ""}`;
+      window.history.replaceState({}, "", next);
+    }
+  }, []);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -272,27 +302,60 @@ function LoginScreen({
           <h1 className="hero-title">Sign in</h1>
           <p>Secure, session-based admin access for tenant operations and Slack bot observability.</p>
           {!session.loginEnabled ? (
-            <div className="banner error">Browser login is not configured. Set ADMIN_PASSWORD_HASH or ADMIN_BASIC_PASSWORD.</div>
+            <div className="banner error">
+              No browser login is configured. Set Google OAuth (ADMIN_AUTH_GOOGLE_ENABLED and related vars) and/or
+              ADMIN_PASSWORD_HASH / ADMIN_BASIC_PASSWORD.
+            </div>
           ) : null}
-          <form onSubmit={handleSubmit} className="stack">
-            <label>
-              Username
-              <input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" />
-            </label>
-            <label>
-              Password
-              <input
-                type="password"
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
-                autoComplete="current-password"
-              />
-            </label>
-            {error ? <div className="banner error">{error}</div> : null}
-            <button type="submit" disabled={submitting || !session.loginEnabled}>
-              {submitting ? "Signing in…" : "Sign in"}
-            </button>
-          </form>
+          {session.googleLoginEnabled ? (
+            <div className="stack">
+              <a className="google-signin-button" href="/api/admin/auth/google/start">
+                <span className="google-signin-button__icon" aria-hidden="true">
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="20" height="20">
+                    <path
+                      fill="#4285F4"
+                      d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
+                    />
+                    <path
+                      fill="#34A853"
+                      d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
+                    />
+                    <path
+                      fill="#FBBC05"
+                      d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"
+                    />
+                    <path
+                      fill="#EA4335"
+                      d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"
+                    />
+                  </svg>
+                </span>
+                <span className="google-signin-button__label">Sign in with Google</span>
+              </a>
+              {session.passwordLoginEnabled ? <p className="muted login-divider">or use a password (superadmin)</p> : null}
+            </div>
+          ) : null}
+          {error ? <div className="banner error">{error}</div> : null}
+          {session.passwordLoginEnabled ? (
+            <form onSubmit={handleSubmit} className="stack">
+              <label>
+                Username
+                <input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" />
+              </label>
+              <label>
+                Password
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  autoComplete="current-password"
+                />
+              </label>
+              <button type="submit" disabled={submitting}>
+                {submitting ? "Signing in…" : "Sign in"}
+              </button>
+            </form>
+          ) : null}
         </div>
       </div>
     </div>
@@ -306,6 +369,7 @@ function AdminShell({
   session: SessionState;
   onLoggedOut: () => Promise<void>;
 }): ReactElement {
+  const isSuperadmin = session.role !== "tenant_admin";
   const [notification, setNotification] = useState<NotificationState | null>(null);
   const contentRef = useRef<HTMLElement>(null);
   const [scrollProgress, setScrollProgress] = useState(0);
@@ -350,11 +414,16 @@ function AdminShell({
         <a href="#admin-main" className="skip-link">
           Skip to main content
         </a>
-        <AppSidebar username={session.username} method={session.method} onLogout={() => void handleLogout()} />
+        <AppSidebar
+          username={session.email ?? session.username}
+          method={session.authProvider === "google" ? "google" : session.method}
+          isSuperadmin={isSuperadmin}
+          onLogout={() => void handleLogout()}
+        />
         <SidebarInset>
           <header className="content-header">
             <div className="content-header-bar">
-              <SidebarTrigger className="secondary-button" />
+              <SidebarTrigger />
             </div>
             <div
               className="scroll-progress"
@@ -366,12 +435,37 @@ function AdminShell({
             {notification ? <div className={`banner ${notification.type}`}>{notification.text}</div> : null}
             <Routes>
               <Route path="/" element={<OverviewPage notify={notify} />} />
-              <Route path="/new-tenant" element={<NewTenantPage notify={notify} />} />
-              <Route path="/tenants" element={<TenantsPage notify={notify} />} />
-              <Route path="/conversations" element={<ConversationsPage notify={notify} />} />
-              <Route path="/slack-bot" element={<SlackBotPage notify={notify} />} />
-              <Route path="/telegram-bot" element={<TelegramBotPage notify={notify} />} />
-              <Route path="/settings" element={<SettingsPage notify={notify} />} />
+              <Route
+                path="/new-tenant"
+                element={
+                  isSuperadmin ? <NewTenantPage notify={notify} /> : <Navigate to="/tenants" replace />
+                }
+              />
+              <Route
+                path="/tenants"
+                element={
+                  <TenantsPage notify={notify} isSuperadmin={isSuperadmin} scopedTenantId={session.scopedTenantId} />
+                }
+              />
+              <Route
+                path="/conversations"
+                element={<ConversationsPage notify={notify} scopedTenantId={session.scopedTenantId} />}
+              />
+              <Route path="/slack-bot" element={<SlackBotPage notify={notify} canControlBots={isSuperadmin} />} />
+              <Route
+                path="/telegram-bot"
+                element={
+                  <TelegramBotPage
+                    notify={notify}
+                    canControlBots={isSuperadmin}
+                    scopedTenantId={session.scopedTenantId}
+                  />
+                }
+              />
+              <Route
+                path="/settings"
+                element={isSuperadmin ? <SettingsPage notify={notify} /> : <Navigate to="/" replace />}
+              />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </main>
@@ -840,7 +934,15 @@ function NewTenantPage({ notify }: { notify: (value: NotificationState | null) =
   );
 }
 
-function TenantsPage({ notify }: { notify: (value: NotificationState | null) => void }): ReactElement {
+function TenantsPage({
+  notify,
+  isSuperadmin = true,
+  scopedTenantId
+}: {
+  notify: (value: NotificationState | null) => void;
+  isSuperadmin?: boolean;
+  scopedTenantId?: string;
+}): ReactElement {
   const [tenants, setTenants] = useState<TenantRecord[]>([]);
   const [selectedTenantId, setSelectedTenantId] = useState<string | null>(null);
   const [credentials, setCredentials] = useState<CredentialReference | null>(null);
@@ -862,6 +964,8 @@ function TenantsPage({ notify }: { notify: (value: NotificationState | null) => 
   const [whEditing, setWhEditing] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const bqFileInputRef = useRef<HTMLInputElement | null>(null);
+  const [loginDomainsDraft, setLoginDomainsDraft] = useState("");
+  const [savingLoginDomains, setSavingLoginDomains] = useState(false);
 
   const selectedTenant = useMemo(
     () => tenants.find((tenant) => tenant.tenantId === selectedTenantId) ?? null,
@@ -886,6 +990,29 @@ function TenantsPage({ notify }: { notify: (value: NotificationState | null) => 
   useEffect(() => {
     void loadTenants();
   }, [loadTenants]);
+
+  useEffect(() => {
+    if (!isSuperadmin && scopedTenantId) {
+      setSelectedTenantId(scopedTenantId);
+    }
+  }, [isSuperadmin, scopedTenantId]);
+
+  useEffect(() => {
+    if (!selectedTenantId || !isSuperadmin) {
+      setLoginDomainsDraft("");
+      return;
+    }
+    void (async () => {
+      try {
+        const r = await apiRequest<{ domains: string[] }>(
+          `/api/admin/tenants/${selectedTenantId}/admin-login-domains`
+        );
+        setLoginDomainsDraft(r.domains.join("\n"));
+      } catch {
+        setLoginDomainsDraft("");
+      }
+    })();
+  }, [selectedTenantId, isSuperadmin]);
 
   useEffect(() => {
     setLastRepoRefresh(null);
@@ -994,6 +1121,9 @@ function TenantsPage({ notify }: { notify: (value: NotificationState | null) => 
   }
 
   async function handleSave() {
+    if (!selectedTenant && !isSuperadmin) {
+      return;
+    }
     setSaving(true);
     const persistWarehouseToo = Boolean(selectedTenant && whEditing);
     try {
@@ -1147,6 +1277,33 @@ function TenantsPage({ notify }: { notify: (value: NotificationState | null) => 
     }
   }
 
+  async function saveLoginDomains() {
+    if (!selectedTenant || !isSuperadmin) return;
+    const lines = loginDomainsDraft
+      .split(/[\n,]+/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    setSavingLoginDomains(true);
+    try {
+      const r = await apiRequest<{ domains: string[] }>(
+        `/api/admin/tenants/${selectedTenant.tenantId}/admin-login-domains`,
+        {
+          method: "PUT",
+          headers: {
+            Origin: window.location.origin
+          },
+          body: { domains: lines }
+        }
+      );
+      setLoginDomainsDraft(r.domains.join("\n"));
+      notify({ type: "success", text: "Google login domains updated." });
+    } catch (caught) {
+      notify({ type: "error", text: sectionError(caught) });
+    } finally {
+      setSavingLoginDomains(false);
+    }
+  }
+
   async function deleteTenantMemory(memoryId: string) {
     if (!selectedTenant) return;
     if (!window.confirm("Delete this tenant memory?")) return;
@@ -1183,15 +1340,17 @@ function TenantsPage({ notify }: { notify: (value: NotificationState | null) => 
         title="Tenants"
         subtitle="Manage configured tenants, credential references, and day-two operational actions."
         actions={
-          <button
-            className="secondary-button"
-            onClick={() => {
-              setSelectedTenantId(null);
-              setForm({ tenantId: "", repoUrl: "", dbtSubpath: "models" });
-            }}
-          >
-            New tenant
-          </button>
+          isSuperadmin ? (
+            <button
+              className="secondary-button"
+              onClick={() => {
+                setSelectedTenantId(null);
+                setForm({ tenantId: "", repoUrl: "", dbtSubpath: "models" });
+              }}
+            >
+              New tenant
+            </button>
+          ) : undefined
         }
       />
       <div className="three-column">
@@ -1205,8 +1364,14 @@ function TenantsPage({ notify }: { notify: (value: NotificationState | null) => 
               {tenants.map((tenant) => (
                 <button
                   key={tenant.tenantId}
+                  type="button"
                   className={`tenant-list-item ${selectedTenantId === tenant.tenantId ? "selected" : ""}`}
-                  onClick={() => setSelectedTenantId(tenant.tenantId)}
+                  onClick={() => {
+                    if (!isSuperadmin && scopedTenantId && tenant.tenantId !== scopedTenantId) {
+                      return;
+                    }
+                    setSelectedTenantId(tenant.tenantId);
+                  }}
                 >
                   <strong>{tenant.tenantId}</strong>
                   <span>{compactText(tenant.repoUrl, 42)}</span>
@@ -1295,9 +1460,11 @@ function TenantsPage({ notify }: { notify: (value: NotificationState | null) => 
                     />
                   </>
                 ) : null}
-                  <button className="danger-button" onClick={() => void deleteTenant()}>
-                    Delete tenant
-                  </button>
+                  {isSuperadmin ? (
+                    <button className="danger-button" onClick={() => void deleteTenant()}>
+                      Delete tenant
+                    </button>
+                  ) : null}
                 </div>
                 {lastRepoRefresh ? (
                   <p className="muted">
@@ -1330,6 +1497,33 @@ function TenantsPage({ notify }: { notify: (value: NotificationState | null) => 
               <div className="empty-state">Create or select a tenant to inspect operational state.</div>
             )}
           </AppShellCard>
+
+          {isSuperadmin && selectedTenant ? (
+            <AppShellCard
+              title="Google admin login domains"
+              action={
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={savingLoginDomains}
+                  onClick={() => void saveLoginDomains()}
+                >
+                  {savingLoginDomains ? "Saving…" : "Save domains"}
+                </button>
+              }
+            >
+              <label>
+                Domains (one per line or comma-separated)
+                <textarea
+                  rows={4}
+                  value={loginDomainsDraft}
+                  onChange={(event) => setLoginDomainsDraft(event.target.value)}
+                  placeholder="takenos.com"
+                />
+              </label>
+              <p className="muted">Enter the domain only (e.g. example.com), not full email addresses.</p>
+            </AppShellCard>
+          ) : null}
 
           <AppShellCard title="Tenant memories" subtitle="View the saved tenant facts that will be available to future conversations.">
             {!selectedTenant ? (
@@ -1478,18 +1672,31 @@ function TenantsPage({ notify }: { notify: (value: NotificationState | null) => 
   );
 }
 
-function ConversationsPage({ notify }: { notify: (value: NotificationState | null) => void }): ReactElement {
+function ConversationsPage({
+  notify,
+  scopedTenantId
+}: {
+  notify: (value: NotificationState | null) => void;
+  scopedTenantId?: string;
+}): ReactElement {
   const [filters, setFilters] = useState({ tenantId: "", source: "", search: "" });
   const [items, setItems] = useState<ConversationSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<ConversationDetail | null>(null);
   const [loading, setLoading] = useState(false);
 
+  useEffect(() => {
+    if (scopedTenantId) {
+      setFilters((current) => ({ ...current, tenantId: scopedTenantId }));
+    }
+  }, [scopedTenantId]);
+
   const loadConversations = useCallback(async () => {
     setLoading(true);
     try {
       const params = new URLSearchParams();
-      if (filters.tenantId) params.set("tenantId", filters.tenantId);
+      const tenantForQuery = scopedTenantId ?? filters.tenantId;
+      if (tenantForQuery) params.set("tenantId", tenantForQuery);
       if (filters.source) params.set("source", filters.source);
       if (filters.search) params.set("search", filters.search);
       params.set("limit", "50");
@@ -1503,7 +1710,7 @@ function ConversationsPage({ notify }: { notify: (value: NotificationState | nul
     } finally {
       setLoading(false);
     }
-  }, [filters, notify, selectedId]);
+  }, [filters.tenantId, filters.source, filters.search, notify, scopedTenantId, selectedId]);
 
   useEffect(() => {
     void loadConversations();
@@ -1528,7 +1735,15 @@ function ConversationsPage({ notify }: { notify: (value: NotificationState | nul
       <PageHeader title="Conversations" subtitle="Inspect raw messages, execution turns, SQL/debug traces, and Slack origin metadata." />
       <AppShellCard title="Filters" subtitle="Slice by tenant, source, or message text">
         <div className="filters-row">
-          <input placeholder="Tenant ID" value={filters.tenantId} onChange={(event) => setFilters((current) => ({ ...current, tenantId: event.target.value }))} />
+          {scopedTenantId ? (
+            <span className="muted">Tenant: {scopedTenantId}</span>
+          ) : (
+            <input
+              placeholder="Tenant ID"
+              value={filters.tenantId}
+              onChange={(event) => setFilters((current) => ({ ...current, tenantId: event.target.value }))}
+            />
+          )}
           <select value={filters.source} onChange={(event) => setFilters((current) => ({ ...current, source: event.target.value }))}>
             <option value="">All sources</option>
             <option value="cli">CLI</option>
@@ -1621,7 +1836,13 @@ function ConversationsPage({ notify }: { notify: (value: NotificationState | nul
   );
 }
 
-function SlackBotPage({ notify }: { notify: (value: NotificationState | null) => void }): ReactElement {
+function SlackBotPage({
+  notify,
+  canControlBots = true
+}: {
+  notify: (value: NotificationState | null) => void;
+  canControlBots?: boolean;
+}): ReactElement {
   const [status, setStatus] = useState<BotStatus | null>(null);
   const [events, setEvents] = useState<BotEvent[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1690,15 +1911,19 @@ function SlackBotPage({ notify }: { notify: (value: NotificationState | null) =>
                 <DetailItem label="Last error" value={formatDate(status.lastErrorAt)} />
                 <DetailItem label="Error message" value={status.lastErrorMessage ?? "—"} multiline />
               </div>
-              <div className="button-row">
-                <button onClick={() => void invoke("start")}>Start</button>
-                <button className="secondary-button" onClick={() => void invoke("restart")}>
-                  Restart
-                </button>
-                <button className="danger-button" onClick={() => void invoke("stop")}>
-                  Stop
-                </button>
-              </div>
+              {canControlBots ? (
+                <div className="button-row">
+                  <button onClick={() => void invoke("start")}>Start</button>
+                  <button className="secondary-button" onClick={() => void invoke("restart")}>
+                    Restart
+                  </button>
+                  <button className="danger-button" onClick={() => void invoke("stop")}>
+                    Stop
+                  </button>
+                </div>
+              ) : (
+                <p className="muted">Bot start/stop is limited to superadmin accounts.</p>
+              )}
             </>
           )}
         </AppShellCard>
@@ -1732,7 +1957,15 @@ function SlackBotPage({ notify }: { notify: (value: NotificationState | null) =>
   );
 }
 
-function TelegramBotPage({ notify }: { notify: (value: NotificationState | null) => void }): ReactElement {
+function TelegramBotPage({
+  notify,
+  canControlBots = true,
+  scopedTenantId
+}: {
+  notify: (value: NotificationState | null) => void;
+  canControlBots?: boolean;
+  scopedTenantId?: string;
+}): ReactElement {
   const [mappings, setMappings] = useState<TelegramMapping[]>([]);
   const [tenants, setTenants] = useState<TenantRecord[]>([]);
   const [botStatus, setBotStatus] = useState<BotStatus | null>(null);
@@ -1765,10 +1998,19 @@ function TelegramBotPage({ notify }: { notify: (value: NotificationState | null)
     void loadData();
   }, [loadData]);
 
+  useEffect(() => {
+    if (scopedTenantId) {
+      setTenantId(scopedTenantId);
+    }
+  }, [scopedTenantId]);
+
   async function invokeBot(action: "start" | "stop" | "restart") {
     try {
       const result = await apiRequest<BotStatus>(`/api/admin/telegram-bot/${action}`, {
         method: "POST",
+        headers: {
+          Origin: window.location.origin
+        },
         body: {}
       });
       setBotStatus(result);
@@ -1784,11 +2026,14 @@ function TelegramBotPage({ notify }: { notify: (value: NotificationState | null)
     try {
       await apiRequest(`/api/admin/telegram-mappings/${chatId}`, {
         method: "PUT",
+        headers: {
+          Origin: window.location.origin
+        },
         body: { tenantId }
       });
       notify({ type: "success", text: `Mapped chat ${chatId} to tenant ${tenantId}.` });
       setChatId("");
-      setTenantId("");
+      setTenantId(scopedTenantId ?? "");
       await loadData();
     } catch (caught) {
       notify({ type: "error", text: sectionError(caught) });
@@ -1797,7 +2042,12 @@ function TelegramBotPage({ notify }: { notify: (value: NotificationState | null)
 
   async function deleteMapping(id: string) {
     try {
-      await apiRequest(`/api/admin/telegram-mappings/${id}`, { method: "DELETE" });
+      await apiRequest(`/api/admin/telegram-mappings/${id}`, {
+        method: "DELETE",
+        headers: {
+          Origin: window.location.origin
+        }
+      });
       notify({ type: "success", text: "Mapping deleted." });
       await loadData();
     } catch (caught) {
@@ -1831,15 +2081,19 @@ function TelegramBotPage({ notify }: { notify: (value: NotificationState | null)
                 <DetailItem label="Last error" value={formatDate(botStatus.lastErrorAt)} />
                 <DetailItem label="Error message" value={botStatus.lastErrorMessage ?? "—"} multiline />
               </div>
-              <div className="button-row">
-                <button onClick={() => void invokeBot("start")}>Start</button>
-                <button className="secondary-button" onClick={() => void invokeBot("restart")}>
-                  Restart
-                </button>
-                <button className="danger-button" onClick={() => void invokeBot("stop")}>
-                  Stop
-                </button>
-              </div>
+              {canControlBots ? (
+                <div className="button-row">
+                  <button onClick={() => void invokeBot("start")}>Start</button>
+                  <button className="secondary-button" onClick={() => void invokeBot("restart")}>
+                    Restart
+                  </button>
+                  <button className="danger-button" onClick={() => void invokeBot("stop")}>
+                    Stop
+                  </button>
+                </div>
+              ) : (
+                <p className="muted">Bot start/stop is limited to superadmin accounts.</p>
+              )}
             </>
           )}
         </AppShellCard>
@@ -1873,12 +2127,18 @@ function TelegramBotPage({ notify }: { notify: (value: NotificationState | null)
         <AppShellCard title="Chat-to-tenant mappings" subtitle="Route Telegram chats to specific tenants">
           <div className="filters-row">
             <input placeholder="Chat ID" value={chatId} onChange={(event) => setChatId(event.target.value)} />
-            <select value={tenantId} onChange={(event) => setTenantId(event.target.value)}>
-              <option value="">Select tenant…</option>
-              {tenants.map((tenant) => (
-                <option key={tenant.tenantId} value={tenant.tenantId}>{tenant.tenantId}</option>
-              ))}
-            </select>
+            {scopedTenantId ? (
+              <span className="muted">Tenant: {scopedTenantId}</span>
+            ) : (
+              <select value={tenantId} onChange={(event) => setTenantId(event.target.value)}>
+                <option value="">Select tenant…</option>
+                {tenants.map((tenant) => (
+                  <option key={tenant.tenantId} value={tenant.tenantId}>
+                    {tenant.tenantId}
+                  </option>
+                ))}
+              </select>
+            )}
             <button className="secondary-button" onClick={() => void addMapping()} disabled={!chatId || !tenantId}>
               Add mapping
             </button>
