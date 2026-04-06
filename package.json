@@ -40,6 +40,7 @@
     "better-sqlite3": "^12.6.2",
     "chart.js": "^4.5.1",
     "chartjs-node-canvas": "^5.0.0",
+    "cron": "^3.5.0",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
     "grammy": "^1.41.1",

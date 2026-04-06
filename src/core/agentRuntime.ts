@@ -1,3 +1,4 @@
+import { CronTime } from "cron";
 import { z } from "zod";
 import {
   ChartBuildRequest,
@@ -52,6 +53,14 @@ const tenantMemorySaveSchema = z.object({
   content: z.string().trim().min(1).max(TENANT_MEMORY_MAX_CONTENT_CHARS)
 });
 
+const scheduleCreateSchema = z.object({
+  userRequest: z.string().trim().min(1).max(800),
+  cron: z.string().trim().min(3),
+  channelType: z.enum(["slack", "telegram", "console", "custom"]).optional(),
+  channelRef: z.string().trim().min(1).optional(),
+  active: z.boolean().optional()
+});
+
 const toolDecisionSchema = z.object({
   type: z.enum(["tool_call", "final_answer"]),
   tool: z
@@ -61,7 +70,8 @@ const toolDecisionSchema = z.object({
       "dbt.getModelSql",
       "warehouse.lookupMetadata",
       "chartjs.build",
-      "tenantMemory.save"
+      "tenantMemory.save",
+      "schedule.create"
     ])
     .optional(),
   args: z.record(z.string(), z.unknown()).optional(),
@@ -79,6 +89,15 @@ function normalizeMemoryContent(value: string): string {
 
 function memoryDedupKey(value: string): string {
   return normalizeMemoryContent(value).toLowerCase();
+}
+
+function isValidCronExpression(value: string): boolean {
+  try {
+    new CronTime(value);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function buildTenantMemoryPromptBlock(memories: TenantMemory[]): string | null {
@@ -131,6 +150,34 @@ function userExplicitlyAskedToSaveMemory(userText: string): boolean {
     /\brecuerda\b.*\b(esto|eso|para (?:despu[eé]s|luego)|memoria|memory)\b/i,
     /\bmemoriza\b/i,
     /\bno te olvides\b/i
+  ];
+  return patterns.some((pattern) => pattern.test(userText));
+}
+
+function userExplicitlyAskedToSchedule(userText: string): boolean {
+  const patterns = [
+    /\bschedule\b/i,
+    /\bprogram\b/i,
+    /\bremind(er)?\b/i,
+    /\bdaily\s+report\b/i,
+    /\bevery\s+(day|morning|afternoon|evening|week|month)\b/i,
+    /\bdaily\b/i,
+    /\bweekly\b/i,
+    /\bmonthly\b/i,
+    /\bcada\s+d[ií]a\b/i,
+    /\btodos\s+los\s+d[ií]as\b/i,
+    /\bdiario\b/i,
+    /\bcada\s+semana\b/i,
+    /\bsemanal\b/i,
+    /\bcada\s+mes\b/i,
+    /\bmensual\b/i,
+    /\bprograma\b/i,
+    /\brecordatorio\b/i,
+    /\brecordarme\b/i,
+    /\benv[ií]a\b.*\btodos\s+los\s+d[ií]as\b/i,
+    /\breporte\s+diario\b/i,
+    /\breporte\s+semanal\b/i,
+    /\breporte\s+mensual\b/i
   ];
   return patterns.some((pattern) => pattern.test(userText));
 }
@@ -419,12 +466,16 @@ export class AnalyticsAgentRuntime {
       const currentDateIso = now.toISOString();
       const currentDate = currentDateIso.slice(0, 10);
       const userAskedToSaveMemory = userExplicitlyAskedToSaveMemory(persistedUserText);
+      const userAskedToSchedule = userExplicitlyAskedToSchedule(persistedUserText);
+      let scheduleCreateAttemptedThisTurn = false;
+      let scheduleCreateSucceededThisTurn = false;
       const hasWarehouseDefaults = whDatabase.length > 0 && whSchema.length > 0;
       const fqPrefix = hasWarehouseDefaults
         ? isBigQuery
           ? `\`${whDatabase}.${whSchema}\``
           : `${quoteSqlIdent(whDatabase)}.${quoteSqlIdent(whSchema)}`
         : "";
+      const conversationOrigin = this.store.getConversationOrigin(context.conversationId) ?? context.origin ?? null;
       const dbtModels = await measure("dbtModelsMs", async () => {
         try {
           return await runTool(
@@ -538,16 +589,24 @@ export class AnalyticsAgentRuntime {
           "- Never claim that memory was saved unless you already received a successful Tool result (tenantMemory.save) in this turn.",
           "- If tenantMemory.save fails or is rejected, explicitly say that the save did not happen.",
           "",
+          "Scheduling rules:",
+          "- If the user explicitly asks for a recurring message, reminder, or scheduled report, call schedule.create before final_answer.",
+          "- Always set userRequest to the text the user wants delivered.",
+          "- Provide a cron expression in UTC; default to daily at 09:00 UTC if the user says \"daily\" without a time.",
+          "- Default channelType/channelRef from the current channel (Slack: channelId; Telegram: chatId).",
+          "- Never create schedules if the user did not ask for a recurring or scheduled action.",
+          "",
           "Available tools and args:",
           "- warehouse.query: { sql: string }",
           "- dbt.listModels: {}",
           "- dbt.getModelSql: { modelName: string }",
           `- warehouse.lookupMetadata: { kind: "schemas"|"tables"|"columns", ${dbLabel}?: string, ${schemaLabel}?: string, table?: string, search?: string }`,
           "- tenantMemory.save: { content: string }",
+          "- schedule.create: { userRequest: string, cron: string, channelType?: \"slack\"|\"telegram\"|\"console\"|\"custom\", channelRef?: string, active?: boolean }",
           '- chartjs.build: { type?: "bar"|"line"|"pie"|"doughnut", title?: string, xKey?: string, yKey?: string, seriesKey?: string, horizontal?: boolean, stacked?: boolean, grouped?: boolean, percentStacked?: boolean, sort?: "none"|"asc"|"desc"|"label_asc"|"label_desc", smooth?: boolean, tension?: number, fill?: boolean, step?: boolean, pointRadius?: number, donutCutout?: number, showPercentLabels?: boolean, topN?: number, otherLabel?: string, stackId?: string, maxPoints?: number }',
           "",
           "Return ONLY valid JSON in one of these shapes:",
-          '{ "type": "tool_call", "tool": "warehouse.query|dbt.listModels|dbt.getModelSql|warehouse.lookupMetadata|tenantMemory.save|chartjs.build", "args": { ... }, "reasoning"?: string }',
+          '{ "type": "tool_call", "tool": "warehouse.query|dbt.listModels|dbt.getModelSql|warehouse.lookupMetadata|tenantMemory.save|schedule.create|chartjs.build", "args": { ... }, "reasoning"?: string }',
           '{ "type": "final_answer", "answer": string, "reasoning"?: string }',
           "- If the user request is not analytical, ALWAYS return final_answer with the refusal text and do not call tools.",
           "",
@@ -649,8 +708,8 @@ export class AnalyticsAgentRuntime {
       finalPlan = plan;
       loopMessages.push({ role: "assistant", content: planRaw });
 
-      if (plan.type === "final_answer") {
-        const candidateText = plan.answer?.trim() ? plan.answer : "I need more details to answer that.";
+        if (plan.type === "final_answer") {
+          const candidateText = plan.answer?.trim() ? plan.answer : "I need more details to answer that.";
         if (claimsTenantMemoryWasSaved(candidateText) && !memorySaveSucceededThisTurn && step < maxToolSteps) {
           loopMessages.push({
             role: "user",
@@ -660,7 +719,15 @@ export class AnalyticsAgentRuntime {
           });
           continue;
         }
-        const text = ensureAccurateTenantMemorySaveText(candidateText, memorySaveSucceededThisTurn);
+        const textMemorySafe = ensureAccurateTenantMemorySaveText(candidateText, memorySaveSucceededThisTurn);
+        if (candidateText.toLowerCase().includes("program") && scheduleCreateAttemptedThisTurn && !scheduleCreateSucceededThisTurn && step < maxToolSteps) {
+          loopMessages.push({
+            role: "user",
+            content: "You claimed that a schedule was created, but schedule.create did not succeed. Retry schedule.create with a valid cron/channel or state explicitly that scheduling failed."
+          });
+          continue;
+        }
+        const text = textMemorySafe;
         return finalizeSuccess(
           text,
           {
@@ -763,6 +830,61 @@ export class AnalyticsAgentRuntime {
               rowCount: metadataResult.rowCount,
               rows: metadataResult.rows.slice(0, profile.maxRowsPerQuery)
             })}`
+          });
+          continue;
+        }
+
+        if (plan.tool === "schedule.create") {
+          scheduleCreateAttemptedThisTurn = true;
+          if (!userAskedToSchedule) {
+            throw new Error("schedule.create can only be used when the user explicitly asks for a schedule or reminder.");
+          }
+          const parsed = scheduleCreateSchema.safeParse(args);
+          if (!parsed.success) {
+            throw new Error("schedule.create requires userRequest, cron, and channel details.");
+          }
+          const defaultsChannelType = conversationOrigin?.source === "slack"
+            ? "slack"
+            : conversationOrigin?.source === "telegram"
+              ? "telegram"
+              : "console";
+          const defaultChannelRef = conversationOrigin?.channelId || conversationOrigin?.userId || conversationOrigin?.teamId || "console";
+          const channelType = parsed.data.channelType ?? defaultsChannelType;
+          const channelRef = (parsed.data.channelRef ?? defaultChannelRef).trim();
+          const cronExpr = parsed.data.cron || "0 9 * * *";
+          if (!isValidCronExpression(cronExpr)) {
+            throw new Error("schedule.create cron expression is invalid.");
+          }
+          if (!channelRef) {
+            throw new Error("schedule.create requires a channelRef (channel/chat identifier).");
+          }
+
+          const schedule = await runTool(
+            "schedule.create",
+            {
+              tenantId: context.tenantId,
+              userRequest: parsed.data.userRequest,
+              cron: cronExpr,
+              channelType,
+              channelRef
+            },
+            async () =>
+              this.store.createTenantSchedule({
+                tenantId: context.tenantId,
+                userRequest: parsed.data.userRequest,
+                cron: cronExpr,
+                channelType,
+                channelRef,
+                active: parsed.data.active ?? true
+              }),
+            (value) => ({ id: value.id, cron: value.cron, channelType: value.channelType, channelRef: value.channelRef })
+          );
+
+          scheduleCreateSucceededThisTurn = true;
+
+          loopMessages.push({
+            role: "user",
+            content: `Tool result (schedule.create): ${asJsonBlock({ id: schedule.id, cron: schedule.cron, channelType: schedule.channelType, channelRef: schedule.channelRef })}`
           });
           continue;
         }

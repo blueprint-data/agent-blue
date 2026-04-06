@@ -289,3 +289,106 @@ describe("AnalyticsAgentRuntime tenant memory", () => {
     ).toHaveLength(1);
   });
 });
+
+describe("AnalyticsAgentRuntime schedules", () => {
+  it("creates a schedule when the user explicitly asks to schedule", async () => {
+    const store = createStore();
+    const llm = new StubLlmProvider([
+      JSON.stringify({
+        type: "tool_call",
+        tool: "schedule.create",
+        args: { userRequest: "Send daily revenue summary", cron: "0 9 * * *" }
+      }),
+      JSON.stringify({ type: "final_answer", answer: "Scheduled the daily report." })
+    ]);
+    const runtime = createRuntime(llm, store);
+
+    const response = await runtime.respond(
+      {
+        tenantId: "acme",
+        profileName: "default",
+        conversationId: "conv_schedule_create",
+        llmModel: "test-model",
+        origin: { source: "slack", channelId: "C123" }
+      },
+      "Please schedule a daily report of revenue."
+    );
+
+    expect(response.text).toBe("Scheduled the daily report.");
+    const schedules = store.listTenantSchedules("acme");
+    expect(schedules).toHaveLength(1);
+    expect(schedules[0]).toMatchObject({
+      userRequest: "Send daily revenue summary",
+      cron: "0 9 * * *",
+      channelType: "slack",
+      channelRef: "C123"
+    });
+  });
+
+  it("rejects schedule creation when the user did not ask to schedule", async () => {
+    const store = createStore();
+    const llm = new StubLlmProvider([
+      JSON.stringify({
+        type: "tool_call",
+        tool: "schedule.create",
+        args: { userRequest: "Send daily revenue summary", cron: "0 9 * * *" }
+      }),
+      JSON.stringify({ type: "final_answer", answer: "No schedule created." })
+    ]);
+    const runtime = createRuntime(llm, store);
+
+    const response = await runtime.respond(
+      {
+        tenantId: "acme",
+        profileName: "default",
+        conversationId: "conv_schedule_reject",
+        llmModel: "test-model",
+        origin: { source: "slack", channelId: "C999" }
+      },
+      "What was revenue last month?"
+    );
+
+    expect(response.text).toBe("No schedule created.");
+    expect(store.listTenantSchedules("acme")).toHaveLength(0);
+    expect(llm.calls).toHaveLength(2);
+    expect(
+      llm.calls[1]?.messages.some(
+        (message) =>
+          message.role === "user" &&
+          message.content.includes("schedule.create can only be used when the user explicitly asks")
+      )
+    ).toBe(true);
+  });
+
+  it("creates a schedule for Spanish daily phrasing", async () => {
+    const store = createStore();
+    const llm = new StubLlmProvider([
+      JSON.stringify({
+        type: "tool_call",
+        tool: "schedule.create",
+        args: { userRequest: "Reporte diario de revenue", cron: "0 11 * * *" }
+      }),
+      JSON.stringify({ type: "final_answer", answer: "Programado el reporte diario." })
+    ]);
+    const runtime = createRuntime(llm, store);
+
+    const response = await runtime.respond(
+      {
+        tenantId: "acme",
+        profileName: "default",
+        conversationId: "conv_schedule_es",
+        llmModel: "test-model",
+        origin: { source: "telegram", channelId: "T123" }
+      },
+      "Quiero que envíes un reporte diario de revenue todos los días a las 8 AM."
+    );
+
+    expect(response.text).toBe("Programado el reporte diario.");
+    const schedules = store.listTenantSchedules("acme");
+    expect(schedules).toHaveLength(1);
+    expect(schedules[0]).toMatchObject({
+      channelType: "telegram",
+      channelRef: "T123"
+    });
+  });
+});

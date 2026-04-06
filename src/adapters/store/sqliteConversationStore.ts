@@ -20,8 +20,10 @@ import {
   ConversationMessage,
   ConversationOrigin,
   ConversationSource,
+  ScheduleChannelType,
   TenantMemory,
-  TenantMemorySource
+  TenantMemorySource,
+  TenantSchedule
 } from "../../core/types.js";
 import { createId } from "../../utils/id.js";
 
@@ -163,6 +165,20 @@ export class SqliteConversationStore implements ConversationStore {
         updated_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS tenant_schedules (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        user_request TEXT NOT NULL,
+        cron TEXT NOT NULL,
+        channel_type TEXT NOT NULL,
+        channel_ref TEXT NOT NULL,
+        active INTEGER NOT NULL DEFAULT 1,
+        last_run_at TEXT,
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS tenant_key_metadata (
         tenant_id TEXT PRIMARY KEY,
         file_path TEXT NOT NULL,
@@ -277,6 +293,34 @@ export class SqliteConversationStore implements ConversationStore {
     };
   }
 
+  private mapTenantScheduleRow(row: {
+    id: string;
+    tenant_id: string;
+    user_request: string;
+    cron: string;
+    channel_type: string;
+    channel_ref: string;
+    active: number;
+    last_run_at: string | null;
+    last_error: string | null;
+    created_at: string;
+    updated_at: string;
+  }): TenantSchedule {
+    return {
+      id: row.id,
+      tenantId: row.tenant_id,
+      userRequest: row.user_request,
+      cron: row.cron,
+      channelType: row.channel_type as ScheduleChannelType,
+      channelRef: row.channel_ref,
+      active: Boolean(row.active),
+      lastRunAt: row.last_run_at ?? undefined,
+      lastError: row.last_error ?? undefined,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
   private pruneTenantMemories(tenantId: string, maxEntries = MAX_TENANT_MEMORIES_PER_TENANT): void {
     const rows = this.db
       .prepare(
@@ -354,6 +398,160 @@ export class SqliteConversationStore implements ConversationStore {
 
   deleteTenantMemory(memoryId: string): void {
     this.db.prepare("DELETE FROM tenant_memories WHERE id = ?").run(memoryId);
+  }
+
+  listTenantSchedules(tenantId: string): TenantSchedule[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, tenant_id, user_request, cron, channel_type, channel_ref, active, last_run_at, last_error, created_at, updated_at
+         FROM tenant_schedules
+         WHERE tenant_id = ?
+         ORDER BY created_at DESC, rowid DESC`
+      )
+      .all(tenantId) as Array<{
+      id: string;
+      tenant_id: string;
+      user_request: string;
+      cron: string;
+      channel_type: string;
+      channel_ref: string;
+      active: number;
+      last_run_at: string | null;
+      last_error: string | null;
+      created_at: string;
+      updated_at: string;
+    }>;
+    return rows.map((row) => this.mapTenantScheduleRow(row));
+  }
+
+  getTenantSchedule(tenantId: string, scheduleId: string): TenantSchedule | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, tenant_id, user_request, cron, channel_type, channel_ref, active, last_run_at, last_error, created_at, updated_at
+         FROM tenant_schedules
+         WHERE tenant_id = ? AND id = ?`
+      )
+      .get(tenantId, scheduleId) as
+      | {
+          id: string;
+          tenant_id: string;
+          user_request: string;
+          cron: string;
+          channel_type: string;
+          channel_ref: string;
+          active: number;
+          last_run_at: string | null;
+          last_error: string | null;
+          created_at: string;
+          updated_at: string;
+        }
+      | undefined;
+    return row ? this.mapTenantScheduleRow(row) : null;
+  }
+
+  createTenantSchedule(input: {
+    tenantId: string;
+    userRequest: string;
+    cron: string;
+    channelType: ScheduleChannelType;
+    channelRef: string;
+    active?: boolean;
+  }): TenantSchedule {
+    const id = createId("sched");
+    const createdAt = new Date().toISOString();
+    const active = input.active ?? true;
+    this.db
+      .prepare(
+        `INSERT INTO tenant_schedules (id, tenant_id, user_request, cron, channel_type, channel_ref, active, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(id, input.tenantId, input.userRequest, input.cron, input.channelType, input.channelRef, active ? 1 : 0, createdAt, createdAt);
+    return {
+      id,
+      tenantId: input.tenantId,
+      userRequest: input.userRequest,
+      cron: input.cron,
+      channelType: input.channelType,
+      channelRef: input.channelRef,
+      active,
+      createdAt,
+      updatedAt: createdAt
+    };
+  }
+
+  updateTenantSchedule(
+    scheduleId: string,
+    updates: Partial<Omit<TenantSchedule, "id" | "tenantId" | "createdAt">>
+  ): TenantSchedule | null {
+    const existing = this.db
+      .prepare(
+        `SELECT id, tenant_id, user_request, cron, channel_type, channel_ref, active, last_run_at, last_error, created_at, updated_at
+         FROM tenant_schedules
+         WHERE id = ?`
+      )
+      .get(scheduleId) as
+      | {
+          id: string;
+          tenant_id: string;
+          user_request: string;
+          cron: string;
+          channel_type: string;
+          channel_ref: string;
+          active: number;
+          last_run_at: string | null;
+          last_error: string | null;
+          created_at: string;
+          updated_at: string;
+        }
+      | undefined;
+    if (!existing) {
+      return null;
+    }
+
+    const updatedAt = new Date().toISOString();
+    const nextUserRequest = updates.userRequest ?? existing.user_request;
+    const nextCron = updates.cron ?? existing.cron;
+    const nextChannelType = updates.channelType ?? (existing.channel_type as ScheduleChannelType);
+    const nextChannelRef = updates.channelRef ?? existing.channel_ref;
+    const nextActive = updates.active ?? Boolean(existing.active);
+    const nextLastRunAt = updates.lastRunAt ?? existing.last_run_at ?? undefined;
+    const nextLastError = updates.lastError ?? existing.last_error ?? undefined;
+
+    this.db
+      .prepare(
+        `UPDATE tenant_schedules
+         SET user_request = ?, cron = ?, channel_type = ?, channel_ref = ?, active = ?, last_run_at = ?, last_error = ?, updated_at = ?
+         WHERE id = ?`
+      )
+      .run(
+        nextUserRequest,
+        nextCron,
+        nextChannelType,
+        nextChannelRef,
+        nextActive ? 1 : 0,
+        nextLastRunAt ?? null,
+        nextLastError ?? null,
+        updatedAt,
+        scheduleId
+      );
+
+    return {
+      id: existing.id,
+      tenantId: existing.tenant_id,
+      userRequest: nextUserRequest,
+      cron: nextCron,
+      channelType: nextChannelType,
+      channelRef: nextChannelRef,
+      active: nextActive,
+      lastRunAt: nextLastRunAt,
+      lastError: nextLastError,
+      createdAt: existing.created_at,
+      updatedAt
+    };
+  }
+
+  deleteTenantSchedule(scheduleId: string): void {
+    this.db.prepare("DELETE FROM tenant_schedules WHERE id = ?").run(scheduleId);
   }
 
   getMessages(conversationId: string, limit = 20): ConversationMessage[] {

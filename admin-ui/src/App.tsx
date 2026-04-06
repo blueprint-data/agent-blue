@@ -160,6 +160,25 @@ interface TelegramMapping {
   updatedAt: string;
 }
 
+interface TenantSchedule {
+  id: string;
+  tenantId: string;
+  userRequest: string;
+  cron: string;
+  channelType: "slack" | "telegram" | "console" | "custom";
+  channelRef: string;
+  active: boolean;
+  lastRunAt?: string;
+  lastError?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface ScheduleChannelOptions {
+  slackChannels: Array<{ channelId: string; source: string }>;
+  telegramChats: Array<{ chatId: string; source: string }>;
+}
+
 interface NotificationState {
   type: "success" | "error" | "info";
   text: string;
@@ -368,6 +387,7 @@ function AdminShell({
               <Route path="/" element={<OverviewPage notify={notify} />} />
               <Route path="/new-tenant" element={<NewTenantPage notify={notify} />} />
               <Route path="/tenants" element={<TenantsPage notify={notify} />} />
+              <Route path="/schedules" element={<SchedulesPage notify={notify} />} />
               <Route path="/conversations" element={<ConversationsPage notify={notify} />} />
               <Route path="/slack-bot" element={<SlackBotPage notify={notify} />} />
               <Route path="/telegram-bot" element={<TelegramBotPage notify={notify} />} />
@@ -1475,6 +1495,305 @@ function TenantsPage({ notify }: { notify: (value: NotificationState | null) => 
         </div>
       </div>
     </div>
+  );
+}
+
+function SchedulesPage({ notify }: { notify: (value: NotificationState | null) => void }): ReactElement {
+  const [tenants, setTenants] = useState<TenantRecord[]>([]);
+  const [selectedTenant, setSelectedTenant] = useState<string>("");
+  const [schedules, setSchedules] = useState<TenantSchedule[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [userRequest, setUserRequest] = useState("");
+  const [cron, setCron] = useState("0 * * * *");
+  const [channelType, setChannelType] = useState<TenantSchedule["channelType"]>("slack");
+  const [channelRef, setChannelRef] = useState("");
+  const [active, setActive] = useState(true);
+  const [channelOptions, setChannelOptions] = useState<ScheduleChannelOptions>({ slackChannels: [], telegramChats: [] });
+  const [actionLog, setActionLog] = useState<string[]>([]);
+
+  useEffect(() => {
+    void apiRequest<TenantRecord[]>("/api/admin/tenants")
+      .then((list) => {
+        setTenants(list);
+        if (!selectedTenant && list.length > 0) {
+          setSelectedTenant(list[0].tenantId);
+        }
+      })
+      .catch((caught) => setError(sectionError(caught)));
+  }, [selectedTenant]);
+
+  useEffect(() => {
+    if (!selectedTenant) return;
+    setLoading(true);
+    setError(null);
+    void apiRequest<TenantSchedule[]>(`/api/admin/tenants/${selectedTenant}/schedules`)
+      .then((data) => setSchedules(data))
+      .catch((caught) => setError(sectionError(caught)))
+      .finally(() => setLoading(false));
+  }, [selectedTenant]);
+
+  useEffect(() => {
+    if (!selectedTenant) {
+      setChannelOptions({ slackChannels: [], telegramChats: [] });
+      return;
+    }
+    void apiRequest<ScheduleChannelOptions>(`/api/admin/tenants/${selectedTenant}/schedules/channel-options`)
+      .then((options) => {
+        setChannelOptions(options);
+      })
+      .catch(() => {
+        setChannelOptions({ slackChannels: [], telegramChats: [] });
+      });
+  }, [selectedTenant]);
+
+  useEffect(() => {
+    if (channelType === "slack" && channelOptions.slackChannels.length > 0) {
+      if (!channelOptions.slackChannels.some((entry) => entry.channelId === channelRef)) {
+        setChannelRef(channelOptions.slackChannels[0].channelId);
+      }
+    } else if (channelType === "telegram" && channelOptions.telegramChats.length > 0) {
+      if (!channelOptions.telegramChats.some((entry) => entry.chatId === channelRef)) {
+        setChannelRef(channelOptions.telegramChats[0].chatId);
+      }
+    }
+  }, [channelType, channelOptions, channelRef]);
+
+  function resetForm() {
+    setEditingId(null);
+    setUserRequest("");
+    setCron("0 * * * *");
+    setChannelType("slack");
+    setChannelRef("");
+    setActive(true);
+  }
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedTenant) {
+      setError("Choose a tenant first.");
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const payload = { userRequest, cron, channelType, channelRef, active };
+      if (editingId) {
+        await apiRequest(`/api/admin/tenants/${selectedTenant}/schedules/${editingId}`, { method: "PUT", body: payload });
+        notify({ type: "success", text: "Schedule updated" });
+      } else {
+        await apiRequest(`/api/admin/tenants/${selectedTenant}/schedules`, { method: "POST", body: payload });
+        notify({ type: "success", text: "Schedule created" });
+      }
+      resetForm();
+      const refreshed = await apiRequest<TenantSchedule[]>(`/api/admin/tenants/${selectedTenant}/schedules`);
+      setSchedules(refreshed);
+    } catch (caught) {
+      setError(sectionError(caught));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleDelete(id: string) {
+    if (!selectedTenant) return;
+    if (!window.confirm("Delete this schedule?")) return;
+    setLoading(true);
+    setError(null);
+    try {
+      await apiRequest(`/api/admin/tenants/${selectedTenant}/schedules/${id}`, { method: "DELETE" });
+      setSchedules((prev) => prev.filter((entry) => entry.id !== id));
+      notify({ type: "success", text: "Schedule deleted" });
+    } catch (caught) {
+      setError(sectionError(caught));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleTest(id: string) {
+    if (!selectedTenant) return;
+    setLoading(true);
+    setError(null);
+    try {
+      await apiRequest<{ status: string }>(`/api/admin/tenants/${selectedTenant}/schedules/${id}/test`, {
+        method: "POST"
+      });
+      const nowText = new Date().toLocaleString();
+      setActionLog((prev) => [`[${nowText}] Test run queued for ${id}`, ...prev].slice(0, 10));
+      notify({ type: "success", text: "Test run queued" });
+    } catch (caught) {
+      setError(sectionError(caught));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function startEdit(schedule: TenantSchedule) {
+    setEditingId(schedule.id);
+    setUserRequest(schedule.userRequest);
+    setCron(schedule.cron);
+    setChannelType(schedule.channelType);
+    setChannelRef(schedule.channelRef);
+    setActive(schedule.active);
+  }
+
+  return (
+    <>
+      <PageHeader
+        title="Schedules"
+        subtitle="Create and manage recurring requests per tenant."
+        actions={
+          <button className="secondary-button" onClick={() => resetForm()} disabled={loading}>
+            New schedule
+          </button>
+        }
+      />
+      <div className="stack gap-md">
+        <section className="card">
+          <div className="card-header">
+            <div>
+              <h3>{editingId ? "Edit schedule" : "Create schedule"}</h3>
+              <p>Select tenant, channel, cron pattern, and the request to send.</p>
+            </div>
+          </div>
+          <div className="card-body">
+            {error ? <div className="banner error">{error}</div> : null}
+            <form className="form-grid" onSubmit={handleSubmit}>
+              <label>
+                Tenant
+                <select value={selectedTenant} onChange={(e) => setSelectedTenant(e.target.value)}>
+                  <option value="">Select tenant</option>
+                  {tenants.map((tenant) => (
+                    <option key={tenant.tenantId} value={tenant.tenantId}>
+                      {tenant.tenantId}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Cron expression
+                <input value={cron} onChange={(e) => setCron(e.target.value)} placeholder="0 * * * *" />
+              </label>
+              <label>
+                Channel type
+                <select value={channelType} onChange={(e) => setChannelType(e.target.value as TenantSchedule["channelType"])}>
+                  <option value="slack">Slack</option>
+                  <option value="telegram">Telegram</option>
+                  <option value="console">Console</option>
+                  <option value="custom">Custom</option>
+                </select>
+              </label>
+              <label>
+                Channel reference
+                {channelType === "slack" && channelOptions.slackChannels.length > 0 ? (
+                  <select value={channelRef} onChange={(e) => setChannelRef(e.target.value)}>
+                    {channelOptions.slackChannels.map((entry) => (
+                      <option key={entry.channelId} value={entry.channelId}>
+                        {entry.channelId} ({entry.source})
+                      </option>
+                    ))}
+                  </select>
+                ) : channelType === "telegram" && channelOptions.telegramChats.length > 0 ? (
+                  <select value={channelRef} onChange={(e) => setChannelRef(e.target.value)}>
+                    {channelOptions.telegramChats.map((entry) => (
+                      <option key={entry.chatId} value={entry.chatId}>
+                        {entry.chatId} ({entry.source})
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    value={channelRef}
+                    onChange={(e) => setChannelRef(e.target.value)}
+                    placeholder="Slack channel ID, Telegram chat ID, or custom destination"
+                  />
+                )}
+                {channelType === "slack" && channelOptions.slackChannels.length === 0 ? (
+                  <p className="muted">No mapped Slack channels for this tenant. Add a mapping first.</p>
+                ) : null}
+                {channelType === "telegram" && channelOptions.telegramChats.length === 0 ? (
+                  <p className="muted">No mapped Telegram chats for this tenant. Add a mapping first.</p>
+                ) : null}
+              </label>
+              <label className="full">
+                User request
+                <textarea value={userRequest} onChange={(e) => setUserRequest(e.target.value)} rows={3} />
+              </label>
+              <label className="checkbox">
+                <input type="checkbox" checked={active} onChange={(e) => setActive(e.target.checked)} /> Active
+              </label>
+              <div className="form-actions">
+                <button type="submit" disabled={loading || !selectedTenant || !userRequest || !cron || !channelRef}>
+                  {editingId ? "Save changes" : "Create schedule"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </section>
+
+        <section className="card">
+          <div className="card-header">
+            <div>
+              <h3>Existing schedules</h3>
+              <p>Showing schedules for tenant {selectedTenant || "—"}.</p>
+            </div>
+            {actionLog.length > 0 ? <div className="eyebrow">Recent actions</div> : null}
+            {actionLog.length > 0 ? (
+              <div className="action-log">
+                {actionLog.map((entry, index) => (
+                  <div key={index} className="muted">{entry}</div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+          <div className="card-body">
+            {loading ? <div>Loading…</div> : null}
+            {!loading && schedules.length === 0 ? <div className="muted">No schedules yet.</div> : null}
+            {!loading && schedules.length > 0 ? (
+              <div className="table-grid">
+                <div className="table-row table-head">
+                  <div>Cron</div>
+                  <div>Request</div>
+                  <div>Channel</div>
+                  <div>Status</div>
+                  <div>Updated</div>
+                  <div>Actions</div>
+                </div>
+                {schedules.map((item) => (
+                  <div key={item.id} className="table-row">
+                    <div>{item.cron}</div>
+                    <div>{compactText(item.userRequest, 80)}</div>
+                    <div>
+                      <div className="eyebrow">{item.channelType}</div>
+                      <div>{item.channelRef}</div>
+                    </div>
+                    <div>
+                      <StatusBadge label={item.active ? "Active" : "Paused"} tone={item.active ? "accent" : "muted"} />
+                      <div className="muted">Last run: {formatDate(item.lastRunAt)}</div>
+                      {item.lastError ? <div className="banner error thin">{item.lastError}</div> : null}
+                    </div>
+                    <div>{formatDate(item.updatedAt)}</div>
+                    <div className="button-row">
+                      <button className="secondary-button" onClick={() => startEdit(item)} disabled={loading}>
+                        Edit
+                      </button>
+                      <button className="secondary-button" onClick={() => void handleTest(item.id)} disabled={loading}>
+                        Test run
+                      </button>
+                      <button className="danger-button" onClick={() => void handleDelete(item.id)} disabled={loading}>
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        </section>
+      </div>
+    </>
   );
 }
 

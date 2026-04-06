@@ -62,7 +62,7 @@ export interface AgentResponse {
   debug?: Record<string, unknown>;
 }
 
-export type ConversationSource = "cli" | "slack" | "admin";
+export type ConversationSource = "cli" | "slack" | "admin" | "telegram";
 
 export interface ConversationOrigin {
   source: ConversationSource;
@@ -88,6 +88,22 @@ export interface AgentExecutionTurn {
   createdAt: string;
   updatedAt: string;
   completedAt?: string;
+}
+
+export type ScheduleChannelType = "slack" | "telegram" | "console" | "custom";
+
+export interface TenantSchedule {
+  id: string;
+  tenantId: string;
+  userRequest: string;
+  cron: string;
+  channelType: ScheduleChannelType;
+  channelRef: string;
+  active: boolean;
+  lastRunAt?: string;
+  lastError?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface AdminConversationSummary {

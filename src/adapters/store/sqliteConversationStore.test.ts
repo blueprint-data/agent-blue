@@ -229,4 +229,49 @@ describe("SqliteConversationStore admin telemetry", () => {
       })
     ]);
   });
+
+  it("stores tenant schedules and allows updates", () => {
+    const store = createStore();
+
+    const schedule = store.createTenantSchedule({
+      tenantId: "acme",
+      userRequest: "Send yesterday's GMV",
+      cron: "0 7 * * *",
+      channelType: "slack",
+      channelRef: "C123",
+      active: true
+    });
+
+    const listed = store.listTenantSchedules("acme");
+    expect(listed).toHaveLength(1);
+    expect(listed[0]).toMatchObject({
+      id: schedule.id,
+      cron: "0 7 * * *",
+      channelType: "slack",
+      channelRef: "C123",
+      active: true
+    });
+
+    const updated = store.updateTenantSchedule(schedule.id, {
+      cron: "30 6 * * *",
+      channelType: "telegram",
+      channelRef: "9999",
+      active: false,
+      lastRunAt: "2024-01-01T00:00:00.000Z",
+      lastError: "previous failure"
+    });
+
+    expect(updated).not.toBeNull();
+    expect(updated).toMatchObject({
+      cron: "30 6 * * *",
+      channelType: "telegram",
+      channelRef: "9999",
+      active: false,
+      lastRunAt: "2024-01-01T00:00:00.000Z",
+      lastError: "previous failure"
+    });
+
+    store.deleteTenantSchedule(schedule.id);
+    expect(store.listTenantSchedules("acme")).toHaveLength(0);
+  });
 });

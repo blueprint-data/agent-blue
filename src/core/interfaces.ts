@@ -10,7 +10,9 @@ import {
   ConversationOrigin,
   ConversationSource,
   DbtModelInfo,
+  ScheduleChannelType,
   QueryResult,
+  TenantSchedule,
   TenantMemory,
   TenantMemorySource
 } from "./types.js";
@@ -148,6 +150,19 @@ export interface ConversationStore {
   upsertTelegramChatTenant(chatId: string, tenantId: string, source?: string): void;
   listTelegramChatMappings(): Array<{ chatId: string; tenantId: string; source: string; updatedAt: string }>;
   deleteTelegramChatMapping(chatId: string): void;
+
+  listTenantSchedules(tenantId: string): TenantSchedule[];
+  getTenantSchedule(tenantId: string, scheduleId: string): TenantSchedule | null;
+  createTenantSchedule(input: {
+    tenantId: string;
+    userRequest: string;
+    cron: string;
+    channelType: ScheduleChannelType;
+    channelRef: string;
+    active?: boolean;
+  }): TenantSchedule;
+  updateTenantSchedule(scheduleId: string, updates: Partial<Omit<TenantSchedule, "id" | "tenantId" | "createdAt">>): TenantSchedule | null;
+  deleteTenantSchedule(scheduleId: string): void;
 
   // Admin operations
   listTenants(): Array<{

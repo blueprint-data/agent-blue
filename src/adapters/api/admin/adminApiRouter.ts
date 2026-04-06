@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { NextFunction, Request, Response, Router } from "express";
 import multer from "multer";
+import { CronTime } from "cron";
 import type { ConversationStore } from "../../../core/interfaces.js";
 import type {
   AdminGuardrails,
@@ -16,10 +17,20 @@ import { buildWarehouseFromTenantConfig } from "../../../app.js";
 import { GitDbtRepositoryService } from "../../dbt/dbtRepoService.js";
 import type { SlackBotSupervisor } from "./slackBotSupervisor.js";
 import type { TelegramBotSupervisor } from "./telegramBotSupervisor.js";
+import type { SchedulerService } from "../scheduler/schedulerService.js";
 
 function param(req: Request, name: string): string {
   const value = req.params[name];
   return Array.isArray(value) ? value[0] ?? "" : (value ?? "");
+}
+
+function isValidCron(value: string): boolean {
+  try {
+    new CronTime(value);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export interface AdminApiRouterOptions {
@@ -27,10 +38,11 @@ export interface AdminApiRouterOptions {
   appDataDir: string;
   slackBotSupervisor?: SlackBotSupervisor;
   telegramBotSupervisor?: TelegramBotSupervisor;
+  schedulerService?: SchedulerService;
 }
 
 export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
-  const { store, appDataDir, slackBotSupervisor, telegramBotSupervisor } = options;
+  const { store, appDataDir, slackBotSupervisor, telegramBotSupervisor, schedulerService } = options;
   const router = Router();
   const dbtRepo = new GitDbtRepositoryService(store);
   const maxTenantMemoryChars = 300;
@@ -189,6 +201,177 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
       }
       store.deleteTenantMemory(memory.id);
       res.status(204).send();
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.get("/tenants/:tenantId/schedules", (req: Request, res: Response) => {
+    try {
+      const tenantId = param(req, "tenantId");
+      if (!store.getTenantRepo(tenantId)) {
+        res.status(404).json({ error: "Tenant not found" });
+        return;
+      }
+      res.json(store.listTenantSchedules(tenantId));
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.get("/tenants/:tenantId/schedules/channel-options", (req: Request, res: Response) => {
+    try {
+      const tenantId = param(req, "tenantId");
+      if (!store.getTenantRepo(tenantId)) {
+        res.status(404).json({ error: "Tenant not found" });
+        return;
+      }
+      const slackChannels = store
+        .listSlackChannelMappings()
+        .filter((entry) => entry.tenantId === tenantId)
+        .map((entry) => ({ channelId: entry.channelId, source: entry.source }));
+      const telegramChats = store
+        .listTelegramChatMappings()
+        .filter((entry) => entry.tenantId === tenantId)
+        .map((entry) => ({ chatId: entry.chatId, source: entry.source }));
+      res.json({ slackChannels, telegramChats });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.post("/tenants/:tenantId/schedules", (req: Request, res: Response) => {
+    try {
+      const tenantId = param(req, "tenantId");
+      if (!store.getTenantRepo(tenantId)) {
+        res.status(404).json({ error: "Tenant not found" });
+        return;
+      }
+
+      const { userRequest, cron, channelType, channelRef, active } = req.body as {
+        userRequest?: string;
+        cron?: string;
+        channelType?: string;
+        channelRef?: string;
+        active?: boolean;
+      };
+
+      if (!userRequest || !cron || !channelType || !channelRef) {
+        res.status(400).json({ error: "userRequest, cron, channelType, and channelRef are required" });
+        return;
+      }
+
+      if (!isValidCron(cron)) {
+        res.status(400).json({ error: "cron expression is invalid" });
+        return;
+      }
+
+      const allowedChannels = ["slack", "telegram", "console", "custom"];
+      if (!allowedChannels.includes(channelType)) {
+        res.status(400).json({ error: "channelType must be one of slack|telegram|console|custom" });
+        return;
+      }
+
+      const schedule = store.createTenantSchedule({
+        tenantId,
+        userRequest,
+        cron,
+        channelType: channelType as "slack" | "telegram" | "console" | "custom",
+        channelRef,
+        active
+      });
+      schedulerService?.refreshTenant(tenantId);
+      res.status(201).json(schedule);
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.put("/tenants/:tenantId/schedules/:scheduleId", (req: Request, res: Response) => {
+    try {
+      const tenantId = param(req, "tenantId");
+      const scheduleId = param(req, "scheduleId");
+      const existing = store.getTenantSchedule(tenantId, scheduleId);
+      if (!existing) {
+        res.status(404).json({ error: "Schedule not found" });
+        return;
+      }
+
+      const { userRequest, cron, channelType, channelRef, active } = req.body as {
+        userRequest?: string;
+        cron?: string;
+        channelType?: string;
+        channelRef?: string;
+        active?: boolean;
+      };
+
+      if (cron && !isValidCron(cron)) {
+        res.status(400).json({ error: "cron expression is invalid" });
+        return;
+      }
+
+      if (channelType) {
+        const allowedChannels = ["slack", "telegram", "console", "custom"];
+        if (!allowedChannels.includes(channelType)) {
+          res.status(400).json({ error: "channelType must be one of slack|telegram|console|custom" });
+          return;
+        }
+      }
+
+      const updated = store.updateTenantSchedule(scheduleId, {
+        userRequest,
+        cron,
+        channelType: channelType as "slack" | "telegram" | "console" | "custom" | undefined,
+        channelRef,
+        active
+      });
+
+      schedulerService?.refreshTenant(tenantId);
+      res.json(updated);
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.delete("/tenants/:tenantId/schedules/:scheduleId", (req: Request, res: Response) => {
+    try {
+      const tenantId = param(req, "tenantId");
+      const scheduleId = param(req, "scheduleId");
+      const existing = store.getTenantSchedule(tenantId, scheduleId);
+      if (!existing) {
+        res.status(404).json({ error: "Schedule not found" });
+        return;
+      }
+      store.deleteTenantSchedule(scheduleId);
+      schedulerService?.refreshTenant(tenantId);
+      res.status(204).send();
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.post("/tenants/:tenantId/schedules/:scheduleId/test", async (req: Request, res: Response) => {
+    try {
+      const tenantId = param(req, "tenantId");
+      const scheduleId = param(req, "scheduleId");
+      const existing = store.getTenantSchedule(tenantId, scheduleId);
+      if (!existing) {
+        res.status(404).json({ error: "Schedule not found" });
+        return;
+      }
+      if (!schedulerService) {
+        res.status(503).json({ error: "Scheduler service not available" });
+        return;
+      }
+      store.appendAdminBotEvent({
+        botName: "scheduler",
+        level: "info",
+        eventType: "schedule.test_triggered",
+        message: `Manual test run queued for schedule ${scheduleId}`,
+        metadata: { tenantId, scheduleId }
+      });
+      void schedulerService.runNow(tenantId, scheduleId);
+      res.json({ status: "queued" });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }
