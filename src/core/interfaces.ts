@@ -11,8 +11,10 @@ import {
   ConversationSource,
   DbtModelInfo,
   QueryResult,
+  ScheduleChannelType,
   TenantMemory,
-  TenantMemorySource
+  TenantMemorySource,
+  TenantSchedule
 } from "./types.js";
 
 export interface LlmMessage {
@@ -205,6 +207,22 @@ export interface ConversationStore {
   listAdminLoginDomainsForTenant(tenantId: string): string[];
   /** Replaces all DB domains for the tenant. Domains must be unique globally. Throws if tenant missing or domain owned by another tenant. */
   setAdminLoginDomainsForTenant(tenantId: string, domains: string[]): void;
+
+  listTenantSchedules(tenantId: string): TenantSchedule[];
+  getTenantSchedule(tenantId: string, scheduleId: string): TenantSchedule | null;
+  createTenantSchedule(input: {
+    tenantId: string;
+    userRequest: string;
+    cron: string;
+    channelType: ScheduleChannelType;
+    channelRef?: string | null;
+    active?: boolean;
+  }): TenantSchedule;
+  updateTenantSchedule(
+    scheduleId: string,
+    updates: Partial<Omit<TenantSchedule, "id" | "tenantId" | "createdAt" | "updatedAt">>
+  ): TenantSchedule | null;
+  deleteTenantSchedule(scheduleId: string): void;
 }
 
 export interface AdminGuardrails {

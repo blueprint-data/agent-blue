@@ -63,6 +63,8 @@ export const env = {
   adminPublicOrigin: (process.env.ADMIN_PUBLIC_ORIGIN ?? "").replace(/\/$/, ""),
   adminAuthSuperadminEmailDomainsRaw: process.env.ADMIN_AUTH_SUPERADMIN_EMAIL_DOMAINS ?? "",
   adminAuthTenantEmailDomainMapRaw: process.env.ADMIN_AUTH_TENANT_EMAIL_DOMAIN_MAP ?? "",
+   schedulerTimezone: process.env.SCHEDULER_TIMEZONE ?? "UTC",
+   schedulerRefreshIntervalMs: Number.parseInt(process.env.SCHEDULER_REFRESH_INTERVAL_MS ?? "60000", 10),
   require(name: string): string {
     return required(name);
   }

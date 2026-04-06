@@ -20,8 +20,10 @@ import {
   ConversationMessage,
   ConversationOrigin,
   ConversationSource,
+  ScheduleChannelType,
   TenantMemory,
-  TenantMemorySource
+  TenantMemorySource,
+  TenantSchedule
 } from "../../core/types.js";
 import { createId } from "../../utils/id.js";
 import { normalizeDomainPart } from "../../config/adminAuthPolicy.js";
@@ -194,6 +196,21 @@ export class SqliteConversationStore implements ConversationStore {
         role TEXT NOT NULL DEFAULT 'superadmin',
         scoped_tenant_id TEXT
       );
+
+      CREATE TABLE IF NOT EXISTS tenant_schedules (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        user_request TEXT NOT NULL,
+        cron TEXT NOT NULL,
+        channel_type TEXT NOT NULL,
+        channel_ref TEXT,
+        active INTEGER NOT NULL DEFAULT 1,
+        last_run_at TEXT,
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_tenant_schedules_tenant ON tenant_schedules(tenant_id);
 
       CREATE TABLE IF NOT EXISTS conversation_origins (
         conversation_id TEXT PRIMARY KEY,
@@ -526,6 +543,189 @@ export class SqliteConversationStore implements ConversationStore {
 
   deleteTenantMemory(memoryId: string): void {
     this.db.prepare("DELETE FROM tenant_memories WHERE id = ?").run(memoryId);
+  }
+
+  private mapScheduleRow(row: {
+    id: string;
+    tenant_id: string;
+    user_request: string;
+    cron: string;
+    channel_type: string;
+    channel_ref: string | null;
+    active: number;
+    last_run_at: string | null;
+    last_error: string | null;
+    created_at: string;
+    updated_at: string;
+  }): TenantSchedule {
+    return {
+      id: row.id,
+      tenantId: row.tenant_id,
+      userRequest: row.user_request,
+      cron: row.cron,
+      channelType: row.channel_type as ScheduleChannelType,
+      channelRef: row.channel_ref ?? null,
+      active: Boolean(row.active),
+      lastRunAt: row.last_run_at ?? null,
+      lastError: row.last_error ?? null,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  listTenantSchedules(tenantId: string): TenantSchedule[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, tenant_id, user_request, cron, channel_type, channel_ref, active, last_run_at, last_error, created_at, updated_at
+         FROM tenant_schedules
+         WHERE tenant_id = ?
+         ORDER BY updated_at DESC, created_at DESC`
+      )
+      .all(tenantId) as Array<{
+      id: string;
+      tenant_id: string;
+      user_request: string;
+      cron: string;
+      channel_type: string;
+      channel_ref: string | null;
+      active: number;
+      last_run_at: string | null;
+      last_error: string | null;
+      created_at: string;
+      updated_at: string;
+    }>;
+    return rows.map((row) => this.mapScheduleRow(row));
+  }
+
+  getTenantSchedule(tenantId: string, scheduleId: string): TenantSchedule | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, tenant_id, user_request, cron, channel_type, channel_ref, active, last_run_at, last_error, created_at, updated_at
+         FROM tenant_schedules
+         WHERE tenant_id = ? AND id = ?`
+      )
+      .get(tenantId, scheduleId) as
+      | {
+          id: string;
+          tenant_id: string;
+          user_request: string;
+          cron: string;
+          channel_type: string;
+          channel_ref: string | null;
+          active: number;
+          last_run_at: string | null;
+          last_error: string | null;
+          created_at: string;
+          updated_at: string;
+        }
+      | undefined;
+    return row ? this.mapScheduleRow(row) : null;
+  }
+
+  createTenantSchedule(input: {
+    tenantId: string;
+    userRequest: string;
+    cron: string;
+    channelType: ScheduleChannelType;
+    channelRef?: string | null;
+    active?: boolean;
+  }): TenantSchedule {
+    const id = createId("sched");
+    const createdAt = new Date().toISOString();
+    const normalizedChannelRef = input.channelRef?.trim() ? input.channelRef.trim() : null;
+    const active = input.active !== false;
+    this.db
+      .prepare(
+        `INSERT INTO tenant_schedules (id, tenant_id, user_request, cron, channel_type, channel_ref, active, last_run_at, last_error, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)`
+      )
+      .run(
+        id,
+        input.tenantId,
+        input.userRequest,
+        input.cron,
+        input.channelType,
+        normalizedChannelRef,
+        active ? 1 : 0,
+        createdAt,
+        createdAt
+      );
+    return {
+      id,
+      tenantId: input.tenantId,
+      userRequest: input.userRequest,
+      cron: input.cron,
+      channelType: input.channelType,
+      channelRef: normalizedChannelRef,
+      active,
+      lastRunAt: null,
+      lastError: null,
+      createdAt,
+      updatedAt: createdAt
+    };
+  }
+
+  updateTenantSchedule(
+    scheduleId: string,
+    updates: Partial<Omit<TenantSchedule, "id" | "tenantId" | "createdAt" | "updatedAt">>
+  ): TenantSchedule | null {
+    const existing = this.db
+      .prepare(
+        `SELECT id, tenant_id, user_request, cron, channel_type, channel_ref, active, last_run_at, last_error, created_at, updated_at
+         FROM tenant_schedules
+         WHERE id = ?`
+      )
+      .get(scheduleId) as
+      | {
+          id: string;
+          tenant_id: string;
+          user_request: string;
+          cron: string;
+          channel_type: string;
+          channel_ref: string | null;
+          active: number;
+          last_run_at: string | null;
+          last_error: string | null;
+          created_at: string;
+          updated_at: string;
+        }
+      | undefined;
+    if (!existing) {
+      return null;
+    }
+    const updatedAt = new Date().toISOString();
+    const next = {
+      ...existing,
+      user_request: updates.userRequest ?? existing.user_request,
+      cron: updates.cron ?? existing.cron,
+      channel_type: updates.channelType ?? existing.channel_type,
+      channel_ref: updates.channelRef === undefined ? existing.channel_ref : updates.channelRef?.trim() || null,
+      active: updates.active === undefined ? existing.active : updates.active ? 1 : 0,
+      last_run_at: updates.lastRunAt === undefined ? existing.last_run_at : updates.lastRunAt ?? null,
+      last_error: updates.lastError === undefined ? existing.last_error : updates.lastError ?? null
+    };
+    this.db
+      .prepare(
+        `UPDATE tenant_schedules
+         SET user_request = ?, cron = ?, channel_type = ?, channel_ref = ?, active = ?, last_run_at = ?, last_error = ?, updated_at = ?
+         WHERE id = ?`
+      )
+      .run(
+        next.user_request,
+        next.cron,
+        next.channel_type,
+        next.channel_ref,
+        next.active,
+        next.last_run_at ?? null,
+        next.last_error ?? null,
+        updatedAt,
+        scheduleId
+      );
+    return this.mapScheduleRow({ ...next, updated_at: updatedAt });
+  }
+
+  deleteTenantSchedule(scheduleId: string): void {
+    this.db.prepare("DELETE FROM tenant_schedules WHERE id = ?").run(scheduleId);
   }
 
   getMessages(conversationId: string, limit = 20): ConversationMessage[] {

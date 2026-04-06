@@ -28,6 +28,7 @@ import {
 import { createAdminApiRouter } from "./admin/adminApiRouter.js";
 import { SlackBotSupervisor } from "./admin/slackBotSupervisor.js";
 import { TelegramBotSupervisor } from "./admin/telegramBotSupervisor.js";
+import { SchedulerService } from "../../core/schedulerService.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const adminSessionCookieName = "agent_blue_admin_session";
@@ -295,6 +296,19 @@ export function startAdminServer(options: AdminServerOptions): void {
     store,
     createRuntime: () => buildRuntime(store as SqliteConversationStore)
   });
+  const schedulerService = new SchedulerService({
+    store,
+    createRuntime: () => buildRuntime(store as SqliteConversationStore),
+    slackBotToken: env.slackBotToken,
+    telegramBotToken: env.telegramBotToken,
+    timezone: env.schedulerTimezone,
+    llmModel: env.llmModel,
+    refreshIntervalMs: env.schedulerRefreshIntervalMs
+  });
+  void schedulerService.start().catch((error: unknown) => {
+    // eslint-disable-next-line no-console
+    console.error("[scheduler] failed to start", error);
+  });
 
   app.set("trust proxy", 1);
   app.use(express.json());
@@ -527,7 +541,11 @@ export function startAdminServer(options: AdminServerOptions): void {
     res.status(204).send();
   });
 
-  app.use("/api/admin", authMiddleware, createAdminApiRouter({ store, appDataDir, slackBotSupervisor, telegramBotSupervisor }));
+  app.use(
+    "/api/admin",
+    authMiddleware,
+    createAdminApiRouter({ store, appDataDir, slackBotSupervisor, telegramBotSupervisor, schedulerService })
+  );
 
   const { staticDir, indexFile } = resolveAdminUiPaths();
   app.use(
