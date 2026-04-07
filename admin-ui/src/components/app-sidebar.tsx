@@ -62,10 +62,7 @@ export function AppSidebar({ username, method, isSuperadmin = true, onLogout }: 
             <NavItem to="/conversations">Conversations</NavItem>
           </SidebarMenuItem>
           <SidebarMenuItem>
-            <NavItem to="/slack-bot">Slack Bot</NavItem>
-          </SidebarMenuItem>
-          <SidebarMenuItem>
-            <NavItem to="/telegram-bot">Telegram Bot</NavItem>
+            <NavItem to="/telegram-routing">Telegram routing</NavItem>
           </SidebarMenuItem>
           {isSuperadmin ? (
             <SidebarMenuItem>

@@ -39,6 +39,17 @@ services:
     volumes:
       - ./data:/app/data
 
+  telegram:
+    image: agent-blue:local
+    restart: unless-stopped
+    command: ["npm", "run", "start:telegram"]
+    env_file:
+      - ${AGENT_BLUE_ENV_FILE:-.env.deploy}
+    environment:
+      APP_DATA_DIR: /app/data
+    volumes:
+      - ./data:/app/data
+
 volumes:
   caddy_data:
   caddy_config:
