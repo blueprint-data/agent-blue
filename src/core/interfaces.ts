@@ -88,7 +88,8 @@ export type SlackTenantMappingRule =
   | "user"
   | "team"
   | "owner_default"
-  | "unmapped";
+  | "unmapped"
+  | "tenant_app_url";
 
 export interface SlackTenantResolution {
   tenantId: string;
@@ -223,6 +224,16 @@ export interface ConversationStore {
     updates: Partial<Omit<TenantSchedule, "id" | "tenantId" | "createdAt" | "updatedAt">>
   ): TenantSchedule | null;
   deleteTenantSchedule(scheduleId: string): void;
+  getTenantChannelBotSecrets(tenantId: string): TenantChannelBotSecrets | null;
+  /** Replaces stored row for the tenant (caller merges partial updates). */
+  upsertTenantChannelBotSecrets(input: {
+    tenantId: string;
+    slackBotToken: string | null;
+    slackSigningSecret: string | null;
+    telegramBotToken: string | null;
+  }): void;
+  /** Tenants with a non-empty per-tenant Telegram bot token (for multi-bot polling). */
+  listTenantTelegramBotOverrides(): Array<{ tenantId: string; telegramBotToken: string }>;
 }
 
 export interface AdminGuardrails {
@@ -276,6 +287,15 @@ export interface TenantWarehouseConfig {
   provider: TenantWarehouseProvider;
   snowflake?: TenantSnowflakeConfig;
   bigquery?: TenantBigQueryConfig;
+  updatedAt: string;
+}
+
+/** Per-tenant Slack app + Telegram bot tokens (stored server-side; never returned to clients). */
+export interface TenantChannelBotSecrets {
+  tenantId: string;
+  slackBotToken: string | null;
+  slackSigningSecret: string | null;
+  telegramBotToken: string | null;
   updatedAt: string;
 }
 

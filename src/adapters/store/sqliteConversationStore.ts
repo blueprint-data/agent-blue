@@ -5,6 +5,7 @@ import type {
   AdminSession,
   AdminGuardrails,
   ConversationStore,
+  TenantChannelBotSecrets,
   TenantCredentialsRef,
   TenantKeyMetadata,
   TenantWarehouseConfig
@@ -260,6 +261,14 @@ export class SqliteConversationStore implements ConversationStore {
         message TEXT NOT NULL,
         metadata_json TEXT,
         created_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS tenant_channel_bot_secrets (
+        tenant_id TEXT PRIMARY KEY,
+        slack_bot_token TEXT,
+        slack_signing_secret TEXT,
+        telegram_bot_token TEXT,
+        updated_at TEXT NOT NULL
       );
     `);
     this.migrateAdminSessionsColumns();
@@ -1050,6 +1059,71 @@ export class SqliteConversationStore implements ConversationStore {
     return result.changes > 0;
   }
 
+  getTenantChannelBotSecrets(tenantId: string): TenantChannelBotSecrets | null {
+    const row = this.db
+      .prepare(
+        "SELECT tenant_id, slack_bot_token, slack_signing_secret, telegram_bot_token, updated_at FROM tenant_channel_bot_secrets WHERE tenant_id = ?"
+      )
+      .get(tenantId) as
+      | {
+          tenant_id: string;
+          slack_bot_token: string | null;
+          slack_signing_secret: string | null;
+          telegram_bot_token: string | null;
+          updated_at: string;
+        }
+      | undefined;
+    if (!row) {
+      return null;
+    }
+    return {
+      tenantId: row.tenant_id,
+      slackBotToken: row.slack_bot_token,
+      slackSigningSecret: row.slack_signing_secret,
+      telegramBotToken: row.telegram_bot_token,
+      updatedAt: row.updated_at
+    };
+  }
+
+  upsertTenantChannelBotSecrets(input: {
+    tenantId: string;
+    slackBotToken: string | null;
+    slackSigningSecret: string | null;
+    telegramBotToken: string | null;
+  }): void {
+    const hasSlack = Boolean(input.slackBotToken && input.slackSigningSecret);
+    const hasTg = Boolean(input.telegramBotToken && input.telegramBotToken.trim().length > 0);
+    if (!hasSlack && !hasTg) {
+      this.db.prepare("DELETE FROM tenant_channel_bot_secrets WHERE tenant_id = ?").run(input.tenantId);
+      return;
+    }
+    this.db
+      .prepare(
+        `INSERT INTO tenant_channel_bot_secrets (tenant_id, slack_bot_token, slack_signing_secret, telegram_bot_token, updated_at)
+         VALUES (?, ?, ?, ?, datetime('now'))
+         ON CONFLICT(tenant_id) DO UPDATE SET
+           slack_bot_token = excluded.slack_bot_token,
+           slack_signing_secret = excluded.slack_signing_secret,
+           telegram_bot_token = excluded.telegram_bot_token,
+           updated_at = excluded.updated_at`
+      )
+      .run(
+        input.tenantId,
+        hasSlack ? input.slackBotToken : null,
+        hasSlack ? input.slackSigningSecret : null,
+        hasTg ? input.telegramBotToken!.trim() : null
+      );
+  }
+
+  listTenantTelegramBotOverrides(): Array<{ tenantId: string; telegramBotToken: string }> {
+    const rows = this.db
+      .prepare(
+        "SELECT tenant_id, telegram_bot_token FROM tenant_channel_bot_secrets WHERE telegram_bot_token IS NOT NULL AND length(trim(telegram_bot_token)) > 0"
+      )
+      .all() as Array<{ tenant_id: string; telegram_bot_token: string }>;
+    return rows.map((r) => ({ tenantId: r.tenant_id, telegramBotToken: r.telegram_bot_token }));
+  }
+
   listTenants(): Array<{
     tenantId: string;
     repoUrl: string;
@@ -1090,6 +1164,7 @@ export class SqliteConversationStore implements ConversationStore {
     this.db.prepare("DELETE FROM tenant_warehouse_config WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM tenant_key_metadata WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM tenant_admin_login_domains WHERE tenant_id = ?").run(tenantId);
+    this.db.prepare("DELETE FROM tenant_channel_bot_secrets WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM messages WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM conversations WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM agent_profiles WHERE tenant_id = ?").run(tenantId);

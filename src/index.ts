@@ -659,10 +659,11 @@ async function run(): Promise<void> {
       (typeof args.profile === "string" ? args.profile : undefined) || env.telegramDefaultProfileName || "default";
     const llmModel = typeof args.model === "string" ? args.model : env.llmModel;
 
+    const telegramGlobal = env.telegramBotToken.trim();
     await startTelegramAgentServer({
       runtime,
       store,
-      botToken: env.telegramBotToken,
+      ...(telegramGlobal ? { botToken: telegramGlobal } : {}),
       defaultTenantId,
       defaultProfileName,
       llmModel

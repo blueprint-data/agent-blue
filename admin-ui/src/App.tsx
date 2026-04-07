@@ -1,6 +1,6 @@
 import type { ReactElement, ReactNode } from "react";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Navigate, Route, Routes } from "react-router-dom";
+import { Link, Navigate, Route, Routes } from "react-router-dom";
 import { ApiError, apiRequest, uploadRequest } from "./api";
 import { AppSidebar } from "./components/app-sidebar";
 import { SidebarInset, SidebarProvider, SidebarTrigger } from "./components/ui/sidebar";
@@ -25,6 +25,8 @@ interface TenantRecord {
   deployKeyPath: string;
   localPath: string;
   updatedAt: string;
+  hasSlackBotOverride?: boolean;
+  hasTelegramBotOverride?: boolean;
 }
 
 interface SlackMappingsResponse {
@@ -57,6 +59,9 @@ interface WizardStateResponse {
   slackChannelCount: number;
   slackUserCount: number;
   slackSharedTeamCount: number;
+  hasSlackBotOverride?: boolean;
+  hasTelegramBotOverride?: boolean;
+  slackEventsPathSuffix?: string;
 }
 
 interface ConversationSummary {
@@ -105,28 +110,6 @@ interface ConversationDetail {
   summary: ConversationSummary;
   messages: ConversationMessage[];
   executionTurns: ExecutionTurn[];
-}
-
-interface BotStatus {
-  botName: string;
-  desiredState: string;
-  actualState: string;
-  port?: number;
-  lastStartedAt?: string;
-  lastStoppedAt?: string;
-  lastErrorAt?: string;
-  lastErrorMessage?: string;
-  updatedAt: string;
-}
-
-interface BotEvent {
-  id: string;
-  botName: string;
-  level: "info" | "warn" | "error";
-  eventType: string;
-  message: string;
-  metadata?: Record<string, unknown>;
-  createdAt: string;
 }
 
 interface WarehouseConfigResponse {
@@ -188,6 +171,17 @@ interface TenantScheduleRecord {
 interface ScheduleChannelOptions {
   slackChannels: Array<{ channelId: string; source: string }>;
   telegramChats: Array<{ chatId: string; source: string }>;
+}
+
+/** Scheduler log lines from GET /api/admin/scheduler/events (same shape as AdminBotEvent). */
+interface SchedulerBotEventRecord {
+  id: string;
+  botName: string;
+  level: "info" | "warn" | "error";
+  eventType: string;
+  message: string;
+  metadata?: Record<string, unknown>;
+  createdAt: string;
 }
 
 function formatDate(value?: string | null): string {
@@ -319,7 +313,7 @@ function LoginScreen({
         <div className="login-card">
           <span className="eyebrow">Agent Blue Admin</span>
           <h1 className="hero-title">Sign in</h1>
-          <p>Secure, session-based admin access for tenant operations and Slack bot observability.</p>
+          <p>Secure, session-based admin access for tenant operations and channel routing.</p>
           {!session.loginEnabled ? (
             <div className="banner error">
               No browser login is configured. Set Google OAuth (ADMIN_AUTH_GOOGLE_ENABLED and related vars) and/or
@@ -474,16 +468,11 @@ function AdminShell({
                 path="/schedules"
                 element={<SchedulesPage notify={notify} scopedTenantId={session.scopedTenantId} isSuperadmin={isSuperadmin} />}
               />
-              <Route path="/slack-bot" element={<SlackBotPage notify={notify} canControlBots={isSuperadmin} />} />
+              <Route path="/slack-bot" element={<Navigate to="/" replace />} />
+              <Route path="/telegram-bot" element={<Navigate to="/telegram-routing" replace />} />
               <Route
-                path="/telegram-bot"
-                element={
-                  <TelegramBotPage
-                    notify={notify}
-                    canControlBots={isSuperadmin}
-                    scopedTenantId={session.scopedTenantId}
-                  />
-                }
+                path="/telegram-routing"
+                element={<TelegramRoutingPage notify={notify} scopedTenantId={session.scopedTenantId} />}
               />
               <Route
                 path="/settings"
@@ -524,29 +513,23 @@ function OverviewPage({ notify }: { notify: (value: NotificationState | null) =>
   const [error, setError] = useState<string | null>(null);
   const [tenants, setTenants] = useState<TenantRecord[]>([]);
   const [mappings, setMappings] = useState<SlackMappingsResponse | null>(null);
+  const [telegramMappings, setTelegramMappings] = useState<TelegramMapping[]>([]);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
-  const [botStatus, setBotStatus] = useState<BotStatus | null>(null);
-  const [botEvents, setBotEvents] = useState<BotEvent[]>([]);
-  const [telegramBotStatus, setTelegramBotStatus] = useState<BotStatus | null>(null);
 
   const loadOverview = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const [nextTenants, nextMappings, nextConversations, nextBotStatus, nextBotEvents, nextTelegramStatus] = await Promise.all([
+      const [nextTenants, nextMappings, nextConversations, nextTelegramMappings] = await Promise.all([
         apiRequest<TenantRecord[]>("/api/admin/tenants"),
         apiRequest<SlackMappingsResponse>("/api/admin/slack-mappings"),
         apiRequest<ConversationSummary[]>("/api/admin/conversations?limit=6"),
-        apiRequest<BotStatus>("/api/admin/bot/status"),
-        apiRequest<BotEvent[]>("/api/admin/bot/events?limit=5"),
-        apiRequest<BotStatus>("/api/admin/telegram-bot/status")
+        apiRequest<TelegramMapping[]>("/api/admin/telegram-mappings")
       ]);
       setTenants(nextTenants);
       setMappings(nextMappings);
       setConversations(nextConversations);
-      setBotStatus(nextBotStatus);
-      setBotEvents(nextBotEvents);
-      setTelegramBotStatus(nextTelegramStatus);
+      setTelegramMappings(nextTelegramMappings);
     } catch (caught) {
       setError(sectionError(caught));
       notify({ type: "error", text: sectionError(caught) });
@@ -563,7 +546,7 @@ function OverviewPage({ notify }: { notify: (value: NotificationState | null) =>
     <div className="page-grid">
       <PageHeader
         title="Overview"
-        subtitle="Get the current operating picture: tenants, routing health, recent conversations, and bot state."
+        subtitle="Tenants, Slack and Telegram routing, and recent conversations. Run Slack and Telegram worker processes via Docker Compose."
         actions={
           <button className="secondary-button" onClick={() => void loadOverview()}>
             Refresh
@@ -585,21 +568,14 @@ function OverviewPage({ notify }: { notify: (value: NotificationState | null) =>
           hint="Channels, users, and shared teams"
         />
         <StatCard
+          label="Telegram chats"
+          value={loading ? "…" : String(telegramMappings.length)}
+          hint="Chat-to-tenant routes"
+        />
+        <StatCard
           label="Recent conversations"
           value={String(conversations.length)}
           hint="Latest tracked execution threads"
-        />
-        <StatCard
-          label="Slack bot"
-          value={botStatus?.actualState ?? "unknown"}
-          hint={botStatus?.port ? `Port ${botStatus.port}` : "Embedded supervisor"}
-          tone={botStatus?.actualState === "running" ? "success" : botStatus?.actualState === "error" ? "error" : "neutral"}
-        />
-        <StatCard
-          label="Telegram bot"
-          value={telegramBotStatus?.actualState ?? "unknown"}
-          hint="Long-polling supervisor"
-          tone={telegramBotStatus?.actualState === "running" ? "success" : telegramBotStatus?.actualState === "error" ? "error" : "neutral"}
         />
       </div>
       <div className="two-column">
@@ -629,25 +605,40 @@ function OverviewPage({ notify }: { notify: (value: NotificationState | null) =>
           )}
         </AppShellCard>
 
-        <AppShellCard title="Slack bot activity" subtitle="Latest embedded supervisor events">
+        <AppShellCard
+          title="Telegram routing"
+          subtitle="Chat IDs mapped to tenants (bots run in Compose; manage mappings here or on the Telegram routing page)."
+        >
           {loading ? (
             <div className="muted">Loading…</div>
-          ) : botEvents.length === 0 ? (
-            <div className="empty-state">No bot events recorded yet.</div>
+          ) : telegramMappings.length === 0 ? (
+            <div className="empty-state">No Telegram chat mappings yet.</div>
           ) : (
             <div className="list-stack">
-              {botEvents.map((event) => (
-                <div key={event.id} className="list-row">
+              {telegramMappings.slice(0, 6).map((m) => (
+                <div key={m.chatId} className="list-row">
                   <div>
-                    <strong>{event.message}</strong>
-                    <div className="muted">{event.eventType}</div>
-                  </div>
-                  <div className="row-meta">
-                    <StatusBadge label={event.level} tone={event.level === "error" ? "error" : event.level === "warn" ? "warning" : "success"} />
-                    <span className="muted">{formatDate(event.createdAt)}</span>
+                    <strong>{m.chatId}</strong>
+                    <div className="muted">
+                      {m.tenantId}
+                      {m.source ? ` · ${m.source}` : ""} · {formatDate(m.updatedAt)}
+                    </div>
                   </div>
                 </div>
               ))}
+              {telegramMappings.length > 6 ? (
+                <p className="muted">
+                  <Link className="nav-link" to="/telegram-routing">
+                    View all {telegramMappings.length} mappings →
+                  </Link>
+                </p>
+              ) : (
+                <p className="muted">
+                  <Link className="nav-link" to="/telegram-routing">
+                    Manage mappings →
+                  </Link>
+                </p>
+              )}
             </div>
           )}
         </AppShellCard>
@@ -702,6 +693,9 @@ function NewTenantPage({ notify }: { notify: (value: NotificationState | null) =
   const [sharedTeams, setSharedTeams] = useState<string[]>([]);
   const [wizardTenantId, setWizardTenantId] = useState<string | null>(null);
   const [results, setResults] = useState<Record<string, string>>({});
+  const [wizSlackBotToken, setWizSlackBotToken] = useState("");
+  const [wizSlackSigningSecret, setWizSlackSigningSecret] = useState("");
+  const [wizTelegramBotToken, setWizTelegramBotToken] = useState("");
 
   async function runStep(step: string, action: () => Promise<unknown>) {
     try {
@@ -946,7 +940,90 @@ function NewTenantPage({ notify }: { notify: (value: NotificationState | null) =
           {results.slack_mappings ? <JsonBlock value={results.slack_mappings} /> : null}
         </AppShellCard>
 
-        <AppShellCard title="6. Final validation" subtitle="Run the final go-live checks">
+        <AppShellCard
+          title="6. Optional: per-tenant Slack / Telegram bots"
+          subtitle="Use a dedicated Slack app per tenant (Request URL includes tenant id) or a dedicated Telegram bot token."
+        >
+          {wizardTenantId ? (
+            <p className="muted">
+              Slack Events <strong>Request URL</strong> path suffix:{" "}
+              <code>{`/slack/events/tenants/${encodeURIComponent(wizardTenantId)}`}</code>
+              <br />
+              Append that to your public base URL (same host/port as the Slack process). Tokens are stored server-side and are never shown again after save.
+            </p>
+          ) : (
+            <p className="muted">Initialize the tenant first to see the Slack Request URL path.</p>
+          )}
+          <div className="form-grid">
+            <label>
+              Slack bot token (xoxb-…)
+              <input
+                type="password"
+                autoComplete="off"
+                value={wizSlackBotToken}
+                onChange={(event) => setWizSlackBotToken(event.target.value)}
+                placeholder="Optional"
+              />
+            </label>
+            <label>
+              Slack signing secret
+              <input
+                type="password"
+                autoComplete="off"
+                value={wizSlackSigningSecret}
+                onChange={(event) => setWizSlackSigningSecret(event.target.value)}
+                placeholder="Optional"
+              />
+            </label>
+            <label>
+              Telegram bot token
+              <input
+                type="password"
+                autoComplete="off"
+                value={wizTelegramBotToken}
+                onChange={(event) => setWizTelegramBotToken(event.target.value)}
+                placeholder="Optional"
+              />
+            </label>
+          </div>
+          <button
+            disabled={!wizardTenantId}
+            onClick={() =>
+              wizardTenantId &&
+              void runStep("channel_bots", async () => {
+                const body: Record<string, unknown> = {};
+                const st = wizSlackBotToken.trim();
+                const ss = wizSlackSigningSecret.trim();
+                const tg = wizTelegramBotToken.trim();
+                if (st && ss) {
+                  body.slackBotToken = st;
+                  body.slackSigningSecret = ss;
+                } else if (st || ss) {
+                  throw new Error("Provide both Slack bot token and signing secret, or leave both empty.");
+                }
+                if (tg) {
+                  body.telegramBotToken = tg;
+                }
+                if (Object.keys(body).length === 0) {
+                  return { skipped: true, message: "No channel bot fields filled; nothing saved." };
+                }
+                const result = await apiRequest<{ ok: boolean }>(`/api/admin/tenants/${wizardTenantId}/channel-bots`, {
+                  method: "PATCH",
+                  body
+                });
+                setWizSlackBotToken("");
+                setWizSlackSigningSecret("");
+                setWizTelegramBotToken("");
+                return result;
+              })
+            }
+          >
+            Save channel bot credentials
+          </button>
+          {results.channel_bots ? <JsonBlock value={results.channel_bots} /> : null}
+        </AppShellCard>
+
+        <AppShellCard title="7. Final validation" subtitle="Run the final go-live checks">
           <button disabled={!wizardTenantId} onClick={() => wizardTenantId && void runStep("final_validate", () => apiRequest(`/api/admin/wizard/tenant/${wizardTenantId}/final-validate`, { method: "POST" }))}>
             Run final checks
           </button>
@@ -989,6 +1066,10 @@ function TenantsPage({
   const bqFileInputRef = useRef<HTMLInputElement | null>(null);
   const [loginDomainsDraft, setLoginDomainsDraft] = useState("");
   const [savingLoginDomains, setSavingLoginDomains] = useState(false);
+  const [chSlackBotToken, setChSlackBotToken] = useState("");
+  const [chSlackSigningSecret, setChSlackSigningSecret] = useState("");
+  const [chTelegramBotToken, setChTelegramBotToken] = useState("");
+  const [savingChannelBots, setSavingChannelBots] = useState(false);
 
   const selectedTenant = useMemo(
     () => tenants.find((tenant) => tenant.tenantId === selectedTenantId) ?? null,
@@ -1039,6 +1120,9 @@ function TenantsPage({
 
   useEffect(() => {
     setLastRepoRefresh(null);
+    setChSlackBotToken("");
+    setChSlackSigningSecret("");
+    setChTelegramBotToken("");
   }, [selectedTenantId]);
 
   useEffect(() => {
@@ -1300,6 +1384,98 @@ function TenantsPage({
     }
   }
 
+  async function saveChannelBots() {
+    if (!selectedTenant) return;
+    const st = chSlackBotToken.trim();
+    const ss = chSlackSigningSecret.trim();
+    const tg = chTelegramBotToken.trim();
+    if (st && !ss) {
+      notify({ type: "error", text: "Provide both Slack bot token and signing secret." });
+      return;
+    }
+    if (!st && ss) {
+      notify({ type: "error", text: "Provide both Slack bot token and signing secret." });
+      return;
+    }
+    if (!st && !ss && !tg) {
+      notify({ type: "error", text: "Enter new credentials to save, or use Clear Slack / Clear Telegram." });
+      return;
+    }
+    setSavingChannelBots(true);
+    try {
+      const body: Record<string, unknown> = {};
+      if (st && ss) {
+        body.slackBotToken = st;
+        body.slackSigningSecret = ss;
+      }
+      if (tg) {
+        body.telegramBotToken = tg;
+      }
+      await apiRequest(`/api/admin/tenants/${selectedTenant.tenantId}/channel-bots`, {
+        method: "PATCH",
+        body
+      });
+      setChSlackBotToken("");
+      setChSlackSigningSecret("");
+      setChTelegramBotToken("");
+      notify({ type: "success", text: "Channel bot credentials saved." });
+      const [nextWizard, nextTenants] = await Promise.all([
+        apiRequest<WizardStateResponse>(`/api/admin/wizard/tenant/${selectedTenant.tenantId}/state`),
+        apiRequest<TenantRecord[]>("/api/admin/tenants")
+      ]);
+      setWizardState(nextWizard);
+      setTenants(nextTenants);
+    } catch (caught) {
+      notify({ type: "error", text: sectionError(caught) });
+    } finally {
+      setSavingChannelBots(false);
+    }
+  }
+
+  async function clearChannelSlack() {
+    if (!selectedTenant) return;
+    setSavingChannelBots(true);
+    try {
+      await apiRequest(`/api/admin/tenants/${selectedTenant.tenantId}/channel-bots`, {
+        method: "PATCH",
+        body: { clearSlack: true }
+      });
+      notify({ type: "success", text: "Slack app credentials cleared for this tenant." });
+      const [nextWizard, nextTenants] = await Promise.all([
+        apiRequest<WizardStateResponse>(`/api/admin/wizard/tenant/${selectedTenant.tenantId}/state`),
+        apiRequest<TenantRecord[]>("/api/admin/tenants")
+      ]);
+      setWizardState(nextWizard);
+      setTenants(nextTenants);
+    } catch (caught) {
+      notify({ type: "error", text: sectionError(caught) });
+    } finally {
+      setSavingChannelBots(false);
+    }
+  }
+
+  async function clearChannelTelegram() {
+    if (!selectedTenant) return;
+    setSavingChannelBots(true);
+    try {
+      await apiRequest(`/api/admin/tenants/${selectedTenant.tenantId}/channel-bots`, {
+        method: "PATCH",
+        body: { clearTelegram: true }
+      });
+      notify({ type: "success", text: "Telegram bot token cleared for this tenant." });
+      const [nextWizard, nextTenants] = await Promise.all([
+        apiRequest<WizardStateResponse>(`/api/admin/wizard/tenant/${selectedTenant.tenantId}/state`),
+        apiRequest<TenantRecord[]>("/api/admin/tenants")
+      ]);
+      setWizardState(nextWizard);
+      setTenants(nextTenants);
+    } catch (caught) {
+      notify({ type: "error", text: sectionError(caught) });
+    } finally {
+      setSavingChannelBots(false);
+    }
+  }
+
   async function saveLoginDomains() {
     if (!selectedTenant || !isSuperadmin) return;
     const lines = loginDomainsDraft
@@ -1514,12 +1690,88 @@ function TenantsPage({
                 <DetailItem label="Slack channels" value={String(wizardState?.slackChannelCount ?? 0)} />
                 <DetailItem label="Slack users" value={String(wizardState?.slackUserCount ?? 0)} />
                 <DetailItem label="Shared teams" value={String(wizardState?.slackSharedTeamCount ?? 0)} />
+                <DetailItem
+                  label="Per-tenant Slack app"
+                  value={wizardState?.hasSlackBotOverride ? "Configured" : "Not configured"}
+                />
+                <DetailItem
+                  label="Per-tenant Telegram bot"
+                  value={wizardState?.hasTelegramBotOverride ? "Configured" : "Not configured"}
+                />
                 <DetailItem label="Updated" value={formatDate(selectedTenant.updatedAt)} />
               </div>
             ) : (
               <div className="empty-state">Create or select a tenant to inspect operational state.</div>
             )}
           </AppShellCard>
+
+          {selectedTenant ? (
+            <AppShellCard
+              title="Per-tenant Slack / Telegram bots"
+              subtitle="Optional dedicated Slack app (token + signing secret) or Telegram bot token. Secrets are write-only."
+              action={
+                <div className="button-row">
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    disabled={savingChannelBots}
+                    onClick={() => void clearChannelSlack()}
+                  >
+                    Clear Slack
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    disabled={savingChannelBots}
+                    onClick={() => void clearChannelTelegram()}
+                  >
+                    Clear Telegram
+                  </button>
+                  <button type="button" disabled={savingChannelBots} onClick={() => void saveChannelBots()}>
+                    {savingChannelBots ? "Saving…" : "Save credentials"}
+                  </button>
+                </div>
+              }
+            >
+              {wizardState?.slackEventsPathSuffix ? (
+                <p className="muted">
+                  Slack Request URL path suffix: <code>{wizardState.slackEventsPathSuffix}</code>
+                </p>
+              ) : null}
+              <div className="form-grid">
+                <label>
+                  Slack bot token
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    value={chSlackBotToken}
+                    onChange={(event) => setChSlackBotToken(event.target.value)}
+                    placeholder="Paste to set or rotate"
+                  />
+                </label>
+                <label>
+                  Slack signing secret
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    value={chSlackSigningSecret}
+                    onChange={(event) => setChSlackSigningSecret(event.target.value)}
+                    placeholder="Paste to set or rotate"
+                  />
+                </label>
+                <label>
+                  Telegram bot token
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    value={chTelegramBotToken}
+                    onChange={(event) => setChTelegramBotToken(event.target.value)}
+                    placeholder="Paste to set or rotate"
+                  />
+                </label>
+              </div>
+            </AppShellCard>
+          ) : null}
 
           {isSuperadmin && selectedTenant ? (
             <AppShellCard
@@ -1708,7 +1960,7 @@ function SchedulesPage({
   const [selectedTenantId, setSelectedTenantId] = useState<string | null>(null);
   const [schedules, setSchedules] = useState<TenantScheduleRecord[]>([]);
   const [channelOptions, setChannelOptions] = useState<ScheduleChannelOptions | null>(null);
-  const [events, setEvents] = useState<BotEvent[]>([]);
+  const [events, setEvents] = useState<SchedulerBotEventRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [loadingOptions, setLoadingOptions] = useState(false);
@@ -1753,7 +2005,7 @@ function SchedulesPage({
       const [nextSchedules, options, logs] = await Promise.all([
         apiRequest<TenantScheduleRecord[]>(`/api/admin/tenants/${effectiveTenantId}/schedules`),
         apiRequest<ScheduleChannelOptions>(`/api/admin/tenants/${effectiveTenantId}/schedules/channel-options`),
-        apiRequest<BotEvent[]>(`/api/admin/scheduler/events?limit=40&tenantId=${effectiveTenantId}`)
+        apiRequest<SchedulerBotEventRecord[]>(`/api/admin/scheduler/events?limit=40&tenantId=${effectiveTenantId}`)
       ]);
       setSchedules(nextSchedules);
       setChannelOptions(options);
@@ -2243,140 +2495,15 @@ function ConversationsPage({
   );
 }
 
-function SlackBotPage({
+function TelegramRoutingPage({
   notify,
-  canControlBots = true
-}: {
-  notify: (value: NotificationState | null) => void;
-  canControlBots?: boolean;
-}): ReactElement {
-  const [status, setStatus] = useState<BotStatus | null>(null);
-  const [events, setEvents] = useState<BotEvent[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  const loadBotData = useCallback(async () => {
-    setLoading(true);
-    try {
-      const [nextStatus, nextEvents] = await Promise.all([
-        apiRequest<BotStatus>("/api/admin/bot/status"),
-        apiRequest<BotEvent[]>("/api/admin/bot/events?limit=40")
-      ]);
-      setStatus(nextStatus);
-      setEvents(nextEvents);
-    } catch (caught) {
-      notify({ type: "error", text: sectionError(caught) });
-    } finally {
-      setLoading(false);
-    }
-  }, [notify]);
-
-  useEffect(() => {
-    void loadBotData();
-  }, [loadBotData]);
-
-  async function invoke(action: "start" | "stop" | "restart") {
-    try {
-      const result = await apiRequest<BotStatus>(`/api/admin/bot/${action}`, {
-        method: "POST",
-        headers: {
-          Origin: window.location.origin
-        },
-        body: {}
-      });
-      setStatus(result);
-      notify({ type: "success", text: `Slack bot ${action} requested.` });
-      await loadBotData();
-    } catch (caught) {
-      notify({ type: "error", text: sectionError(caught) });
-    }
-  }
-
-  return (
-    <div className="page-grid">
-      <PageHeader
-        title="Slack bot"
-        subtitle="View embedded bot status, start/stop it, and inspect recent operational events."
-        actions={
-          <button className="secondary-button" onClick={() => void loadBotData()}>
-            Refresh
-          </button>
-        }
-      />
-      <div className="two-column">
-        <AppShellCard title="Bot status" subtitle="Current desired/actual runtime state and recent lifecycle timestamps">
-          {loading || !status ? (
-            <div className="muted">Loading…</div>
-          ) : (
-            <>
-              <div className="details-grid">
-                <DetailItem label="Bot name" value={status.botName} />
-                <DetailItem label="Desired state" value={status.desiredState} />
-                <DetailItem label="Actual state" value={status.actualState} />
-                <DetailItem label="Port" value={String(status.port ?? "—")} />
-                <DetailItem label="Last started" value={formatDate(status.lastStartedAt)} />
-                <DetailItem label="Last stopped" value={formatDate(status.lastStoppedAt)} />
-                <DetailItem label="Last error" value={formatDate(status.lastErrorAt)} />
-                <DetailItem label="Error message" value={status.lastErrorMessage ?? "—"} multiline />
-              </div>
-              {canControlBots ? (
-                <div className="button-row">
-                  <button onClick={() => void invoke("start")}>Start</button>
-                  <button className="secondary-button" onClick={() => void invoke("restart")}>
-                    Restart
-                  </button>
-                  <button className="danger-button" onClick={() => void invoke("stop")}>
-                    Stop
-                  </button>
-                </div>
-              ) : (
-                <p className="muted">Bot start/stop is limited to superadmin accounts.</p>
-              )}
-            </>
-          )}
-        </AppShellCard>
-
-        <AppShellCard title="Recent bot events" subtitle="Lifecycle and processing events emitted by the embedded supervisor">
-          {loading ? (
-            <div className="muted">Loading…</div>
-          ) : events.length === 0 ? (
-            <div className="empty-state">No events recorded yet.</div>
-          ) : (
-            <div className="stack">
-              {events.map((event) => (
-                <div key={event.id} className="turn-card">
-                  <div className="turn-header">
-                    <div>
-                      <strong>{event.message}</strong>
-                      <div className="muted">
-                        {event.eventType} · {formatDate(event.createdAt)}
-                      </div>
-                    </div>
-                    <StatusBadge label={event.level} tone={event.level === "error" ? "error" : event.level === "warn" ? "warning" : "success"} />
-                  </div>
-                  {event.metadata ? <JsonBlock value={event.metadata} /> : null}
-                </div>
-              ))}
-            </div>
-          )}
-        </AppShellCard>
-      </div>
-    </div>
-  );
-}
-
-function TelegramBotPage({
-  notify,
-  canControlBots = true,
   scopedTenantId
 }: {
   notify: (value: NotificationState | null) => void;
-  canControlBots?: boolean;
   scopedTenantId?: string;
 }): ReactElement {
   const [mappings, setMappings] = useState<TelegramMapping[]>([]);
   const [tenants, setTenants] = useState<TenantRecord[]>([]);
-  const [botStatus, setBotStatus] = useState<BotStatus | null>(null);
-  const [botEvents, setBotEvents] = useState<BotEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [chatId, setChatId] = useState("");
   const [tenantId, setTenantId] = useState("");
@@ -2384,16 +2511,12 @@ function TelegramBotPage({
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [nextMappings, nextTenants, nextStatus, nextEvents] = await Promise.all([
+      const [nextMappings, nextTenants] = await Promise.all([
         apiRequest<TelegramMapping[]>("/api/admin/telegram-mappings"),
-        apiRequest<TenantRecord[]>("/api/admin/tenants"),
-        apiRequest<BotStatus>("/api/admin/telegram-bot/status"),
-        apiRequest<BotEvent[]>("/api/admin/telegram-bot/events?limit=40")
+        apiRequest<TenantRecord[]>("/api/admin/tenants")
       ]);
       setMappings(nextMappings);
       setTenants(nextTenants);
-      setBotStatus(nextStatus);
-      setBotEvents(nextEvents);
     } catch (caught) {
       notify({ type: "error", text: sectionError(caught) });
     } finally {
@@ -2410,23 +2533,6 @@ function TelegramBotPage({
       setTenantId(scopedTenantId);
     }
   }, [scopedTenantId]);
-
-  async function invokeBot(action: "start" | "stop" | "restart") {
-    try {
-      const result = await apiRequest<BotStatus>(`/api/admin/telegram-bot/${action}`, {
-        method: "POST",
-        headers: {
-          Origin: window.location.origin
-        },
-        body: {}
-      });
-      setBotStatus(result);
-      notify({ type: "success", text: `Telegram bot ${action} requested.` });
-      await loadData();
-    } catch (caught) {
-      notify({ type: "error", text: sectionError(caught) });
-    }
-  }
 
   async function addMapping() {
     if (!chatId || !tenantId) return;
@@ -2465,71 +2571,14 @@ function TelegramBotPage({
   return (
     <div className="page-grid">
       <PageHeader
-        title="Telegram bot"
-        subtitle="Control the Telegram bot lifecycle, manage chat-to-tenant routing, and inspect operational events."
+        title="Telegram routing"
+        subtitle="Map Telegram chat IDs to tenants. Run the Telegram worker with Docker Compose; avoid starting a second bot process elsewhere."
         actions={
           <button className="secondary-button" onClick={() => void loadData()}>
             Refresh
           </button>
         }
       />
-      <div className="two-column">
-        <AppShellCard title="Bot status" subtitle="Current desired/actual runtime state and recent lifecycle timestamps">
-          {loading || !botStatus ? (
-            <div className="muted">Loading…</div>
-          ) : (
-            <>
-              <div className="details-grid">
-                <DetailItem label="Bot name" value={botStatus.botName} />
-                <DetailItem label="Desired state" value={botStatus.desiredState} />
-                <DetailItem label="Actual state" value={botStatus.actualState} />
-                <DetailItem label="Last started" value={formatDate(botStatus.lastStartedAt)} />
-                <DetailItem label="Last stopped" value={formatDate(botStatus.lastStoppedAt)} />
-                <DetailItem label="Last error" value={formatDate(botStatus.lastErrorAt)} />
-                <DetailItem label="Error message" value={botStatus.lastErrorMessage ?? "—"} multiline />
-              </div>
-              {canControlBots ? (
-                <div className="button-row">
-                  <button onClick={() => void invokeBot("start")}>Start</button>
-                  <button className="secondary-button" onClick={() => void invokeBot("restart")}>
-                    Restart
-                  </button>
-                  <button className="danger-button" onClick={() => void invokeBot("stop")}>
-                    Stop
-                  </button>
-                </div>
-              ) : (
-                <p className="muted">Bot start/stop is limited to superadmin accounts.</p>
-              )}
-            </>
-          )}
-        </AppShellCard>
-
-        <AppShellCard title="Recent bot events" subtitle="Lifecycle and processing events emitted by the Telegram bot supervisor">
-          {loading ? (
-            <div className="muted">Loading…</div>
-          ) : botEvents.length === 0 ? (
-            <div className="empty-state">No events recorded yet.</div>
-          ) : (
-            <div className="stack">
-              {botEvents.map((event) => (
-                <div key={event.id} className="turn-card">
-                  <div className="turn-header">
-                    <div>
-                      <strong>{event.message}</strong>
-                      <div className="muted">
-                        {event.eventType} · {formatDate(event.createdAt)}
-                      </div>
-                    </div>
-                    <StatusBadge label={event.level} tone={event.level === "error" ? "error" : event.level === "warn" ? "warning" : "success"} />
-                  </div>
-                  {event.metadata ? <JsonBlock value={event.metadata} /> : null}
-                </div>
-              ))}
-            </div>
-          )}
-        </AppShellCard>
-      </div>
       <div className="two-column">
         <AppShellCard title="Chat-to-tenant mappings" subtitle="Route Telegram chats to specific tenants">
           <div className="filters-row">
@@ -2571,7 +2620,7 @@ function TelegramBotPage({
           )}
         </AppShellCard>
 
-        <AppShellCard title="Configuration reference" subtitle="Environment variables required for the Telegram bot">
+        <AppShellCard title="Configuration reference" subtitle="Set these on the Telegram Compose service (or host) for the worker process">
           <div className="details-grid">
             <DetailItem label="TELEGRAM_BOT_TOKEN" value="Bot token from @BotFather (required)" />
             <DetailItem label="TELEGRAM_DEFAULT_TENANT_ID" value="Fallback tenant for unmapped chats (optional)" />
@@ -2654,7 +2703,7 @@ function SettingsPage({ notify }: { notify: (value: NotificationState | null) =>
 
   return (
     <div className="page-grid">
-      <PageHeader title="Settings" subtitle="Slack routing defaults, guardrails, and global mapping management." />
+      <PageHeader title="Settings" subtitle="Slack routing defaults, guardrails, and mapping management. Run the Slack Events worker via Docker Compose." />
       <div className="two-column">
         <AppShellCard title="Guardrails" subtitle="Owner defaults, strict routing, and workspace fallback map">
           {!guardrails ? (

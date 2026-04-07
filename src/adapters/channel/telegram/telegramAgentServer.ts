@@ -8,7 +8,8 @@ import type { AdminBotEvent } from "../../../core/types.js";
 export interface TelegramAgentServerOptions {
   runtime: AnalyticsAgentRuntime;
   store: ConversationStore;
-  botToken: string;
+  /** Global bot (optional if per-tenant tokens exist in the store). */
+  botToken?: string;
   defaultTenantId?: string;
   defaultProfileName?: string;
   llmModel?: string;
@@ -119,14 +120,13 @@ function buildConversationId(chatId: number, topicId: number | undefined): strin
   return `telegram_${chatId}${topic}`;
 }
 
-export async function startTelegramAgentServer(
-  options: TelegramAgentServerOptions
-): Promise<TelegramAgentServerController> {
-  if (!options.botToken) {
-    throw new Error("TELEGRAM_BOT_TOKEN is required.");
-  }
-
-  const bot = new Bot(options.botToken);
+async function launchOneTelegramBot(
+  token: string,
+  options: TelegramAgentServerOptions,
+  forcedTenantId: string | undefined,
+  label: string
+): Promise<() => Promise<void>> {
+  const bot = new Bot(token);
   const processedUpdateIds = new Set<number>();
   const MAX_PROCESSED_CACHE = 5000;
 
@@ -200,6 +200,7 @@ export async function startTelegramAgentServer(
     );
 
     const tenantId =
+      forcedTenantId ??
       options.store.getTelegramChatTenant(chatIdStr) ??
       options.defaultTenantId ??
       "";
@@ -301,19 +302,58 @@ export async function startTelegramAgentServer(
   bot.start({
     onStart: () => {
       void emitEvent("bot.started", "info", "Telegram agent bot started.", {
-        username: botUsername
+        username: botUsername,
+        label,
+        forcedTenantId: forcedTenantId ?? null
       });
       process.stdout.write(
-        `Telegram agent bot started as @${botUsername} (long polling)\n`
+        `Telegram agent bot started (${label}) as @${botUsername ?? "unknown"} (long polling)\n`
       );
     }
   });
 
+  return async () => {
+    await emitEvent("bot.stopping", "info", "Stopping Telegram agent bot.", { label });
+    await bot.stop();
+    await emitEvent("bot.stopped", "info", "Telegram agent bot stopped.", { label });
+  };
+}
+
+export async function startTelegramAgentServer(
+  options: TelegramAgentServerOptions
+): Promise<TelegramAgentServerController> {
+  const globalToken = options.botToken?.trim() ?? "";
+  const overrides = options.store.listTenantTelegramBotOverrides();
+  if (!globalToken && overrides.length === 0) {
+    throw new Error(
+      "TELEGRAM_BOT_TOKEN is not set and no per-tenant Telegram bots are configured. Set the env var or add a tenant bot token in the admin UI."
+    );
+  }
+
+  const stoppers: Array<() => Promise<void>> = [];
+  const usedTokens = new Set<string>();
+
+  const launch = async (token: string, forcedTenantId: string | undefined, label: string) => {
+    if (usedTokens.has(token)) {
+      return;
+    }
+    usedTokens.add(token);
+    const stop = await launchOneTelegramBot(token, options, forcedTenantId, label);
+    stoppers.push(stop);
+  };
+
+  if (globalToken) {
+    await launch(globalToken, undefined, "global");
+  }
+  for (const row of overrides) {
+    await launch(row.telegramBotToken, row.tenantId, `tenant:${row.tenantId}`);
+  }
+
   return {
     async stop() {
-      await emitEvent("bot.stopping", "info", "Stopping Telegram agent bot.");
-      await bot.stop();
-      await emitEvent("bot.stopped", "info", "Telegram agent bot stopped.");
+      for (let i = stoppers.length - 1; i >= 0; i--) {
+        await stoppers[i]();
+      }
     }
   };
 }

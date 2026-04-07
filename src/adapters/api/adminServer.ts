@@ -4,7 +4,6 @@ import path from "node:path";
 import express, { NextFunction, Request, Response } from "express";
 import { fileURLToPath } from "node:url";
 import { OAuth2Client } from "google-auth-library";
-import { buildRuntime } from "../../app.js";
 import type { ConversationStore } from "../../core/interfaces.js";
 import {
   parseSuperadminEmailDomains,
@@ -12,7 +11,6 @@ import {
   resolveGoogleLoginAccess
 } from "../../config/adminAuthPolicy.js";
 import { env } from "../../config/env.js";
-import { SqliteConversationStore } from "../store/sqliteConversationStore.js";
 import type { AdminRequestAuth } from "./admin/adminAccess.js";
 import {
   createOAuthStateToken,
@@ -26,9 +24,9 @@ import {
   verifySignedSessionCookie
 } from "./admin/adminAuth.js";
 import { createAdminApiRouter } from "./admin/adminApiRouter.js";
-import { SlackBotSupervisor } from "./admin/slackBotSupervisor.js";
-import { TelegramBotSupervisor } from "./admin/telegramBotSupervisor.js";
+import { buildRuntime } from "../../app.js";
 import { SchedulerService } from "../../core/schedulerService.js";
+import type { SqliteConversationStore } from "../store/sqliteConversationStore.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const adminSessionCookieName = "agent_blue_admin_session";
@@ -288,14 +286,6 @@ export function startAdminServer(options: AdminServerOptions): void {
   const googleLoginEnabled = isGoogleOAuthConfigured();
   const loginEnabled = passwordLoginEnabled || googleLoginEnabled;
   const authMiddleware = requireAdminAuth(store);
-  const slackBotSupervisor = new SlackBotSupervisor({
-    store,
-    createRuntime: () => buildRuntime(store as SqliteConversationStore)
-  });
-  const telegramBotSupervisor = new TelegramBotSupervisor({
-    store,
-    createRuntime: () => buildRuntime(store as SqliteConversationStore)
-  });
   const schedulerService = new SchedulerService({
     store,
     createRuntime: () => buildRuntime(store as SqliteConversationStore),
@@ -544,7 +534,7 @@ export function startAdminServer(options: AdminServerOptions): void {
   app.use(
     "/api/admin",
     authMiddleware,
-    createAdminApiRouter({ store, appDataDir, slackBotSupervisor, telegramBotSupervisor, schedulerService })
+    createAdminApiRouter({ store, appDataDir, schedulerService })
   );
 
   const { staticDir, indexFile } = resolveAdminUiPaths();

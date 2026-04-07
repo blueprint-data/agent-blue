@@ -17,8 +17,6 @@ import { initializeTenant } from "../../../bootstrap/initTenant.js";
 import { buildWarehouseFromTenantConfig } from "../../../app.js";
 import { GitDbtRepositoryService } from "../../dbt/dbtRepoService.js";
 import { env } from "../../../config/env.js";
-import type { SlackBotSupervisor } from "./slackBotSupervisor.js";
-import type { TelegramBotSupervisor } from "./telegramBotSupervisor.js";
 import type { AdminRequestAuth } from "./adminAccess.js";
 import { adminAuthFromRequest, denyUnlessSuperadmin, denyUnlessTenantAccess } from "./adminApiAuth.js";
 
@@ -30,16 +28,25 @@ function param(req: Request, name: string): string {
 export interface AdminApiRouterOptions {
   store: ConversationStore;
   appDataDir: string;
-  slackBotSupervisor?: SlackBotSupervisor;
-  telegramBotSupervisor?: TelegramBotSupervisor;
   schedulerService?: SchedulerService;
 }
 
 export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
-  const { store, appDataDir, slackBotSupervisor, telegramBotSupervisor, schedulerService } = options;
+  const { store, appDataDir, schedulerService } = options;
   const router = Router();
   const dbtRepo = new GitDbtRepositoryService(store);
   const maxTenantMemoryChars = 300;
+
+  function channelBotPublicFlags(tenantId: string): {
+    hasSlackBotOverride: boolean;
+    hasTelegramBotOverride: boolean;
+  } {
+    const s = store.getTenantChannelBotSecrets(tenantId);
+    return {
+      hasSlackBotOverride: Boolean(s?.slackBotToken && s.slackSigningSecret),
+      hasTelegramBotOverride: Boolean(s?.telegramBotToken && s.telegramBotToken.trim().length > 0)
+    };
+  }
 
   function filterSlackMappingsForAuth(auth: AdminRequestAuth) {
     const full = {
@@ -74,10 +81,14 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
           return;
         }
         const all = store.listTenants();
-        res.json(all.filter((t) => t.tenantId === tid));
+        res.json(
+          all
+            .filter((t) => t.tenantId === tid)
+            .map((t) => ({ ...t, ...channelBotPublicFlags(t.tenantId) }))
+        );
         return;
       }
-      res.json(store.listTenants());
+      res.json(store.listTenants().map((t) => ({ ...t, ...channelBotPublicFlags(t.tenantId) })));
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }
@@ -95,7 +106,8 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
         return;
       }
       const tenant = store.listTenants().find((entry) => entry.tenantId === tenantId);
-      res.json(tenant ?? repo);
+      const base = tenant ?? repo;
+      res.json({ ...base, ...channelBotPublicFlags(tenantId) });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }
@@ -151,7 +163,71 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
         deployKeyPath: deployKeyPath ?? repo.deployKeyPath,
         localPath: repo.localPath
       });
-      res.json(store.getTenantRepo(tenantId));
+      const updated = store.getTenantRepo(tenantId);
+      res.json(updated ? { ...updated, ...channelBotPublicFlags(tenantId) } : null);
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.patch("/tenants/:tenantId/channel-bots", (req: Request, res: Response) => {
+    try {
+      const tenantId = param(req, "tenantId");
+      if (denyUnlessTenantAccess(req, res, tenantId)) {
+        return;
+      }
+      if (!store.getTenantRepo(tenantId)) {
+        res.status(404).json({ error: "Tenant not found" });
+        return;
+      }
+      const body = req.body as {
+        slackBotToken?: string;
+        slackSigningSecret?: string;
+        telegramBotToken?: string;
+        clearSlack?: boolean;
+        clearTelegram?: boolean;
+      };
+      const prev = store.getTenantChannelBotSecrets(tenantId);
+      let slackBotToken = prev?.slackBotToken ?? null;
+      let slackSigningSecret = prev?.slackSigningSecret ?? null;
+      let telegramBotToken = prev?.telegramBotToken ?? null;
+
+      if (body.clearSlack) {
+        slackBotToken = null;
+        slackSigningSecret = null;
+      }
+      if (body.clearTelegram) {
+        telegramBotToken = null;
+      }
+
+      const slackTokUpd = body.slackBotToken !== undefined;
+      const slackSecUpd = body.slackSigningSecret !== undefined;
+      if (!body.clearSlack && (slackTokUpd || slackSecUpd)) {
+        const t = slackTokUpd ? String(body.slackBotToken).trim() : (slackBotToken ?? "");
+        const s = slackSecUpd ? String(body.slackSigningSecret).trim() : (slackSigningSecret ?? "");
+        if (t.length > 0 !== (s.length > 0)) {
+          res.status(400).json({
+            error:
+              "When updating Slack credentials, provide both slackBotToken and slackSigningSecret (non-empty), or clear with clearSlack."
+          });
+          return;
+        }
+        slackBotToken = t.length > 0 ? t : null;
+        slackSigningSecret = s.length > 0 ? s : null;
+      }
+
+      if (body.telegramBotToken !== undefined) {
+        const trimmed = String(body.telegramBotToken).trim();
+        telegramBotToken = trimmed.length > 0 ? trimmed : null;
+      }
+
+      store.upsertTenantChannelBotSecrets({
+        tenantId,
+        slackBotToken,
+        slackSigningSecret,
+        telegramBotToken
+      });
+      res.json({ ok: true, ...channelBotPublicFlags(tenantId) });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }
@@ -1060,77 +1136,6 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
     }
   });
 
-  router.get("/telegram-bot/status", (_req: Request, res: Response) => {
-    try {
-      if (!telegramBotSupervisor) {
-        res.status(503).json({ error: "Telegram bot supervisor unavailable" });
-        return;
-      }
-      res.json(telegramBotSupervisor.getStatus());
-    } catch (error) {
-      res.status(500).json({ error: (error as Error).message });
-    }
-  });
-
-  router.get("/telegram-bot/events", (req: Request, res: Response) => {
-    try {
-      if (!telegramBotSupervisor) {
-        res.status(503).json({ error: "Telegram bot supervisor unavailable" });
-        return;
-      }
-      const limitRaw = typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : 100;
-      const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 500) : 100;
-      res.json(telegramBotSupervisor.listEvents(limit));
-    } catch (error) {
-      res.status(500).json({ error: (error as Error).message });
-    }
-  });
-
-  router.post("/telegram-bot/start", async (req: Request, res: Response) => {
-    try {
-      if (denyUnlessSuperadmin(req, res)) {
-        return;
-      }
-      if (!telegramBotSupervisor) {
-        res.status(503).json({ error: "Telegram bot supervisor unavailable" });
-        return;
-      }
-      res.json(await telegramBotSupervisor.start());
-    } catch (error) {
-      res.status(500).json({ error: (error as Error).message });
-    }
-  });
-
-  router.post("/telegram-bot/stop", async (req: Request, res: Response) => {
-    try {
-      if (denyUnlessSuperadmin(req, res)) {
-        return;
-      }
-      if (!telegramBotSupervisor) {
-        res.status(503).json({ error: "Telegram bot supervisor unavailable" });
-        return;
-      }
-      res.json(await telegramBotSupervisor.stop());
-    } catch (error) {
-      res.status(500).json({ error: (error as Error).message });
-    }
-  });
-
-  router.post("/telegram-bot/restart", async (req: Request, res: Response) => {
-    try {
-      if (denyUnlessSuperadmin(req, res)) {
-        return;
-      }
-      if (!telegramBotSupervisor) {
-        res.status(503).json({ error: "Telegram bot supervisor unavailable" });
-        return;
-      }
-      res.json(await telegramBotSupervisor.restart());
-    } catch (error) {
-      res.status(500).json({ error: (error as Error).message });
-    }
-  });
-
   router.get("/conversations", (req: Request, res: Response) => {
     try {
       const auth = adminAuthFromRequest(req);
@@ -1182,80 +1187,6 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
         return;
       }
       res.json(turn);
-    } catch (error) {
-      res.status(500).json({ error: (error as Error).message });
-    }
-  });
-
-  router.get("/bot/status", (_req: Request, res: Response) => {
-    try {
-      if (!slackBotSupervisor) {
-        res.status(503).json({ error: "Slack bot supervisor unavailable" });
-        return;
-      }
-      res.json(slackBotSupervisor.getStatus());
-    } catch (error) {
-      res.status(500).json({ error: (error as Error).message });
-    }
-  });
-
-  router.get("/bot/events", (req: Request, res: Response) => {
-    try {
-      if (!slackBotSupervisor) {
-        res.status(503).json({ error: "Slack bot supervisor unavailable" });
-        return;
-      }
-      const limitRaw = typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : 100;
-      const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 500) : 100;
-      res.json(slackBotSupervisor.listEvents(limit));
-    } catch (error) {
-      res.status(500).json({ error: (error as Error).message });
-    }
-  });
-
-  router.post("/bot/start", async (req: Request, res: Response) => {
-    try {
-      if (denyUnlessSuperadmin(req, res)) {
-        return;
-      }
-      if (!slackBotSupervisor) {
-        res.status(503).json({ error: "Slack bot supervisor unavailable" });
-        return;
-      }
-      const port = typeof req.body?.port === "number" ? req.body.port : undefined;
-      const status = await slackBotSupervisor.start(port);
-      res.json(status);
-    } catch (error) {
-      res.status(500).json({ error: (error as Error).message });
-    }
-  });
-
-  router.post("/bot/stop", async (req: Request, res: Response) => {
-    try {
-      if (denyUnlessSuperadmin(req, res)) {
-        return;
-      }
-      if (!slackBotSupervisor) {
-        res.status(503).json({ error: "Slack bot supervisor unavailable" });
-        return;
-      }
-      res.json(await slackBotSupervisor.stop());
-    } catch (error) {
-      res.status(500).json({ error: (error as Error).message });
-    }
-  });
-
-  router.post("/bot/restart", async (req: Request, res: Response) => {
-    try {
-      if (denyUnlessSuperadmin(req, res)) {
-        return;
-      }
-      if (!slackBotSupervisor) {
-        res.status(503).json({ error: "Slack bot supervisor unavailable" });
-        return;
-      }
-      const port = typeof req.body?.port === "number" ? req.body.port : undefined;
-      res.json(await slackBotSupervisor.restart(port));
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }
@@ -1339,6 +1270,7 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
       const channels = store.listSlackChannelMappings().filter((entry) => entry.tenantId === tenantId);
       const users = store.listSlackUserMappings().filter((entry) => entry.tenantId === tenantId);
       const sharedTeams = store.listSlackSharedTeamMappings().filter((entry) => entry.tenantId === tenantId);
+      const botFlags = channelBotPublicFlags(tenantId);
       res.json({
         tenantId,
         hasRepo: true,
@@ -1346,7 +1278,10 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
         warehouseProvider: warehouseConfig?.provider,
         slackChannelCount: channels.length,
         slackUserCount: users.length,
-        slackSharedTeamCount: sharedTeams.length
+        slackSharedTeamCount: sharedTeams.length,
+        hasSlackBotOverride: botFlags.hasSlackBotOverride,
+        hasTelegramBotOverride: botFlags.hasTelegramBotOverride,
+        slackEventsPathSuffix: `/slack/events/tenants/${encodeURIComponent(tenantId)}`
       });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });

@@ -1,4 +1,11 @@
-import { App } from "@slack/bolt";
+import { WebClient } from "@slack/web-api";
+import express from "express";
+import { createRequire } from "node:module";
+import { createServer } from "node:http";
+
+/** @slack/bolt ships as CJS; Node ESM named imports omit some exports (e.g. ExpressReceiver). */
+const requireBolt = createRequire(import.meta.url);
+const { App, ExpressReceiver, verifySlackRequest } = requireBolt("@slack/bolt") as typeof import("@slack/bolt");
 import { ChartJSNodeCanvas } from "chartjs-node-canvas";
 import type { ChartConfiguration } from "chart.js";
 import { AnalyticsAgentRuntime } from "../../../core/agentRuntime.js";
@@ -9,8 +16,9 @@ import type { AdminBotEvent } from "../../../core/types.js";
 export interface SlackAgentServerOptions {
   runtime: AnalyticsAgentRuntime;
   store: ConversationStore;
-  botToken: string;
-  signingSecret: string;
+  /** Global Slack app for POST /slack/events (optional if only per-tenant apps are used). */
+  botToken?: string;
+  signingSecret?: string;
   port: number;
   defaultTenantId?: string;
   defaultProfileName?: string;
@@ -270,17 +278,18 @@ export function parseSlackTeamTenantMap(raw: string): Record<string, string> {
 }
 
 export async function startSlackAgentServer(options: SlackAgentServerOptions): Promise<SlackAgentServerController> {
-  if (!options.botToken) {
-    throw new Error("SLACK_BOT_TOKEN is required.");
-  }
-  if (!options.signingSecret) {
-    throw new Error("SLACK_SIGNING_SECRET is required.");
+  const globalToken = options.botToken?.trim() ?? "";
+  const globalSecret = options.signingSecret?.trim() ?? "";
+  const hasGlobalApp = globalToken.length > 0 && globalSecret.length > 0;
+  const partialGlobal =
+    (globalToken.length > 0 && globalSecret.length === 0) ||
+    (globalToken.length === 0 && globalSecret.length > 0);
+  if (partialGlobal) {
+    throw new Error(
+      "Set both SLACK_BOT_TOKEN and SLACK_SIGNING_SECRET for the global Slack app, or omit both to use only per-tenant Slack apps."
+    );
   }
 
-  const app = new App({
-    token: options.botToken,
-    signingSecret: options.signingSecret
-  });
   const emitEvent = async (
     eventType: string,
     level: AdminBotEvent["level"],
@@ -351,7 +360,8 @@ export async function startSlackAgentServer(options: SlackAgentServerOptions): P
     currentTs: string;
     includeThreadContext: boolean;
     isDm: boolean;
-    client: App["client"];
+    client: WebClient;
+    forcedTenantId?: string;
   }): Promise<void> => {
     const processingReaction = "hourglass_flowing_sand";
     let reactionAdded = false;
@@ -370,20 +380,22 @@ export async function startSlackAgentServer(options: SlackAgentServerOptions): P
       }
     }
 
-    const resolution = resolveTenantForSlackMessage({
-      store: options.store,
-      channelId: input.channel,
-      userId: input.userId,
-      teamId: input.teamId,
-      enterpriseId: getEnterpriseId(input.body),
-      sharedTeamIds,
-      isDm: input.isDm,
-      defaultTenantId: options.defaultTenantId,
-      teamTenantMap: options.teamTenantMap ?? {},
-      ownerTeamIds: options.ownerTeamIds ?? [],
-      ownerEnterpriseIds: options.ownerEnterpriseIds ?? [],
-      strictTenantRouting: options.strictTenantRouting ?? false
-    });
+    const resolution = input.forcedTenantId
+      ? { tenantId: input.forcedTenantId, rule: "tenant_app_url" as const }
+      : resolveTenantForSlackMessage({
+          store: options.store,
+          channelId: input.channel,
+          userId: input.userId,
+          teamId: input.teamId,
+          enterpriseId: getEnterpriseId(input.body),
+          sharedTeamIds,
+          isDm: input.isDm,
+          defaultTenantId: options.defaultTenantId,
+          teamTenantMap: options.teamTenantMap ?? {},
+          ownerTeamIds: options.ownerTeamIds ?? [],
+          ownerEnterpriseIds: options.ownerEnterpriseIds ?? [],
+          strictTenantRouting: options.strictTenantRouting ?? false
+        });
 
     if (resolution.rule === "unmapped" || !resolution.tenantId) {
       await emitEvent("routing.unmapped", "warn", "Slack message rejected due to missing tenant mapping.", {
@@ -428,6 +440,7 @@ export async function startSlackAgentServer(options: SlackAgentServerOptions): P
     }
 
     if (
+      resolution.rule !== "tenant_app_url" &&
       (resolution.rule === "team" || resolution.rule === "owner_default") &&
       options.strictTenantRouting === false
     ) {
@@ -585,97 +598,224 @@ export async function startSlackAgentServer(options: SlackAgentServerOptions): P
     }
   };
 
-  app.event("app_mention", async ({ event, body, client }) => {
-    const slackEvent = event as unknown as Record<string, unknown>;
-    const channel = slackEvent["channel"];
-    const ts = slackEvent["ts"];
-    const threadTs = slackEvent["thread_ts"];
-    const text = slackEvent["text"];
-    if (typeof channel !== "string" || typeof ts !== "string" || typeof text !== "string") {
+  const dispatchFromBody = (body: unknown, client: WebClient, forcedTenantId?: string): void => {
+    const envelope = body as Record<string, unknown>;
+    if (envelope.type !== "event_callback") {
       return;
     }
-    const teamId = getTeamId(body, slackEvent);
-    const userId = getUserId(slackEvent);
-    if (
-      shouldSkipDuplicateMessage({
+    const eventRaw = envelope["event"];
+    if (!eventRaw || typeof eventRaw !== "object" || Array.isArray(eventRaw)) {
+      return;
+    }
+    const slackEvent = eventRaw as Record<string, unknown>;
+    const eventType = slackEvent["type"];
+
+    if (eventType === "app_mention") {
+      const channel = slackEvent["channel"];
+      const ts = slackEvent["ts"];
+      const threadTs = slackEvent["thread_ts"];
+      const text = slackEvent["text"];
+      if (typeof channel !== "string" || typeof ts !== "string" || typeof text !== "string") {
+        return;
+      }
+      const teamId = getTeamId(body, slackEvent);
+      const userId = getUserId(slackEvent);
+      if (
+        shouldSkipDuplicateMessage({
+          body,
+          fallbackEventType: "app_mention",
+          teamId,
+          channelId: channel,
+          userId,
+          messageTs: ts
+        })
+      ) {
+        return;
+      }
+      void processMessage({
         body,
-        fallbackEventType: "app_mention",
         teamId,
-        channelId: channel,
         userId,
-        messageTs: ts
-      })
-    ) {
+        channel,
+        threadTs: typeof threadTs === "string" ? threadTs : ts,
+        text: parseMessageText(text),
+        currentTs: ts,
+        includeThreadContext: typeof threadTs === "string" && threadTs.length > 0,
+        isDm: false,
+        client,
+        forcedTenantId
+      });
       return;
     }
 
-    void processMessage({
-      body,
-      teamId,
-      userId,
-      channel,
-      threadTs: typeof threadTs === "string" ? threadTs : ts,
-      text: parseMessageText(text),
-      currentTs: ts,
-      includeThreadContext: typeof threadTs === "string" && threadTs.length > 0,
-      isDm: false,
-      client
-    });
-  });
-
-  app.message(async ({ message, body, client }) => {
-    const slackMessage = message as unknown as Record<string, unknown>;
-    if (typeof slackMessage["subtype"] === "string" || typeof slackMessage["bot_id"] === "string") {
-      return;
-    }
-    if (slackMessage["channel_type"] !== "im") {
-      return;
-    }
-
-    const channel = slackMessage["channel"];
-    const ts = slackMessage["ts"];
-    const threadTs = slackMessage["thread_ts"];
-    const text = slackMessage["text"];
-    if (typeof channel !== "string" || typeof ts !== "string" || typeof text !== "string") {
-      return;
-    }
-    const teamId = getTeamId(body, slackMessage);
-    const userId = getUserId(slackMessage);
-    if (
-      shouldSkipDuplicateMessage({
+    if (eventType === "message") {
+      if (typeof slackEvent["subtype"] === "string" || typeof slackEvent["bot_id"] === "string") {
+        return;
+      }
+      if (slackEvent["channel_type"] !== "im") {
+        return;
+      }
+      const channel = slackEvent["channel"];
+      const ts = slackEvent["ts"];
+      const threadTs = slackEvent["thread_ts"];
+      const text = slackEvent["text"];
+      if (typeof channel !== "string" || typeof ts !== "string" || typeof text !== "string") {
+        return;
+      }
+      const teamId = getTeamId(body, slackEvent);
+      const userId = getUserId(slackEvent);
+      if (
+        shouldSkipDuplicateMessage({
+          body,
+          fallbackEventType: "message",
+          teamId,
+          channelId: channel,
+          userId,
+          messageTs: ts
+        })
+      ) {
+        return;
+      }
+      void processMessage({
         body,
-        fallbackEventType: "message",
         teamId,
-        channelId: channel,
         userId,
-        messageTs: ts
-      })
-    ) {
-      return;
+        channel,
+        threadTs: typeof threadTs === "string" ? threadTs : ts,
+        text: text.trim(),
+        currentTs: ts,
+        includeThreadContext: false,
+        isDm: true,
+        client,
+        forcedTenantId
+      });
     }
+  };
 
-    void processMessage({
-      body,
-      teamId,
-      userId,
-      channel,
-      threadTs: typeof threadTs === "string" ? threadTs : ts,
-      text: text.trim(),
-      currentTs: ts,
-      includeThreadContext: false,
-      isDm: true,
-      client
+  const expressApp = express();
+  expressApp.post(
+    "/slack/events/tenants/:tenantId",
+    express.raw({ type: "application/json" }),
+    (req, res) => {
+      const tenantIdRaw = req.params.tenantId;
+      const tenantId = typeof tenantIdRaw === "string" ? tenantIdRaw : "";
+      if (!tenantId) {
+        res.status(404).send();
+        return;
+      }
+      const buf = req.body;
+      if (!Buffer.isBuffer(buf)) {
+        res.status(400).send();
+        return;
+      }
+      const raw = buf.toString("utf8");
+      const secretsRow = options.store.getTenantChannelBotSecrets(tenantId);
+      if (!secretsRow?.slackBotToken || !secretsRow.slackSigningSecret) {
+        res.status(404).send();
+        return;
+      }
+      const sig = req.get("x-slack-signature");
+      const tsHeader = req.get("x-slack-request-timestamp");
+      if (!sig || !tsHeader) {
+        res.status(401).send();
+        return;
+      }
+      try {
+        verifySlackRequest({
+          signingSecret: secretsRow.slackSigningSecret,
+          body: raw,
+          headers: {
+            "x-slack-signature": sig,
+            "x-slack-request-timestamp": Number(tsHeader)
+          }
+        });
+      } catch {
+        res.status(401).send();
+        return;
+      }
+
+      type SlackEnvelope = { type?: string; challenge?: string; ssl_check?: unknown };
+      let payload: SlackEnvelope;
+      try {
+        payload = JSON.parse(raw) as SlackEnvelope;
+      } catch {
+        res.status(400).send();
+        return;
+      }
+
+      if (payload.ssl_check) {
+        res.send();
+        return;
+      }
+      if (payload.type === "url_verification" && typeof payload.challenge === "string") {
+        res.json({ challenge: payload.challenge });
+        return;
+      }
+      if (payload.type === "event_callback") {
+        res.status(200).send();
+        const client = new WebClient(secretsRow.slackBotToken);
+        dispatchFromBody(payload, client, tenantId);
+        return;
+      }
+      res.status(200).send();
+    }
+  );
+
+  let httpServer: ReturnType<typeof createServer> | null = null;
+
+  if (hasGlobalApp) {
+    const receiver = new ExpressReceiver({
+      signingSecret: globalSecret,
+      app: expressApp,
+      endpoints: "/slack/events"
     });
-  });
+    const boltApp = new App({
+      token: globalToken,
+      receiver
+    });
 
-  await app.start(options.port);
-  await emitEvent("bot.started", "info", "Slack agent server started.", { port: options.port });
-  process.stdout.write(`Slack agent server running on port ${options.port}\n`);
+    boltApp.event("app_mention", async ({ body, client }) => {
+      dispatchFromBody(body, client as WebClient);
+    });
+
+    boltApp.message(async ({ body, client }) => {
+      dispatchFromBody(body, client as WebClient);
+    });
+
+    await boltApp.start(options.port);
+    await emitEvent("bot.started", "info", "Slack agent server started.", { port: options.port });
+    process.stdout.write(`Slack agent server running on port ${options.port}\n`);
+    return {
+      port: options.port,
+      async stop() {
+        await emitEvent("bot.stopping", "info", "Stopping Slack agent server.", { port: options.port });
+        await boltApp.stop();
+        await emitEvent("bot.stopped", "info", "Slack agent server stopped.", { port: options.port });
+      }
+    };
+  }
+
+  httpServer = createServer(expressApp);
+  await new Promise<void>((resolve, reject) => {
+    httpServer!.listen(options.port, () => resolve());
+    httpServer!.on("error", reject);
+  });
+  await emitEvent("bot.started", "info", "Slack agent server started (tenant Slack apps only).", {
+    port: options.port
+  });
+  process.stdout.write(`Slack agent server running on port ${options.port} (per-tenant Slack URLs only)\n`);
   return {
     port: options.port,
     async stop() {
       await emitEvent("bot.stopping", "info", "Stopping Slack agent server.", { port: options.port });
-      await app.stop();
+      await new Promise<void>((resolve, reject) => {
+        if (!httpServer) {
+          resolve();
+          return;
+        }
+        httpServer.close((err) => (err ? reject(err) : resolve()));
+      });
+      httpServer = null;
       await emitEvent("bot.stopped", "info", "Slack agent server stopped.", { port: options.port });
     }
   };
