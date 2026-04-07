@@ -542,7 +542,7 @@ async function run(): Promise<void> {
         { role: "user", content: "Health check." }
       ]
     });
-    output.write(`   LLM response: ${llmResult.slice(0, 200)}\n`);
+    output.write(`   LLM response: ${llmResult.text.slice(0, 200)}\n`);
 
     output.write("2/3 Snowflake connectivity...\n");
     const sfResult = await warehouse.query(
@@ -657,7 +657,7 @@ async function run(): Promise<void> {
       undefined;
     const defaultProfileName =
       (typeof args.profile === "string" ? args.profile : undefined) || env.telegramDefaultProfileName || "default";
-    const llmModel = typeof args.model === "string" ? args.model : env.llmModel;
+    const llmModel = typeof args.model === "string" ? args.model : undefined;
 
     const telegramGlobal = env.telegramBotToken.trim();
     await startTelegramAgentServer({
@@ -698,7 +698,7 @@ async function run(): Promise<void> {
       undefined;
     const defaultProfileName =
       (typeof args.profile === "string" ? args.profile : undefined) || env.slackDefaultProfileName || "default";
-    const llmModel = typeof args.model === "string" ? args.model : env.llmModel;
+    const llmModel = typeof args.model === "string" ? args.model : undefined;
     const port = typeof args.port === "string" ? Number.parseInt(args.port, 10) : env.slackPort;
     const teamTenantMap =
       guardrails?.teamTenantMap && Object.keys(guardrails.teamTenantMap).length > 0

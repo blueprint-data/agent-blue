@@ -292,7 +292,6 @@ export function startAdminServer(options: AdminServerOptions): void {
     slackBotToken: env.slackBotToken,
     telegramBotToken: env.telegramBotToken,
     timezone: env.schedulerTimezone,
-    llmModel: env.llmModel,
     refreshIntervalMs: env.schedulerRefreshIntervalMs
   });
   void schedulerService.start().catch((error: unknown) => {

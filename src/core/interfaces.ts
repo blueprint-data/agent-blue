@@ -22,8 +22,23 @@ export interface LlmMessage {
   content: string;
 }
 
+/** Subset of OpenAI/OpenRouter chat completion usage; fields optional when provider omits them. */
+export interface LlmUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  /** OpenRouter/native billed amount when present (credits or provider-specific). */
+  cost?: number;
+}
+
+export interface LlmGenerateResult {
+  text: string;
+  usage?: LlmUsage;
+  generationId?: string;
+}
+
 export interface LlmProvider {
-  generateText(input: { model: string; messages: LlmMessage[]; temperature?: number }): Promise<string>;
+  generateText(input: { model: string; messages: LlmMessage[]; temperature?: number }): Promise<LlmGenerateResult>;
 }
 
 export interface WarehouseAdapter {
@@ -94,6 +109,49 @@ export type SlackTenantMappingRule =
 export interface SlackTenantResolution {
   tenantId: string;
   rule: SlackTenantMappingRule;
+}
+
+export interface TenantLlmSettings {
+  tenantId: string;
+  llmModel: string | null;
+  updatedAt: string;
+}
+
+export interface InsertLlmUsageEventInput {
+  tenantId: string;
+  executionTurnId: string;
+  conversationId: string;
+  model: string;
+  generationId?: string | null;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  cost?: number | null;
+  callIndex: number;
+}
+
+export interface LlmUsageEventRow {
+  id: string;
+  tenantId: string;
+  executionTurnId: string;
+  conversationId: string;
+  createdAt: string;
+  model: string;
+  generationId: string | null;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  cost: number | null;
+  callIndex: number;
+}
+
+export interface TenantLlmUsageSummary {
+  requestCount: number;
+  totalPromptTokens: number;
+  totalCompletionTokens: number;
+  totalTokens: number;
+  /** Sum of reported costs when present (OpenRouter credits). */
+  totalCost: number;
 }
 
 export interface ConversationStore {
@@ -234,6 +292,18 @@ export interface ConversationStore {
   }): void;
   /** Tenants with a non-empty per-tenant Telegram bot token (for multi-bot polling). */
   listTenantTelegramBotOverrides(): Array<{ tenantId: string; telegramBotToken: string }>;
+
+  getTenantLlmSettings(tenantId: string): TenantLlmSettings | null;
+  upsertTenantLlmSettings(tenantId: string, llmModel: string | null): TenantLlmSettings;
+  insertLlmUsageEvent(input: InsertLlmUsageEventInput): void;
+  getTenantLlmUsageSummary(
+    tenantId: string,
+    range?: { fromIso?: string; toIso?: string }
+  ): TenantLlmUsageSummary;
+  listTenantLlmUsageEvents(
+    tenantId: string,
+    opts?: { limit?: number; fromIso?: string; toIso?: string }
+  ): LlmUsageEventRow[];
 }
 
 export interface AdminGuardrails {

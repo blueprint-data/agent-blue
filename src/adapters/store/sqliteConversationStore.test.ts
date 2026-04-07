@@ -379,3 +379,79 @@ describe("SqliteConversationStore admin login domains", () => {
     expect(store.getAdminLoginDomainTenantMap()).toEqual({});
   });
 });
+
+describe("SqliteConversationStore LLM settings and usage", () => {
+  function seedTenant(store: SqliteConversationStore, tenantId: string): void {
+    store.upsertTenantRepo({
+      tenantId,
+      repoUrl: "https://github.com/example/repo",
+      dbtSubpath: "models",
+      deployKeyPath: "/keys/x",
+      localPath: "/repos/x"
+    });
+  }
+
+  it("upserts and reads tenant LLM settings", () => {
+    const store = createStore();
+    seedTenant(store, "acme");
+    expect(store.getTenantLlmSettings("acme")).toBeNull();
+    const row = store.upsertTenantLlmSettings("acme", "openai/gpt-4o-mini");
+    expect(row.llmModel).toBe("openai/gpt-4o-mini");
+    expect(store.getTenantLlmSettings("acme")?.llmModel).toBe("openai/gpt-4o-mini");
+    store.upsertTenantLlmSettings("acme", null);
+    expect(store.getTenantLlmSettings("acme")?.llmModel).toBeNull();
+  });
+
+  it("aggregates usage summary and filters by date range", () => {
+    const store = createStore();
+    seedTenant(store, "acme");
+    store.insertLlmUsageEvent({
+      tenantId: "acme",
+      executionTurnId: "turn1",
+      conversationId: "c1",
+      model: "m1",
+      promptTokens: 1,
+      completionTokens: 2,
+      totalTokens: 3,
+      cost: 0.1,
+      callIndex: 0
+    });
+    store.insertLlmUsageEvent({
+      tenantId: "acme",
+      executionTurnId: "turn2",
+      conversationId: "c2",
+      model: "m2",
+      promptTokens: 4,
+      completionTokens: 5,
+      totalTokens: 9,
+      cost: 0.2,
+      callIndex: 0
+    });
+    const all = store.getTenantLlmUsageSummary("acme");
+    expect(all.requestCount).toBe(2);
+    expect(all.totalTokens).toBe(12);
+    expect(all.totalCost).toBeCloseTo(0.3, 5);
+    const from = new Date(Date.now() + 86_400_000).toISOString();
+    const empty = store.getTenantLlmUsageSummary("acme", { fromIso: from });
+    expect(empty.requestCount).toBe(0);
+  });
+
+  it("deletes LLM rows when tenant is deleted", () => {
+    const store = createStore();
+    seedTenant(store, "gone");
+    store.upsertTenantLlmSettings("gone", "x/y");
+    store.insertLlmUsageEvent({
+      tenantId: "gone",
+      executionTurnId: "t",
+      conversationId: "c",
+      model: "m",
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      callIndex: 0
+    });
+    store.deleteTenant("gone");
+    expect(store.listTenantLlmUsageEvents("gone")).toHaveLength(0);
+    expect(store.getTenantLlmSettings("gone")).toBeNull();
+  });
+});

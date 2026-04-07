@@ -5,8 +5,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import type {
   ChartTool,
   DbtRepositoryService,
+  LlmGenerateResult,
   LlmMessage,
   LlmProvider,
+  LlmUsage,
   WarehouseAdapter
 } from "./interfaces.js";
 import { AnalyticsAgentRuntime, TENANT_MEMORY_MAX_PROMPT_ITEMS } from "./agentRuntime.js";
@@ -37,15 +39,19 @@ function createStore(): SqliteConversationStore {
 class StubLlmProvider implements LlmProvider {
   readonly calls: Array<{ model: string; messages: LlmMessage[]; temperature?: number }> = [];
 
-  constructor(private readonly responses: string[]) {}
+  constructor(
+    private readonly responses: string[],
+    private readonly usages?: Array<LlmUsage | undefined>
+  ) {}
 
-  async generateText(input: { model: string; messages: LlmMessage[]; temperature?: number }): Promise<string> {
+  async generateText(input: { model: string; messages: LlmMessage[]; temperature?: number }): Promise<LlmGenerateResult> {
     this.calls.push(input);
     const next = this.responses.shift();
     if (!next) {
       throw new Error("No stub LLM response remaining.");
     }
-    return next;
+    const usage = this.usages?.shift();
+    return { text: next, usage };
   }
 }
 
@@ -287,5 +293,72 @@ describe("AnalyticsAgentRuntime tenant memory", () => {
     expect(
       memoryMessage?.content.match(/Revenue means gross revenue unless the user explicitly asks for net revenue\./g) ?? []
     ).toHaveLength(1);
+  });
+});
+
+function seedTenantRepo(store: SqliteConversationStore, tenantId: string): void {
+  store.upsertTenantRepo({
+    tenantId,
+    repoUrl: "git@github.com:example/repo.git",
+    dbtSubpath: "models",
+    deployKeyPath: "/tmp/key",
+    localPath: `/tmp/repo/${tenantId}`
+  });
+}
+
+describe("AnalyticsAgentRuntime LLM model and usage", () => {
+  it("uses per-tenant LLM model when context omits llmModel", async () => {
+    const store = createStore();
+    seedTenantRepo(store, "acme");
+    store.upsertTenantLlmSettings("acme", "openrouter/tenant-preferred");
+    const llm = new StubLlmProvider([JSON.stringify({ type: "final_answer", answer: "ok" })]);
+    const runtime = createRuntime(llm, store);
+
+    await runtime.respond(
+      {
+        tenantId: "acme",
+        profileName: "default",
+        conversationId: "conv_tenant_model",
+        origin: { source: "cli" }
+      },
+      "Hello"
+    );
+
+    expect(llm.calls[0]?.model).toBe("openrouter/tenant-preferred");
+  });
+
+  it("persists LLM usage events and exposes llmUsage in debug", async () => {
+    const store = createStore();
+    seedTenantRepo(store, "acme");
+    const usage: LlmUsage = {
+      promptTokens: 100,
+      completionTokens: 20,
+      totalTokens: 120,
+      cost: 0.0042
+    };
+    const llm = new StubLlmProvider([JSON.stringify({ type: "final_answer", answer: "Done." })], [usage]);
+    const runtime = createRuntime(llm, store);
+
+    const response = await runtime.respond(
+      {
+        tenantId: "acme",
+        profileName: "default",
+        conversationId: "conv_usage",
+        llmModel: "stub-model",
+        origin: { source: "cli" }
+      },
+      "Run"
+    );
+
+    expect(response.text).toBe("Done.");
+    const dbg = response.debug?.llmUsage as { totals: Record<string, number> } | undefined;
+    expect(dbg?.totals?.totalTokens).toBe(120);
+    expect(dbg?.totals?.totalCost).toBe(0.0042);
+
+    const events = store.listTenantLlmUsageEvents("acme", { limit: 5 });
+    expect(events).toHaveLength(1);
+    expect(events[0]?.totalTokens).toBe(120);
+    expect(events[0]?.cost).toBe(0.0042);
+    expect(events[0]?.model).toBe("stub-model");
   });
 });
