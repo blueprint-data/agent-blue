@@ -154,6 +154,36 @@ interface NotificationState {
   text: string;
 }
 
+interface TenantScheduleRecord {
+  id: string;
+  tenantId: string;
+  userRequest: string;
+  cron: string;
+  channelType: "slack" | "telegram" | "console" | "custom";
+  channelRef?: string | null;
+  active: boolean;
+  lastRunAt?: string | null;
+  lastError?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface ScheduleChannelOptions {
+  slackChannels: Array<{ channelId: string; source: string }>;
+  telegramChats: Array<{ chatId: string; source: string }>;
+}
+
+/** Scheduler log lines from GET /api/admin/scheduler/events (same shape as AdminBotEvent). */
+interface SchedulerBotEventRecord {
+  id: string;
+  botName: string;
+  level: "info" | "warn" | "error";
+  eventType: string;
+  message: string;
+  metadata?: Record<string, unknown>;
+  createdAt: string;
+}
+
 function formatDate(value?: string | null): string {
   if (!value) return "—";
   const date = new Date(value);
@@ -433,6 +463,10 @@ function AdminShell({
               <Route
                 path="/conversations"
                 element={<ConversationsPage notify={notify} scopedTenantId={session.scopedTenantId} />}
+              />
+              <Route
+                path="/schedules"
+                element={<SchedulesPage notify={notify} scopedTenantId={session.scopedTenantId} isSuperadmin={isSuperadmin} />}
               />
               <Route path="/slack-bot" element={<Navigate to="/" replace />} />
               <Route path="/telegram-bot" element={<Navigate to="/telegram-routing" replace />} />
@@ -1908,6 +1942,390 @@ function TenantsPage({
             </AppShellCard>
           ) : null}
         </div>
+      </div>
+    </div>
+  );
+}
+
+function SchedulesPage({
+  notify,
+  scopedTenantId,
+  isSuperadmin = true
+}: {
+  notify: (value: NotificationState | null) => void;
+  scopedTenantId?: string;
+  isSuperadmin?: boolean;
+}): ReactElement {
+  const [tenants, setTenants] = useState<TenantRecord[]>([]);
+  const [selectedTenantId, setSelectedTenantId] = useState<string | null>(null);
+  const [schedules, setSchedules] = useState<TenantScheduleRecord[]>([]);
+  const [channelOptions, setChannelOptions] = useState<ScheduleChannelOptions | null>(null);
+  const [events, setEvents] = useState<SchedulerBotEventRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [loadingOptions, setLoadingOptions] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [form, setForm] = useState({
+    userRequest: "",
+    cron: "0 9 * * *",
+    channelType: "console" as TenantScheduleRecord["channelType"],
+    channelRef: "",
+    active: true
+  });
+
+  const effectiveTenantId = useMemo(() => {
+    if (!isSuperadmin) {
+      return scopedTenantId ?? null;
+    }
+    return selectedTenantId;
+  }, [isSuperadmin, scopedTenantId, selectedTenantId]);
+
+  const loadTenants = useCallback(async () => {
+    try {
+      const next = await apiRequest<TenantRecord[]>("/api/admin/tenants");
+      setTenants(next);
+      if (!selectedTenantId && next.length > 0) {
+        setSelectedTenantId(scopedTenantId ?? next[0].tenantId);
+      }
+    } catch (caught) {
+      notify({ type: "error", text: sectionError(caught) });
+    }
+  }, [notify, selectedTenantId, scopedTenantId]);
+
+  const loadSchedules = useCallback(async () => {
+    if (!effectiveTenantId) {
+      setSchedules([]);
+      setChannelOptions(null);
+      setEvents([]);
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    try {
+      const [nextSchedules, options, logs] = await Promise.all([
+        apiRequest<TenantScheduleRecord[]>(`/api/admin/tenants/${effectiveTenantId}/schedules`),
+        apiRequest<ScheduleChannelOptions>(`/api/admin/tenants/${effectiveTenantId}/schedules/channel-options`),
+        apiRequest<SchedulerBotEventRecord[]>(`/api/admin/scheduler/events?limit=40&tenantId=${effectiveTenantId}`)
+      ]);
+      setSchedules(nextSchedules);
+      setChannelOptions(options);
+      setEvents(logs);
+    } catch (caught) {
+      notify({ type: "error", text: sectionError(caught) });
+    } finally {
+      setLoading(false);
+    }
+  }, [effectiveTenantId, notify]);
+
+  useEffect(() => {
+    void loadTenants();
+  }, [loadTenants]);
+
+  useEffect(() => {
+    if (!isSuperadmin && scopedTenantId) {
+      setSelectedTenantId(scopedTenantId);
+    }
+  }, [isSuperadmin, scopedTenantId]);
+
+  useEffect(() => {
+    void loadSchedules();
+  }, [loadSchedules]);
+
+  const channelOptionsForType = useMemo(() => {
+    if (!channelOptions) return [] as Array<{ value: string; label: string }>;
+    if (form.channelType === "slack") {
+      return channelOptions.slackChannels.map((entry) => ({
+        value: entry.channelId,
+        label: `${entry.channelId}${entry.source ? ` · ${entry.source}` : ""}`
+      }));
+    }
+    if (form.channelType === "telegram") {
+      return channelOptions.telegramChats.map((entry) => ({
+        value: entry.chatId,
+        label: `${entry.chatId}${entry.source ? ` · ${entry.source}` : ""}`
+      }));
+    }
+    return [] as Array<{ value: string; label: string }>;
+  }, [channelOptions, form.channelType]);
+
+  async function handleSave(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!effectiveTenantId) return;
+    setSaving(true);
+    try {
+      const payload = {
+        userRequest: form.userRequest,
+        cron: form.cron,
+        channelType: form.channelType,
+        channelRef: form.channelRef || undefined,
+        active: form.active
+      };
+      if (editingId) {
+        await apiRequest<TenantScheduleRecord>(
+          `/api/admin/tenants/${effectiveTenantId}/schedules/${editingId}`,
+          { method: "PUT", body: payload }
+        );
+        notify({ type: "success", text: "Schedule updated." });
+      } else {
+        await apiRequest<TenantScheduleRecord>(`/api/admin/tenants/${effectiveTenantId}/schedules`, {
+          method: "POST",
+          body: payload
+        });
+        notify({ type: "success", text: "Schedule created." });
+      }
+      setForm({ userRequest: "", cron: "0 9 * * *", channelType: form.channelType, channelRef: "", active: true });
+      setEditingId(null);
+      await loadSchedules();
+    } catch (caught) {
+      notify({ type: "error", text: sectionError(caught) });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleDelete(scheduleId: string) {
+    if (!effectiveTenantId) return;
+    try {
+      await apiRequest(`/api/admin/tenants/${effectiveTenantId}/schedules/${scheduleId}`, { method: "DELETE" });
+      notify({ type: "success", text: "Schedule deleted." });
+      if (editingId === scheduleId) {
+        setEditingId(null);
+      }
+      await loadSchedules();
+    } catch (caught) {
+      notify({ type: "error", text: sectionError(caught) });
+    }
+  }
+
+  async function handleTestRun(scheduleId: string) {
+    if (!effectiveTenantId) return;
+    try {
+      await apiRequest<{ status: string }>(`/api/admin/tenants/${effectiveTenantId}/schedules/${scheduleId}/test`, {
+        method: "POST",
+        body: {}
+      });
+      notify({ type: "info", text: "Test run queued." });
+      await loadSchedules();
+    } catch (caught) {
+      notify({ type: "error", text: sectionError(caught) });
+    }
+  }
+
+  async function refreshChannels() {
+    if (!effectiveTenantId) return;
+    setLoadingOptions(true);
+    try {
+      const options = await apiRequest<ScheduleChannelOptions>(
+        `/api/admin/tenants/${effectiveTenantId}/schedules/channel-options`
+      );
+      setChannelOptions(options);
+    } catch (caught) {
+      notify({ type: "error", text: sectionError(caught) });
+    } finally {
+      setLoadingOptions(false);
+    }
+  }
+
+  return (
+    <div className="page-grid">
+      <PageHeader
+        title="Schedules"
+        subtitle="Create recurring prompts per tenant and deliver them to Slack, Telegram, or console channels."
+        actions={
+          <button className="secondary-button" onClick={() => void loadSchedules()}>
+            Refresh
+          </button>
+        }
+      />
+      <div className="two-column">
+        <AppShellCard
+          title="Schedule form"
+          subtitle="Create a new schedule or edit an existing one (UTC cron)."
+          action={
+            <div className="filters-row">
+              <select
+                disabled={!isSuperadmin}
+                value={effectiveTenantId ?? ""}
+                onChange={(event) => setSelectedTenantId(event.target.value)}
+              >
+                <option value="" disabled>
+                  Select tenant
+                </option>
+                {tenants.map((tenant) => (
+                  <option key={tenant.tenantId} value={tenant.tenantId}>
+                    {tenant.tenantId}
+                  </option>
+                ))}
+              </select>
+              <button className="secondary-button" onClick={() => void refreshChannels()} disabled={!effectiveTenantId || loadingOptions}>
+                Refresh channels
+              </button>
+            </div>
+          }
+        >
+          {!effectiveTenantId ? (
+            <div className="muted">Choose a tenant to manage schedules.</div>
+          ) : (
+            <form className="stack" onSubmit={handleSave}>
+              <label>
+                User request
+                <textarea
+                  required
+                  rows={3}
+                  value={form.userRequest}
+                  onChange={(event) => setForm((current) => ({ ...current, userRequest: event.target.value }))}
+                />
+              </label>
+              <div className="filters-row">
+                <label className="field">
+                  Cron (UTC)
+                  <input
+                    required
+                    value={form.cron}
+                    onChange={(event) => setForm((current) => ({ ...current, cron: event.target.value }))}
+                  />
+                </label>
+                <label className="field">
+                  Channel type
+                  <select
+                    value={form.channelType}
+                    onChange={(event) => setForm((current) => ({ ...current, channelType: event.target.value as TenantScheduleRecord["channelType"] }))}
+                  >
+                    <option value="slack">Slack</option>
+                    <option value="telegram">Telegram</option>
+                    <option value="console">Console</option>
+                    <option value="custom">Custom</option>
+                  </select>
+                </label>
+              </div>
+              <label>
+                Channel reference
+                {channelOptionsForType.length > 0 ? (
+                  <select
+                    value={form.channelRef}
+                    onChange={(event) => setForm((current) => ({ ...current, channelRef: event.target.value }))}
+                  >
+                    <option value="">Select destination</option>
+                    {channelOptionsForType.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    value={form.channelRef}
+                    onChange={(event) => setForm((current) => ({ ...current, channelRef: event.target.value }))}
+                    placeholder={form.channelType === "console" ? "(optional for console/custom)" : "Channel ID or chat ID"}
+                  />
+                )}
+              </label>
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={form.active}
+                  onChange={(event) => setForm((current) => ({ ...current, active: event.target.checked }))}
+                />
+                Active
+              </label>
+              <div className="button-row">
+                <button type="submit" disabled={saving || !form.userRequest.trim()}>
+                  {saving ? "Saving…" : editingId ? "Update schedule" : "Create schedule"}
+                </button>
+                {editingId ? (
+                  <button type="button" className="secondary-button" onClick={() => setEditingId(null)}>
+                    Cancel edit
+                  </button>
+                ) : null}
+              </div>
+            </form>
+          )}
+        </AppShellCard>
+
+        <AppShellCard title="Schedules" subtitle="Active/paused status, last run time, and delivery status">
+          {loading ? (
+            <div className="muted">Loading…</div>
+          ) : schedules.length === 0 ? (
+            <div className="empty-state">No schedules yet for this tenant.</div>
+          ) : (
+            <div className="stack">
+              {schedules.map((schedule) => (
+                <div key={schedule.id} className="list-row">
+                  <div>
+                    <strong>{schedule.userRequest}</strong>
+                    <div className="muted">
+                      {schedule.cron} · {schedule.channelType}
+                      {schedule.channelRef ? ` (${schedule.channelRef})` : ""}
+                    </div>
+                    <div className="muted">
+                      Status: {schedule.active ? "active" : "paused"} · Last run: {formatDate(schedule.lastRunAt)} · Error: {schedule.lastError ?? "—"}
+                    </div>
+                  </div>
+                  <div className="button-row">
+                    <button
+                      className="secondary-button"
+                      onClick={() => {
+                        setEditingId(schedule.id);
+                        setForm({
+                          userRequest: schedule.userRequest,
+                          cron: schedule.cron,
+                          channelType: schedule.channelType,
+                          channelRef: schedule.channelRef ?? "",
+                          active: schedule.active
+                        });
+                      }}
+                    >
+                      Edit
+                    </button>
+                    <button className="secondary-button" onClick={() => void handleTestRun(schedule.id)}>
+                      Test run
+                    </button>
+                    <button className="danger-button" onClick={() => void handleDelete(schedule.id)}>
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </AppShellCard>
+      </div>
+
+      <div className="two-column">
+        <AppShellCard title="Action log" subtitle="Recent schedule test triggers (latest first)">
+          {events.length === 0 ? (
+            <div className="empty-state">No test triggers yet.</div>
+          ) : (
+            <div className="stack">
+              {events.map((event) => (
+                <div key={event.id} className="turn-card">
+                  <div className="turn-header">
+                    <div>
+                      <strong>{event.message}</strong>
+                      <div className="muted">
+                        {event.eventType} · {formatDate(event.createdAt)}
+                      </div>
+                    </div>
+                    <StatusBadge label={event.level} tone={event.level === "error" ? "error" : event.level === "warn" ? "warning" : "success"} />
+                  </div>
+                  {event.metadata ? <JsonBlock value={event.metadata} /> : null}
+                </div>
+              ))}
+            </div>
+          )}
+        </AppShellCard>
+        <AppShellCard title="Channel options" subtitle="Mapped Slack channels and Telegram chats for this tenant">
+          {loadingOptions ? (
+            <div className="muted">Loading…</div>
+          ) : !channelOptions ? (
+            <div className="muted">Refresh to load channel options.</div>
+          ) : (
+            <div className="details-grid">
+              <DetailItem label="Slack channels" value={channelOptions.slackChannels.map((c) => c.channelId).join(", ") || "—"} multiline />
+              <DetailItem label="Telegram chats" value={channelOptions.telegramChats.map((c) => c.chatId).join(", ") || "—"} multiline />
+            </div>
+          )}
+        </AppShellCard>
       </div>
     </div>
   );

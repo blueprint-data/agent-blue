@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { CronTime } from "cron";
 import { NextFunction, Request, Response, Router } from "express";
 import multer from "multer";
 import type { ConversationStore } from "../../../core/interfaces.js";
@@ -11,9 +12,11 @@ import type {
   TenantSnowflakeConfig,
   TenantWarehouseProvider
 } from "../../../core/interfaces.js";
+import type { SchedulerService } from "../../../core/schedulerService.js";
 import { initializeTenant } from "../../../bootstrap/initTenant.js";
 import { buildWarehouseFromTenantConfig } from "../../../app.js";
 import { GitDbtRepositoryService } from "../../dbt/dbtRepoService.js";
+import { env } from "../../../config/env.js";
 import type { AdminRequestAuth } from "./adminAccess.js";
 import { adminAuthFromRequest, denyUnlessSuperadmin, denyUnlessTenantAccess } from "./adminApiAuth.js";
 
@@ -25,10 +28,11 @@ function param(req: Request, name: string): string {
 export interface AdminApiRouterOptions {
   store: ConversationStore;
   appDataDir: string;
+  schedulerService?: SchedulerService;
 }
 
 export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
-  const { store, appDataDir } = options;
+  const { store, appDataDir, schedulerService } = options;
   const router = Router();
   const dbtRepo = new GitDbtRepositoryService(store);
   const maxTenantMemoryChars = 300;
@@ -370,6 +374,247 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
       } catch (err) {
         res.status(400).json({ error: (err as Error).message });
       }
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  function validateScheduleCron(cron: string): string | null {
+    try {
+      // eslint-disable-next-line no-new
+      new CronTime(cron, env.schedulerTimezone || "UTC");
+      return null;
+    } catch (error) {
+      return (error as Error).message;
+    }
+  }
+
+  function assertTenantExists(tenantId: string): void {
+    const repo = store.getTenantRepo(tenantId);
+    if (!repo) {
+      throw new Error("Tenant not found");
+    }
+  }
+
+  router.get("/tenants/:tenantId/schedules", (req: Request, res: Response) => {
+    try {
+      const tenantId = param(req, "tenantId");
+      if (denyUnlessTenantAccess(req, res, tenantId)) {
+        return;
+      }
+      assertTenantExists(tenantId);
+      res.json(store.listTenantSchedules(tenantId));
+    } catch (error) {
+      const message = (error as Error).message;
+      res.status(message === "Tenant not found" ? 404 : 500).json({ error: message });
+    }
+  });
+
+  router.get("/tenants/:tenantId/schedules/channel-options", (req: Request, res: Response) => {
+    try {
+      const tenantId = param(req, "tenantId");
+      if (denyUnlessTenantAccess(req, res, tenantId)) {
+        return;
+      }
+      assertTenantExists(tenantId);
+      const slackChannels = store
+        .listSlackChannelMappings()
+        .filter((entry) => entry.tenantId === tenantId)
+        .map((entry) => ({ channelId: entry.channelId, source: entry.source }));
+      const telegramChats = store
+        .listTelegramChatMappings()
+        .filter((entry) => entry.tenantId === tenantId)
+        .map((entry) => ({ chatId: entry.chatId, source: entry.source }));
+      res.json({ slackChannels, telegramChats });
+    } catch (error) {
+      const message = (error as Error).message;
+      res.status(message === "Tenant not found" ? 404 : 500).json({ error: message });
+    }
+  });
+
+  router.post("/tenants/:tenantId/schedules", (req: Request, res: Response) => {
+    try {
+      const tenantId = param(req, "tenantId");
+      if (denyUnlessTenantAccess(req, res, tenantId)) {
+        return;
+      }
+      assertTenantExists(tenantId);
+
+      const { userRequest, cron, channelType, channelRef, active } = req.body as {
+        userRequest?: string;
+        cron?: string;
+        channelType?: string;
+        channelRef?: string;
+        active?: boolean;
+      };
+
+      const normalizedRequest = typeof userRequest === "string" ? userRequest.trim() : "";
+      const normalizedCron = typeof cron === "string" ? cron.trim() : "";
+      const normalizedChannelType = typeof channelType === "string" ? channelType.trim() : "";
+      const normalizedChannelRef = typeof channelRef === "string" ? channelRef.trim() : undefined;
+      if (!normalizedRequest || !normalizedCron || !normalizedChannelType) {
+        res.status(400).json({ error: "userRequest, cron, and channelType are required" });
+        return;
+      }
+      if (!["slack", "telegram", "console", "custom"].includes(normalizedChannelType)) {
+        res.status(400).json({ error: "channelType must be slack, telegram, console, or custom" });
+        return;
+      }
+      const cronError = validateScheduleCron(normalizedCron);
+      if (cronError) {
+        res.status(400).json({ error: "Invalid cron expression", hint: cronError });
+        return;
+      }
+
+      const schedule = store.createTenantSchedule({
+        tenantId,
+        userRequest: normalizedRequest,
+        cron: normalizedCron,
+        channelType: normalizedChannelType as "slack" | "telegram" | "console" | "custom",
+        channelRef: normalizedChannelRef,
+        active: active !== false
+      });
+      void schedulerService?.refreshTenant(tenantId);
+      res.status(201).json(schedule);
+    } catch (error) {
+      const message = (error as Error).message;
+      res.status(message === "Tenant not found" ? 404 : 500).json({ error: message });
+    }
+  });
+
+  router.put("/tenants/:tenantId/schedules/:scheduleId", (req: Request, res: Response) => {
+    try {
+      const tenantId = param(req, "tenantId");
+      const scheduleId = param(req, "scheduleId");
+      if (denyUnlessTenantAccess(req, res, tenantId)) {
+        return;
+      }
+      assertTenantExists(tenantId);
+      const existing = store.getTenantSchedule(tenantId, scheduleId);
+      if (!existing) {
+        res.status(404).json({ error: "Schedule not found" });
+        return;
+      }
+
+      const { userRequest, cron, channelType, channelRef, active } = req.body as {
+        userRequest?: string;
+        cron?: string;
+        channelType?: string;
+        channelRef?: string;
+        active?: boolean;
+      };
+
+      const updates: Record<string, unknown> = {};
+      if (typeof userRequest === "string") {
+        updates.userRequest = userRequest.trim();
+      }
+      if (typeof cron === "string") {
+        const normalizedCron = cron.trim();
+        const cronError = validateScheduleCron(normalizedCron);
+        if (cronError) {
+          res.status(400).json({ error: "Invalid cron expression", hint: cronError });
+          return;
+        }
+        updates.cron = normalizedCron;
+      }
+      if (typeof channelType === "string") {
+        const normalizedType = channelType.trim();
+        if (!["slack", "telegram", "console", "custom"].includes(normalizedType)) {
+          res.status(400).json({ error: "channelType must be slack, telegram, console, or custom" });
+          return;
+        }
+        updates.channelType = normalizedType as "slack" | "telegram" | "console" | "custom";
+      }
+      if (typeof channelRef === "string") {
+        updates.channelRef = channelRef.trim();
+      }
+      if (typeof active === "boolean") {
+        updates.active = active;
+      }
+
+      const updated = store.updateTenantSchedule(scheduleId, updates);
+      if (!updated || updated.tenantId !== tenantId) {
+        res.status(404).json({ error: "Schedule not found" });
+        return;
+      }
+      void schedulerService?.refreshTenant(tenantId);
+      res.json(updated);
+    } catch (error) {
+      const message = (error as Error).message;
+      res.status(message === "Tenant not found" ? 404 : 500).json({ error: message });
+    }
+  });
+
+  router.delete("/tenants/:tenantId/schedules/:scheduleId", (req: Request, res: Response) => {
+    try {
+      const tenantId = param(req, "tenantId");
+      const scheduleId = param(req, "scheduleId");
+      if (denyUnlessTenantAccess(req, res, tenantId)) {
+        return;
+      }
+      assertTenantExists(tenantId);
+      const existing = store.getTenantSchedule(tenantId, scheduleId);
+      if (!existing) {
+        res.status(404).json({ error: "Schedule not found" });
+        return;
+      }
+      store.deleteTenantSchedule(scheduleId);
+      void schedulerService?.refreshTenant(tenantId);
+      res.status(204).send();
+    } catch (error) {
+      const message = (error as Error).message;
+      res.status(message === "Tenant not found" ? 404 : 500).json({ error: message });
+    }
+  });
+
+  router.post("/tenants/:tenantId/schedules/:scheduleId/test", async (req: Request, res: Response) => {
+    try {
+      const tenantId = param(req, "tenantId");
+      const scheduleId = param(req, "scheduleId");
+      if (denyUnlessTenantAccess(req, res, tenantId)) {
+        return;
+      }
+      assertTenantExists(tenantId);
+      const schedule = store.getTenantSchedule(tenantId, scheduleId);
+      if (!schedule) {
+        res.status(404).json({ error: "Schedule not found" });
+        return;
+      }
+      if (!schedulerService) {
+        res.status(503).json({ error: "Scheduler service unavailable" });
+        return;
+      }
+
+      void schedulerService.runNow(tenantId, scheduleId);
+      store.appendAdminBotEvent({
+        botName: "scheduler",
+        level: "info",
+        eventType: "schedule.test_triggered",
+        message: "Schedule test run requested",
+        metadata: { tenantId, scheduleId }
+      });
+      res.json({ status: "queued" });
+    } catch (error) {
+      const message = (error as Error).message;
+      res.status(message === "Tenant not found" ? 404 : 500).json({ error: message });
+    }
+  });
+
+  router.get("/scheduler/events", (req: Request, res: Response) => {
+    try {
+      const auth = adminAuthFromRequest(req);
+      const limitRaw = typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : 100;
+      const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 500) : 100;
+      const tenantFilter =
+        auth.role === "tenant_admin"
+          ? auth.scopedTenantId ?? null
+          : typeof req.query.tenantId === "string"
+            ? req.query.tenantId
+            : null;
+      const events = store
+        .listAdminBotEvents("scheduler", limit)
+        .filter((event) => !tenantFilter || event.metadata?.tenantId === tenantFilter);
+      res.json(events);
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }
@@ -905,7 +1150,7 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
       res.json(
         store.listAdminConversations({
           tenantId,
-          source: source as "cli" | "slack" | "admin" | undefined,
+          source: source as "cli" | "slack" | "telegram" | "admin" | undefined,
           search,
           limit
         })

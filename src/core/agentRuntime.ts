@@ -1,3 +1,4 @@
+import { CronTime } from "cron";
 import { z } from "zod";
 import {
   ChartBuildRequest,
@@ -9,7 +10,7 @@ import {
   TenantWarehouseProvider,
   WarehouseAdapter
 } from "./interfaces.js";
-import { AgentArtifact, AgentContext, AgentResponse, QueryResult, TenantMemory } from "./types.js";
+import { AgentArtifact, AgentContext, AgentResponse, QueryResult, ScheduleChannelType, TenantMemory } from "./types.js";
 import { SqlGuard } from "./sqlGuard.js";
 
 export const TENANT_MEMORY_MAX_CONTENT_CHARS = 300;
@@ -61,12 +62,21 @@ const toolDecisionSchema = z.object({
       "dbt.getModelSql",
       "warehouse.lookupMetadata",
       "chartjs.build",
-      "tenantMemory.save"
+      "tenantMemory.save",
+      "schedule.create"
     ])
     .optional(),
   args: z.record(z.string(), z.unknown()).optional(),
   answer: z.string().optional(),
   reasoning: z.string().optional()
+});
+
+const scheduleCreateSchema = z.object({
+  userRequest: z.string().trim().min(1),
+  cron: z.string().trim().optional(),
+  channelType: z.enum(["slack", "telegram", "console", "custom"]).optional(),
+  channelRef: z.string().trim().optional(),
+  active: z.boolean().optional()
 });
 
 function asJsonBlock(value: unknown): string {
@@ -135,6 +145,50 @@ function userExplicitlyAskedToSaveMemory(userText: string): boolean {
   return patterns.some((pattern) => pattern.test(userText));
 }
 
+function userExplicitlyRequestedSchedule(userText: string): boolean {
+  const patterns = [
+    /\b(schedule|scheduled|scheduling)\b/i,
+    /\brecurr(?:ing|ence)\b/i,
+    /\brepeat(?:ing)?\b/i,
+    /\bremind(?:er)?\b/i,
+    /\bdaily\b/i,
+    /\bweekly\b/i,
+    /\bmonthly\b/i,
+    /\bcada\s+d[ií]a\b/i,
+    /\bcada\s+semana\b/i,
+    /\bcada\s+mes\b/i,
+    /\brecordatorio\b/i,
+    /\bprograma(?:r)?\b/i
+  ];
+  return patterns.some((pattern) => pattern.test(userText));
+}
+
+function defaultChannelTypeFromOrigin(origin: AgentContext["origin"]): ScheduleChannelType {
+  if (!origin) {
+    return "console";
+  }
+  if (origin.source === "slack") {
+    return "slack";
+  }
+  if (origin.source === "telegram") {
+    return "telegram";
+  }
+  return "console";
+}
+
+function defaultChannelRefFromOrigin(origin: AgentContext["origin"]): string | undefined {
+  if (!origin) {
+    return undefined;
+  }
+  if (origin.channelId?.trim()) {
+    return origin.channelId.trim();
+  }
+  if (origin.userId?.trim()) {
+    return origin.userId.trim();
+  }
+  return undefined;
+}
+
 const positiveTenantMemorySaveClaimPatterns = [
   /\bI saved\b/i,
   /\bI(?: have|'ve)\s+saved\b/i,
@@ -157,6 +211,18 @@ function removeTenantMemorySaveClaimLines(text: string): string {
     .join("\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+const scheduleSuccessClaimPatterns = [
+  /\bscheduled\b/i,
+  /\brecurring\b/i,
+  /\breminder set\b/i,
+  /\bprogramad[ao]\b/i,
+  /\brecordatorio\b/i
+];
+
+function claimsScheduleWasCreated(text: string): boolean {
+  return scheduleSuccessClaimPatterns.some((pattern) => pattern.test(text));
 }
 
 function ensureAccurateTenantMemorySaveText(text: string, memorySaveSucceededThisTurn: boolean): string {
@@ -419,6 +485,7 @@ export class AnalyticsAgentRuntime {
       const currentDateIso = now.toISOString();
       const currentDate = currentDateIso.slice(0, 10);
       const userAskedToSaveMemory = userExplicitlyAskedToSaveMemory(persistedUserText);
+      const userRequestedSchedule = userExplicitlyRequestedSchedule(persistedUserText);
       const hasWarehouseDefaults = whDatabase.length > 0 && whSchema.length > 0;
       const fqPrefix = hasWarehouseDefaults
         ? isBigQuery
@@ -538,6 +605,13 @@ export class AnalyticsAgentRuntime {
           "- Never claim that memory was saved unless you already received a successful Tool result (tenantMemory.save) in this turn.",
           "- If tenantMemory.save fails or is rejected, explicitly say that the save did not happen.",
           "",
+          "Schedule rules:",
+          "- Only call schedule.create when the user explicitly asks for a recurring/scheduled/reminder-style action (any language).",
+          "- Default cron to 0 9 * * * (UTC) when the user says 'daily' without a time.",
+          "- Default channelType from origin (slack/telegram/console) and channelRef from the origin channel/user when not provided.",
+          "- Never claim a schedule was created unless you already received a successful Tool result (schedule.create) in this turn.",
+          "- If schedule.create fails or is rejected, explicitly say that scheduling did not happen.",
+          "",
           "Available tools and args:",
           "- warehouse.query: { sql: string }",
           "- dbt.listModels: {}",
@@ -545,9 +619,10 @@ export class AnalyticsAgentRuntime {
           `- warehouse.lookupMetadata: { kind: "schemas"|"tables"|"columns", ${dbLabel}?: string, ${schemaLabel}?: string, table?: string, search?: string }`,
           "- tenantMemory.save: { content: string }",
           '- chartjs.build: { type?: "bar"|"line"|"pie"|"doughnut", title?: string, xKey?: string, yKey?: string, seriesKey?: string, horizontal?: boolean, stacked?: boolean, grouped?: boolean, percentStacked?: boolean, sort?: "none"|"asc"|"desc"|"label_asc"|"label_desc", smooth?: boolean, tension?: number, fill?: boolean, step?: boolean, pointRadius?: number, donutCutout?: number, showPercentLabels?: boolean, topN?: number, otherLabel?: string, stackId?: string, maxPoints?: number }',
+          '- schedule.create: { userRequest: string, cron: string, channelType?: "slack"|"telegram"|"console"|"custom", channelRef?: string, active?: boolean }',
           "",
           "Return ONLY valid JSON in one of these shapes:",
-          '{ "type": "tool_call", "tool": "warehouse.query|dbt.listModels|dbt.getModelSql|warehouse.lookupMetadata|tenantMemory.save|chartjs.build", "args": { ... }, "reasoning"?: string }',
+          '{ "type": "tool_call", "tool": "warehouse.query|dbt.listModels|dbt.getModelSql|warehouse.lookupMetadata|tenantMemory.save|chartjs.build|schedule.create", "args": { ... }, "reasoning"?: string }',
           '{ "type": "final_answer", "answer": string, "reasoning"?: string }',
           "- If the user request is not analytical, ALWAYS return final_answer with the refusal text and do not call tools.",
           "",
@@ -624,6 +699,7 @@ export class AnalyticsAgentRuntime {
       let latestChartArtifact: AgentArtifact | undefined;
       let memorySaveAttemptedThisTurn = false;
       let memorySaveSucceededThisTurn = false;
+      let scheduleCreateSucceededThisTurn = false;
 
       for (let step = 1; step <= maxToolSteps; step += 1) {
       const planRaw = await measure(`plannerMs_step${step}`, async () =>
@@ -656,7 +732,15 @@ export class AnalyticsAgentRuntime {
             role: "user",
             content: userAskedToSaveMemory
               ? "You claimed that tenant memory was saved, but there is no successful Tool result (tenantMemory.save) in this turn. Before claiming success, call tenantMemory.save and wait for its tool result. If you cannot save it, return final_answer explicitly saying the save did not happen."
-              : "You claimed that tenant memory was saved, but there is no successful Tool result (tenantMemory.save) in this turn. Do not claim success. Return a corrected final_answer, or only use tenantMemory.save if the user explicitly asked for memory persistence."
+            : "You claimed that tenant memory was saved, but there is no successful Tool result (tenantMemory.save) in this turn. Do not claim success. Return a corrected final_answer, or only use tenantMemory.save if the user explicitly asked for memory persistence."
+          });
+          continue;
+        }
+        if (claimsScheduleWasCreated(candidateText) && !scheduleCreateSucceededThisTurn && step < maxToolSteps) {
+          loopMessages.push({
+            role: "user",
+            content:
+              "You claimed that a schedule/reminder was created, but there is no successful Tool result (schedule.create) in this turn. Call schedule.create and wait for its tool result, or explicitly state that scheduling did not happen."
           });
           continue;
         }
@@ -809,6 +893,66 @@ export class AnalyticsAgentRuntime {
               deduped: Boolean(existingMemory),
               memoryId: savedMemory.id,
               content: savedMemory.content
+            })}`
+          });
+          continue;
+        }
+
+        if (plan.tool === "schedule.create") {
+          const parsedSchedule = scheduleCreateSchema.safeParse(args);
+          if (!parsedSchedule.success) {
+            throw new Error("schedule.create requires userRequest, cron, and valid channel fields.");
+          }
+          if (!userRequestedSchedule) {
+            throw new Error(
+              "schedule.create can only be used when the user explicitly requests a recurring schedule or reminder."
+            );
+          }
+          const requestedCron = parsedSchedule.data.cron?.trim();
+          const cron = requestedCron || (/\bdaily\b/i.test(persistedUserText) ? "0 9 * * *" : "");
+          if (!cron) {
+            throw new Error("cron is required. Use 0 9 * * * for a daily schedule if no time was given.");
+          }
+          try {
+            // eslint-disable-next-line no-new
+            new CronTime(cron);
+          } catch (error) {
+            throw new Error(`Invalid cron expression: ${(error as Error).message}`);
+          }
+          const channelType = parsedSchedule.data.channelType ?? defaultChannelTypeFromOrigin(context.origin);
+          const channelRef = parsedSchedule.data.channelRef ?? defaultChannelRefFromOrigin(context.origin);
+          if ((channelType === "slack" || channelType === "telegram") && !channelRef) {
+            throw new Error("channelRef is required for slack or telegram delivery.");
+          }
+          const schedule = await runTool(
+            "schedule.create",
+            {
+              userRequest: parsedSchedule.data.userRequest,
+              cron,
+              channelType,
+              channelRef,
+              active: parsedSchedule.data.active ?? true
+            },
+            async () =>
+              this.store.createTenantSchedule({
+                tenantId: context.tenantId,
+                userRequest: parsedSchedule.data.userRequest || persistedUserText,
+                cron,
+                channelType,
+                channelRef,
+                active: parsedSchedule.data.active ?? true
+              }),
+            (value) => ({ scheduleId: value.id, active: value.active, channelType: value.channelType })
+          );
+          scheduleCreateSucceededThisTurn = true;
+          loopMessages.push({
+            role: "user",
+            content: `Tool result (schedule.create): ${asJsonBlock({
+              id: schedule.id,
+              cron: schedule.cron,
+              channelType: schedule.channelType,
+              channelRef: schedule.channelRef,
+              active: schedule.active
             })}`
           });
           continue;

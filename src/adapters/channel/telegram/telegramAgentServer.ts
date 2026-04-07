@@ -235,7 +235,7 @@ async function launchOneTelegramBot(
           conversationId,
           llmModel: options.llmModel,
           origin: {
-            source: "telegram" as "slack" | "cli",
+            source: "telegram",
             channelId: chatIdStr,
             userId: userId ?? undefined
           }
