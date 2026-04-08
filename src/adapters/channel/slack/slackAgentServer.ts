@@ -1,6 +1,8 @@
 import { WebClient } from "@slack/web-api";
 import express from "express";
+import { promises as fs } from "node:fs";
 import { createRequire } from "node:module";
+import path from "node:path";
 import { createServer } from "node:http";
 
 /** @slack/bolt ships as CJS; Node ESM named imports omit some exports (e.g. ExpressReceiver). */
@@ -8,6 +10,7 @@ const requireBolt = createRequire(import.meta.url);
 const { App, ExpressReceiver, verifySlackRequest } = requireBolt("@slack/bolt") as typeof import("@slack/bolt");
 import { ChartJSNodeCanvas } from "chartjs-node-canvas";
 import type { ChartConfiguration } from "chart.js";
+import { getChartConfigFromArtifacts, getCsvFileArtifacts } from "../../../core/artifacts.js";
 import { AnalyticsAgentRuntime } from "../../../core/agentRuntime.js";
 import type { ConversationStore } from "../../../core/interfaces.js";
 import type { SlackTenantResolution } from "../../../core/interfaces.js";
@@ -230,27 +233,8 @@ function buildSlackFormattingPrompt(userMessage: string): string {
   ].join("\n");
 }
 
-interface SlackChartArtifact {
-  type?: unknown;
-  format?: unknown;
-  payload?: unknown;
-}
-
-function getChartConfigFromArtifacts(artifacts: unknown): Record<string, unknown> | null {
-  if (!Array.isArray(artifacts)) {
-    return null;
-  }
-  for (const artifactRaw of artifacts) {
-    const artifact = artifactRaw as SlackChartArtifact;
-    if (artifact.type !== "chartjs_config" || artifact.format !== "json") {
-      continue;
-    }
-    if (!artifact.payload || typeof artifact.payload !== "object" || Array.isArray(artifact.payload)) {
-      continue;
-    }
-    return artifact.payload as Record<string, unknown>;
-  }
-  return null;
+async function cleanupUploadedFile(filePath: string): Promise<void> {
+  await fs.rm(path.dirname(filePath), { recursive: true, force: true });
 }
 
 async function buildChartPngBuffer(config: Record<string, unknown>): Promise<Buffer> {
@@ -564,6 +548,28 @@ export async function startSlackAgentServer(options: SlackAgentServerOptions): P
             error: (chartError as Error).message
           });
           process.stderr.write(`Warning: failed to render/send chart image: ${(chartError as Error).message}\n`);
+        }
+      }
+
+      for (const artifact of getCsvFileArtifacts(response.artifacts)) {
+        try {
+          await input.client.files.uploadV2({
+            channel_id: input.channel,
+            thread_ts: input.threadTs,
+            filename: artifact.payload.fileName,
+            title: artifact.payload.fileName,
+            file: artifact.payload.filePath
+          });
+        } catch (uploadError) {
+          await emitEvent("message.file_upload_failed", "warn", "Failed to upload Slack CSV artifact.", {
+            tenantId,
+            channelId: input.channel,
+            fileName: artifact.payload.fileName,
+            error: (uploadError as Error).message
+          });
+          process.stderr.write(`Warning: failed to upload CSV file: ${(uploadError as Error).message}\n`);
+        } finally {
+          await cleanupUploadedFile(artifact.payload.filePath);
         }
       }
     } catch (error) {

@@ -77,13 +77,20 @@ const warehouse: WarehouseAdapter = {
   provider: "snowflake",
   async query() {
     throw new Error("Warehouse should not be called in these tests.");
+  },
+  async exportCsv() {
+    throw new Error("Warehouse export should not be called in these tests.");
   }
 };
 
-function createRuntime(llm: LlmProvider, store: SqliteConversationStore): AnalyticsAgentRuntime {
+function createRuntime(
+  llm: LlmProvider,
+  store: SqliteConversationStore,
+  warehouseOverride: WarehouseAdapter = warehouse
+): AnalyticsAgentRuntime {
   return new AnalyticsAgentRuntime(
     llm,
-    warehouse,
+    warehouseOverride,
     chartTool,
     dbtRepo,
     store,
@@ -360,5 +367,94 @@ describe("AnalyticsAgentRuntime LLM model and usage", () => {
     expect(events[0]?.totalTokens).toBe(120);
     expect(events[0]?.cost).toBe(0.0042);
     expect(events[0]?.model).toBe("stub-model");
+  });
+});
+
+describe("AnalyticsAgentRuntime CSV export", () => {
+  it("uses warehouse.exportCsv and returns only summary metadata to the planner loop", async () => {
+    const store = createStore();
+    const llm = new StubLlmProvider([
+      JSON.stringify({
+        type: "tool_call",
+        tool: "warehouse.exportCsv",
+        args: {
+          sql: "select customer_id, revenue from analytics.fact_revenue",
+          fileName: "revenue-export.csv"
+        }
+      }),
+      JSON.stringify({
+        type: "final_answer",
+        answer: "I exported the results as a CSV file and attached it here."
+      })
+    ]);
+    const exportRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agent-blue-export-artifact-"));
+    const filePath = path.join(exportRoot, "revenue-export.csv");
+    fs.writeFileSync(filePath, "customer_id,revenue\n1,20\n");
+    tempPaths.push(filePath);
+
+    const exportWarehouse: WarehouseAdapter = {
+      provider: "bigquery",
+      async query() {
+        throw new Error("query should not be called for exportCsv test");
+      },
+      async exportCsv(sql) {
+        expect(sql).toBe("select customer_id, revenue from analytics.fact_revenue");
+        return {
+          filePath,
+          fileName: "revenue-export.csv",
+          columns: ["customer_id", "revenue"],
+          rowCount: 1,
+          bytes: 25,
+          mimeType: "text/csv"
+        };
+      }
+    };
+
+    const runtime = createRuntime(llm, store, exportWarehouse);
+    const response = await runtime.respond(
+      {
+        tenantId: "acme",
+        profileName: "default",
+        conversationId: "conv_export_csv",
+        llmModel: "test-model",
+        origin: { source: "slack", channelId: "C123" }
+      },
+      "Please export the full revenue table as CSV."
+    );
+
+    expect(response.text).toContain("CSV");
+    expect(response.artifacts).toEqual([
+      expect.objectContaining({
+        type: "file",
+        format: "csv",
+        payload: expect.objectContaining({
+          filePath,
+          fileName: "revenue-export.csv",
+          rowCount: 1,
+          bytes: 25
+        })
+      })
+    ]);
+    expect(response.debug?.toolCalls).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          tool: "warehouse.exportCsv",
+          status: "ok",
+          outputSummary: expect.objectContaining({
+            fileName: "revenue-export.csv",
+            rowCount: 1
+          }),
+          output: undefined
+        })
+      ])
+    );
+    expect(
+      llm.calls[1]?.messages.some(
+        (message) =>
+          message.role === "user" &&
+          message.content.includes("Tool result (warehouse.exportCsv)") &&
+          !message.content.includes("\"rows\"")
+      )
+    ).toBe(true);
   });
 });

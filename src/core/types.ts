@@ -36,6 +36,15 @@ export interface QueryResult {
   rowCount: number;
 }
 
+export interface CsvExportResult {
+  filePath: string;
+  fileName: string;
+  columns: string[];
+  rowCount: number;
+  bytes: number;
+  mimeType: "text/csv";
+}
+
 export interface DbtModelInfo {
   name: string;
   relativePath: string;
@@ -49,12 +58,21 @@ export interface AgentContext {
   origin?: ConversationOrigin;
 }
 
-export interface AgentArtifact {
+export interface ChartJsArtifact {
   type: "chartjs_config";
   format: "json";
   payload: Record<string, unknown>;
   summary?: Record<string, unknown>;
 }
+
+export interface FileArtifact {
+  type: "file";
+  format: "csv";
+  payload: CsvExportResult;
+  summary?: Record<string, unknown>;
+}
+
+export type AgentArtifact = ChartJsArtifact | FileArtifact;
 
 export interface AgentResponse {
   text: string;

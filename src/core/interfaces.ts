@@ -9,6 +9,7 @@ import {
   ConversationMessage,
   ConversationOrigin,
   ConversationSource,
+  CsvExportResult,
   DbtModelInfo,
   QueryResult,
   ScheduleChannelType,
@@ -44,6 +45,10 @@ export interface LlmProvider {
 export interface WarehouseAdapter {
   readonly provider?: TenantWarehouseProvider;
   query(sql: string, opts?: { timeoutMs?: number }): Promise<QueryResult>;
+  exportCsv(
+    sql: string,
+    opts?: { timeoutMs?: number; fileName?: string; pageSize?: number }
+  ): Promise<CsvExportResult>;
 }
 
 export interface ChartBuildRequest {

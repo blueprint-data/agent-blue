@@ -19,7 +19,7 @@ export class SqlGuard {
     this.maxLimit = options.maxLimit ?? 2000;
   }
 
-  normalize(sql: string): string {
+  private normalizeReadOnly(sql: string): string {
     const trimmed = sql.trim().replace(/;+\s*$/, "");
     if (!trimmed) {
       throw new Error("SQL is empty.");
@@ -33,6 +33,11 @@ export class SqlGuard {
       }
     }
 
+    return trimmed;
+  }
+
+  normalize(sql: string): string {
+    const trimmed = this.normalizeReadOnly(sql);
     const limitMatch = trimmed.match(LIMIT_REGEX);
     if (!limitMatch) {
       return `${trimmed}\nLIMIT ${this.defaultLimit}`;
@@ -46,5 +51,9 @@ export class SqlGuard {
       return trimmed.replace(LIMIT_REGEX, `LIMIT ${this.maxLimit}`);
     }
     return trimmed;
+  }
+
+  normalizeForExport(sql: string): string {
+    return this.normalizeReadOnly(sql);
   }
 }

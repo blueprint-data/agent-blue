@@ -1,6 +1,9 @@
 import { Bot, InputFile } from "grammy";
 import { ChartJSNodeCanvas } from "chartjs-node-canvas";
 import type { ChartConfiguration } from "chart.js";
+import { promises as fs } from "node:fs";
+import path from "node:path";
+import { getChartConfigFromArtifacts, getCsvFileArtifacts } from "../../../core/artifacts.js";
 import { AnalyticsAgentRuntime } from "../../../core/agentRuntime.js";
 import type { ConversationStore } from "../../../core/interfaces.js";
 import type { AdminBotEvent } from "../../../core/types.js";
@@ -20,27 +23,8 @@ export interface TelegramAgentServerController {
   stop(): Promise<void>;
 }
 
-interface TelegramChartArtifact {
-  type?: unknown;
-  format?: unknown;
-  payload?: unknown;
-}
-
-function getChartConfigFromArtifacts(artifacts: unknown): Record<string, unknown> | null {
-  if (!Array.isArray(artifacts)) {
-    return null;
-  }
-  for (const artifactRaw of artifacts) {
-    const artifact = artifactRaw as TelegramChartArtifact;
-    if (artifact.type !== "chartjs_config" || artifact.format !== "json") {
-      continue;
-    }
-    if (!artifact.payload || typeof artifact.payload !== "object" || Array.isArray(artifact.payload)) {
-      continue;
-    }
-    return artifact.payload as Record<string, unknown>;
-  }
-  return null;
+async function cleanupUploadedFile(filePath: string): Promise<void> {
+  await fs.rm(path.dirname(filePath), { recursive: true, force: true });
 }
 
 async function buildChartPngBuffer(config: Record<string, unknown>): Promise<Buffer> {
@@ -277,6 +261,24 @@ async function launchOneTelegramBot(
           process.stderr.write(
             `Warning: failed to render/send Telegram chart: ${(chartError as Error).message}\n`
           );
+        }
+      }
+
+      for (const artifact of getCsvFileArtifacts(response.artifacts)) {
+        try {
+          await ctx.replyWithDocument(new InputFile(artifact.payload.filePath, artifact.payload.fileName), {
+            reply_parameters: isGroup ? { message_id: message.message_id } : undefined
+          });
+        } catch (uploadError) {
+          await emitEvent("message.file_upload_failed", "warn", "Failed to send Telegram CSV artifact.", {
+            tenantId,
+            chatId: chatIdStr,
+            fileName: artifact.payload.fileName,
+            error: (uploadError as Error).message
+          });
+          process.stderr.write(`Warning: failed to send Telegram CSV: ${(uploadError as Error).message}\n`);
+        } finally {
+          await cleanupUploadedFile(artifact.payload.filePath);
         }
       }
     } catch (error) {

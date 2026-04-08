@@ -1,6 +1,8 @@
 import snowflake from "snowflake-sdk";
+import { createWriteStream } from "node:fs";
 import type { TenantWarehouseProvider, WarehouseAdapter } from "../../core/interfaces.js";
-import type { QueryResult } from "../../core/types.js";
+import { buildCsvLine, createTempCsvTarget, endWritable, escapeCsvValue, finalizeCsvExport, writeWritable } from "../../core/csvExport.js";
+import type { CsvExportResult, QueryResult } from "../../core/types.js";
 
 export interface SnowflakeConfig {
   account: string;
@@ -97,5 +99,122 @@ export class SnowflakeWarehouseAdapter implements WarehouseAdapter {
       rows,
       rowCount: rows.length
     };
+  }
+
+  async exportCsv(
+    sql: string,
+    opts?: { timeoutMs?: number; fileName?: string; pageSize?: number }
+  ): Promise<CsvExportResult> {
+    await this.ensureConnected();
+    const target = await createTempCsvTarget(opts?.fileName);
+    const stream = createWriteStream(target.filePath, { encoding: "utf8" });
+
+    return new Promise<CsvExportResult>((resolve, reject) => {
+      let settled = false;
+      let timeoutHandle: NodeJS.Timeout | undefined;
+
+      const fail = async (error: Error) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        if (timeoutHandle) {
+          clearTimeout(timeoutHandle);
+        }
+        stream.destroy();
+        await target.cleanup();
+        reject(error);
+      };
+
+      this.connection.execute({
+        sqlText: sql,
+        streamResult: true,
+        complete: (err, stmt) => {
+          if (err) {
+            void fail(err);
+            return;
+          }
+          if (!stmt) {
+            void fail(new Error("Snowflake did not return a statement for export."));
+            return;
+          }
+
+          const statement = stmt as unknown as {
+            getColumns?: () => Array<{ getName?: () => string; name?: string }>;
+            streamRows: () => NodeJS.ReadableStream;
+          };
+          const columns = (statement.getColumns?.() ?? [])
+            .map((column) => {
+              if (typeof column.getName === "function") {
+                return column.getName();
+              }
+              return typeof column.name === "string" ? column.name : "";
+            })
+            .filter(Boolean);
+          const rowStream = statement.streamRows();
+          let rowCount = 0;
+
+          const finish = async () => {
+            if (settled) {
+              return;
+            }
+            settled = true;
+            if (timeoutHandle) {
+              clearTimeout(timeoutHandle);
+            }
+            try {
+              await endWritable(stream);
+              resolve(
+                await finalizeCsvExport({
+                  filePath: target.filePath,
+                  fileName: target.fileName,
+                  columns,
+                  rowCount
+                })
+              );
+            } catch (error) {
+              await target.cleanup();
+              reject(error as Error);
+            }
+          };
+
+          rowStream.pause();
+          rowStream.on("error", (streamError) => {
+            void fail(streamError as Error);
+          });
+          rowStream.on("data", (row) => {
+            rowStream.pause();
+            void writeWritable(stream, buildCsvLine(columns, row as Record<string, unknown>))
+              .then(() => {
+                rowCount += 1;
+                rowStream.resume();
+              })
+              .catch((streamError) => {
+                void fail(streamError as Error);
+              });
+          });
+          rowStream.on("end", () => {
+            void finish();
+          });
+
+          void (async () => {
+            try {
+              if (columns.length > 0) {
+                await writeWritable(stream, `${columns.map((column) => escapeCsvValue(column)).join(",")}\n`);
+              }
+              rowStream.resume();
+            } catch (writeError) {
+              await fail(writeError as Error);
+            }
+          })();
+        }
+      });
+
+      if (opts?.timeoutMs && opts.timeoutMs > 0) {
+        timeoutHandle = setTimeout(() => {
+          void fail(new Error(`Snowflake query timed out after ${opts.timeoutMs}ms`));
+        }, opts.timeoutMs);
+      }
+    });
   }
 }

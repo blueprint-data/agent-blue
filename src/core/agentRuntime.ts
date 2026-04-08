@@ -55,11 +55,17 @@ const tenantMemorySaveSchema = z.object({
   content: z.string().trim().min(1).max(TENANT_MEMORY_MAX_CONTENT_CHARS)
 });
 
+const warehouseExportCsvSchema = z.object({
+  sql: z.string().trim().min(1),
+  fileName: z.string().trim().min(1).max(120).optional()
+});
+
 const toolDecisionSchema = z.object({
   type: z.enum(["tool_call", "final_answer"]),
   tool: z
     .enum([
       "warehouse.query",
+      "warehouse.exportCsv",
       "dbt.listModels",
       "dbt.getModelSql",
       "warehouse.lookupMetadata",
@@ -690,8 +696,14 @@ export class AnalyticsAgentRuntime {
           "- Never claim a schedule was created unless you already received a successful Tool result (schedule.create) in this turn.",
           "- If schedule.create fails or is rejected, explicitly say that scheduling did not happen.",
           "",
+          "CSV export rules:",
+          "- Use warehouse.exportCsv when the user explicitly asks for CSV/export/download/file output, or when a table would be too large for chat.",
+          "- warehouse.exportCsv writes the result out of band and returns only compact metadata to you; do not expect rows in the tool result.",
+          "- Prefer warehouse.query for normal analytical reasoning over small result sets.",
+          "",
           "Available tools and args:",
           "- warehouse.query: { sql: string }",
+          '- warehouse.exportCsv: { sql: string, fileName?: string }',
           "- dbt.listModels: {}",
           "- dbt.getModelSql: { modelName: string }",
           `- warehouse.lookupMetadata: { kind: "schemas"|"tables"|"columns", ${dbLabel}?: string, ${schemaLabel}?: string, table?: string, search?: string }`,
@@ -700,7 +712,7 @@ export class AnalyticsAgentRuntime {
           '- schedule.create: { userRequest: string, cron: string, channelType?: "slack"|"telegram"|"console"|"custom", channelRef?: string, active?: boolean }',
           "",
           "Return ONLY valid JSON in one of these shapes:",
-          '{ "type": "tool_call", "tool": "warehouse.query|dbt.listModels|dbt.getModelSql|warehouse.lookupMetadata|tenantMemory.save|chartjs.build|schedule.create", "args": { ... }, "reasoning"?: string }',
+          '{ "type": "tool_call", "tool": "warehouse.query|warehouse.exportCsv|dbt.listModels|dbt.getModelSql|warehouse.lookupMetadata|tenantMemory.save|chartjs.build|schedule.create", "args": { ... }, "reasoning"?: string }',
           '{ "type": "final_answer", "answer": string, "reasoning"?: string }',
           "- If the user request is not analytical, ALWAYS return final_answer with the refusal text and do not call tools.",
           "",
@@ -776,7 +788,7 @@ export class AnalyticsAgentRuntime {
       let finalPlan: z.infer<typeof toolDecisionSchema> | undefined;
       let finalSql: string | undefined;
       let lastSuccessfulQuery: { sql: string; result: QueryResult } | undefined;
-      let latestChartArtifact: AgentArtifact | undefined;
+      const responseArtifacts: AgentArtifact[] = [];
       let memorySaveAttemptedThisTurn = false;
       let memorySaveSucceededThisTurn = false;
       let scheduleCreateSucceededThisTurn = false;
@@ -834,7 +846,7 @@ export class AnalyticsAgentRuntime {
             mode: "direct_tool_loop",
             timings: { ...timings, totalMs: Date.now() - startedAt }
           },
-          latestChartArtifact ? [latestChartArtifact] : undefined
+          responseArtifacts.length > 0 ? responseArtifacts : undefined
         );
       }
 
@@ -1058,15 +1070,65 @@ export class AnalyticsAgentRuntime {
             (result) => result.summary,
             (result) => ({ config: result.config, summary: result.summary })
           );
-          latestChartArtifact = {
+          responseArtifacts.push({
             type: "chartjs_config",
             format: "json",
             payload: chartBuild.config,
             summary: chartBuild.summary
-          };
+          });
           loopMessages.push({
             role: "user",
             content: `Tool result (chartjs.build): ${asJsonBlock(chartBuild.summary)}`
+          });
+          continue;
+        }
+
+        if (plan.tool === "warehouse.exportCsv") {
+          const parsedExport = warehouseExportCsvSchema.safeParse(args);
+          if (!parsedExport.success) {
+            throw new Error("warehouse.exportCsv requires args.sql and an optional args.fileName.");
+          }
+          const normalizedSql = this.sqlGuard.normalizeForExport(parsedExport.data.sql);
+          if (attemptedSql.has(normalizedSql)) {
+            throw new Error("Duplicate SQL attempt in this turn. Generate a different query.");
+          }
+          attemptedSql.add(normalizedSql);
+          finalSql = normalizedSql;
+          const exported = await measure("warehouseExportMs", async () =>
+            runTool(
+              "warehouse.exportCsv",
+              { sql: normalizedSql, fileName: parsedExport.data.fileName },
+              async () => warehouse.exportCsv(normalizedSql, { fileName: parsedExport.data.fileName }),
+              (result) => ({
+                fileName: result.fileName,
+                rowCount: result.rowCount,
+                columns: result.columns,
+                bytes: result.bytes,
+                mimeType: result.mimeType
+              })
+            )
+          );
+          responseArtifacts.push({
+            type: "file",
+            format: "csv",
+            payload: exported,
+            summary: {
+              fileName: exported.fileName,
+              rowCount: exported.rowCount,
+              columns: exported.columns,
+              bytes: exported.bytes
+            }
+          });
+          loopMessages.push({
+            role: "user",
+            content: `Tool result (warehouse.exportCsv): ${asJsonBlock({
+              sql: normalizedSql,
+              fileName: exported.fileName,
+              rowCount: exported.rowCount,
+              columns: exported.columns,
+              bytes: exported.bytes,
+              mimeType: exported.mimeType
+            })}`
           });
           continue;
         }
@@ -1179,7 +1241,7 @@ export class AnalyticsAgentRuntime {
             timings: { ...timings, totalMs: Date.now() - startedAt },
             finalizedFromLastSuccessfulQuery: true
           },
-          latestChartArtifact ? [latestChartArtifact] : undefined
+          responseArtifacts.length > 0 ? responseArtifacts : undefined
         );
       }
 
@@ -1194,7 +1256,7 @@ export class AnalyticsAgentRuntime {
           mode: "direct_tool_loop",
           timings: { ...timings, totalMs: Date.now() - startedAt }
         },
-        latestChartArtifact ? [latestChartArtifact] : undefined
+        responseArtifacts.length > 0 ? responseArtifacts : undefined
       );
     } catch (error) {
       persistLlmUsageToStore();
