@@ -5,9 +5,13 @@ import type {
   AdminSession,
   AdminGuardrails,
   ConversationStore,
+  InsertLlmUsageEventInput,
+  LlmUsageEventRow,
   TenantChannelBotSecrets,
   TenantCredentialsRef,
   TenantKeyMetadata,
+  TenantLlmSettings,
+  TenantLlmUsageSummary,
   TenantWarehouseConfig
 } from "../../core/interfaces.js";
 import {
@@ -270,6 +274,28 @@ export class SqliteConversationStore implements ConversationStore {
         telegram_bot_token TEXT,
         updated_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS tenant_llm_settings (
+        tenant_id TEXT PRIMARY KEY,
+        llm_model TEXT,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS llm_usage_events (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        execution_turn_id TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        model TEXT NOT NULL,
+        generation_id TEXT,
+        prompt_tokens INTEGER NOT NULL,
+        completion_tokens INTEGER NOT NULL,
+        total_tokens INTEGER NOT NULL,
+        cost REAL,
+        call_index INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_llm_usage_tenant_created ON llm_usage_events(tenant_id, created_at);
     `);
     this.migrateAdminSessionsColumns();
     this.migrateTenantMemoriesTable();
@@ -1124,6 +1150,151 @@ export class SqliteConversationStore implements ConversationStore {
     return rows.map((r) => ({ tenantId: r.tenant_id, telegramBotToken: r.telegram_bot_token }));
   }
 
+  getTenantLlmSettings(tenantId: string): TenantLlmSettings | null {
+    const row = this.db
+      .prepare("SELECT tenant_id, llm_model, updated_at FROM tenant_llm_settings WHERE tenant_id = ?")
+      .get(tenantId) as
+      | { tenant_id: string; llm_model: string | null; updated_at: string }
+      | undefined;
+    if (!row) {
+      return null;
+    }
+    return {
+      tenantId: row.tenant_id,
+      llmModel: row.llm_model?.trim() ? row.llm_model.trim() : null,
+      updatedAt: row.updated_at
+    };
+  }
+
+  upsertTenantLlmSettings(tenantId: string, llmModel: string | null): TenantLlmSettings {
+    const normalized = llmModel?.trim() ? llmModel.trim() : null;
+    const updatedAt = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO tenant_llm_settings (tenant_id, llm_model, updated_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(tenant_id) DO UPDATE SET
+           llm_model = excluded.llm_model,
+           updated_at = excluded.updated_at`
+      )
+      .run(tenantId, normalized, updatedAt);
+    return { tenantId, llmModel: normalized, updatedAt };
+  }
+
+  insertLlmUsageEvent(input: InsertLlmUsageEventInput): void {
+    const id = createId("llmuse");
+    const createdAt = new Date().toISOString();
+    const cost =
+      input.cost !== undefined && input.cost !== null && Number.isFinite(input.cost) ? input.cost : null;
+    this.db
+      .prepare(
+        `INSERT INTO llm_usage_events (
+           id, tenant_id, execution_turn_id, conversation_id, created_at, model, generation_id,
+           prompt_tokens, completion_tokens, total_tokens, cost, call_index
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        id,
+        input.tenantId,
+        input.executionTurnId,
+        input.conversationId,
+        createdAt,
+        input.model,
+        input.generationId ?? null,
+        input.promptTokens,
+        input.completionTokens,
+        input.totalTokens,
+        cost,
+        input.callIndex
+      );
+  }
+
+  getTenantLlmUsageSummary(tenantId: string, range?: { fromIso?: string; toIso?: string }): TenantLlmUsageSummary {
+    let sql = `
+      SELECT
+        COUNT(*) AS c,
+        COALESCE(SUM(prompt_tokens), 0) AS pt,
+        COALESCE(SUM(completion_tokens), 0) AS ct,
+        COALESCE(SUM(total_tokens), 0) AS tt,
+        COALESCE(SUM(COALESCE(cost, 0)), 0) AS tc
+      FROM llm_usage_events
+      WHERE tenant_id = ?`;
+    const params: unknown[] = [tenantId];
+    if (range?.fromIso) {
+      sql += " AND created_at >= ?";
+      params.push(range.fromIso);
+    }
+    if (range?.toIso) {
+      sql += " AND created_at <= ?";
+      params.push(range.toIso);
+    }
+    const row = this.db.prepare(sql).get(...params) as {
+      c: number;
+      pt: number;
+      ct: number;
+      tt: number;
+      tc: number;
+    };
+    return {
+      requestCount: row.c,
+      totalPromptTokens: row.pt,
+      totalCompletionTokens: row.ct,
+      totalTokens: row.tt,
+      totalCost: row.tc
+    };
+  }
+
+  listTenantLlmUsageEvents(
+    tenantId: string,
+    opts?: { limit?: number; fromIso?: string; toIso?: string }
+  ): LlmUsageEventRow[] {
+    const limit = Math.min(Math.max(opts?.limit ?? 100, 1), 500);
+    let sql = `
+      SELECT id, tenant_id, execution_turn_id, conversation_id, created_at, model, generation_id,
+             prompt_tokens, completion_tokens, total_tokens, cost, call_index
+      FROM llm_usage_events
+      WHERE tenant_id = ?`;
+    const params: unknown[] = [tenantId];
+    if (opts?.fromIso) {
+      sql += " AND created_at >= ?";
+      params.push(opts.fromIso);
+    }
+    if (opts?.toIso) {
+      sql += " AND created_at <= ?";
+      params.push(opts.toIso);
+    }
+    sql += " ORDER BY created_at DESC LIMIT ?";
+    params.push(limit);
+    const rows = this.db.prepare(sql).all(...params) as Array<{
+      id: string;
+      tenant_id: string;
+      execution_turn_id: string;
+      conversation_id: string;
+      created_at: string;
+      model: string;
+      generation_id: string | null;
+      prompt_tokens: number;
+      completion_tokens: number;
+      total_tokens: number;
+      cost: number | null;
+      call_index: number;
+    }>;
+    return rows.map((r) => ({
+      id: r.id,
+      tenantId: r.tenant_id,
+      executionTurnId: r.execution_turn_id,
+      conversationId: r.conversation_id,
+      createdAt: r.created_at,
+      model: r.model,
+      generationId: r.generation_id,
+      promptTokens: r.prompt_tokens,
+      completionTokens: r.completion_tokens,
+      totalTokens: r.total_tokens,
+      cost: r.cost,
+      callIndex: r.call_index
+    }));
+  }
+
   listTenants(): Array<{
     tenantId: string;
     repoUrl: string;
@@ -1165,6 +1336,8 @@ export class SqliteConversationStore implements ConversationStore {
     this.db.prepare("DELETE FROM tenant_key_metadata WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM tenant_admin_login_domains WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM tenant_channel_bot_secrets WHERE tenant_id = ?").run(tenantId);
+    this.db.prepare("DELETE FROM tenant_llm_settings WHERE tenant_id = ?").run(tenantId);
+    this.db.prepare("DELETE FROM llm_usage_events WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM messages WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM conversations WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM agent_profiles WHERE tenant_id = ?").run(tenantId);

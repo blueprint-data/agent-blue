@@ -55,6 +55,14 @@ interface CredentialReference {
   snowflakeKeyUploadedAt?: string | null;
 }
 
+interface TenantLlmUsageSummaryUi {
+  requestCount: number;
+  totalPromptTokens: number;
+  totalCompletionTokens: number;
+  totalTokens: number;
+  totalCost: number;
+}
+
 interface WizardStateResponse {
   tenantId: string;
   hasRepo: boolean;
@@ -66,6 +74,15 @@ interface WizardStateResponse {
   hasSlackBotOverride?: boolean;
   hasTelegramBotOverride?: boolean;
   slackEventsPathSuffix?: string;
+  /** Rolling LLM usage from the server (same shape as GET …/llm/usage). */
+  llmUsageLast30Days?: TenantLlmUsageSummaryUi;
+}
+
+interface TenantLlmSettingsResponse {
+  llmModel: string | null;
+  effectiveLlmModel: string;
+  defaultLlmModel: string;
+  updatedAt?: string;
 }
 
 interface ConversationSummary {
@@ -198,6 +215,14 @@ function compactText(value?: string | null, maxLength = 120): string {
   if (!value) return "—";
   if (value.length <= maxLength) return value;
   return `${value.slice(0, maxLength - 1)}…`;
+}
+
+/** OpenRouter and similar providers may return very small credit amounts. */
+function formatLlmCost(value: number): string {
+  if (!Number.isFinite(value)) return "—";
+  if (value === 0) return "0";
+  if (Math.abs(value) < 0.0001 && value !== 0) return value.toExponential(2);
+  return value.toLocaleString(undefined, { maximumFractionDigits: 6 });
 }
 
 function sectionError(error: unknown): string {
@@ -1082,26 +1107,44 @@ function TenantsPage({
   const [chSlackSigningSecret, setChSlackSigningSecret] = useState("");
   const [chTelegramBotToken, setChTelegramBotToken] = useState("");
   const [savingChannelBots, setSavingChannelBots] = useState(false);
+  const [llmSettings, setLlmSettings] = useState<TenantLlmSettingsResponse | null>(null);
+  const [llmModelDraft, setLlmModelDraft] = useState("");
+  const [savingLlm, setSavingLlm] = useState(false);
+  const [usageFrom, setUsageFrom] = useState("");
+  const [usageTo, setUsageTo] = useState("");
+  const [usageCustomSummary, setUsageCustomSummary] = useState<TenantLlmUsageSummaryUi | null>(null);
+  const [loadingUsageRange, setLoadingUsageRange] = useState(false);
 
   const selectedTenant = useMemo(
     () => tenants.find((tenant) => tenant.tenantId === selectedTenantId) ?? null,
     [selectedTenantId, tenants]
   );
 
-  const loadTenants = useCallback(async () => {
+  const loadTenants = useCallback(async (opts?: { selectTenantId?: string }) => {
     setLoading(true);
     try {
       const nextTenants = await apiRequest<TenantRecord[]>("/api/admin/tenants");
       setTenants(nextTenants);
-      if (!selectedTenantId && nextTenants.length > 0) {
-        setSelectedTenantId(nextTenants[0].tenantId);
+      const preferred = opts?.selectTenantId;
+      if (preferred && nextTenants.some((t) => t.tenantId === preferred)) {
+        setSelectedTenantId(preferred);
+      } else {
+        setSelectedTenantId((prev) => {
+          if (prev && nextTenants.some((t) => t.tenantId === prev)) {
+            return prev;
+          }
+          if (nextTenants.length > 0) {
+            return nextTenants[0].tenantId;
+          }
+          return null;
+        });
       }
     } catch (caught) {
       notify({ type: "error", text: sectionError(caught) });
     } finally {
       setLoading(false);
     }
-  }, [notify, selectedTenantId]);
+  }, [notify]);
 
   useEffect(() => {
     void loadTenants();
@@ -1145,20 +1188,31 @@ function TenantsPage({
       setTenantMemories([]);
       setMemoryDraft("");
       setWhEditing(false);
+      setLlmSettings(null);
+      setLlmModelDraft("");
+      setUsageCustomSummary(null);
+      setUsageFrom("");
+      setUsageTo("");
       return;
     }
     void (async () => {
       try {
-        const [nextCredentials, nextWizardState, nextWarehouse, nextMemories] = await Promise.all([
+        const [nextCredentials, nextWizardState, nextWarehouse, nextMemories, nextLlm] = await Promise.all([
           apiRequest<CredentialReference>(`/api/admin/credentials-ref/${selectedTenantId}`),
           apiRequest<WizardStateResponse>(`/api/admin/wizard/tenant/${selectedTenantId}/state`),
           apiRequest<WarehouseConfigResponse>(`/api/admin/tenants/${selectedTenantId}/warehouse`),
-          apiRequest<TenantMemory[]>(`/api/admin/tenants/${selectedTenantId}/memories?limit=100`)
+          apiRequest<TenantMemory[]>(`/api/admin/tenants/${selectedTenantId}/memories?limit=100`),
+          apiRequest<TenantLlmSettingsResponse>(`/api/admin/tenants/${selectedTenantId}/llm`)
         ]);
         setCredentials(nextCredentials);
         setWizardState(nextWizardState);
         setWarehouseConfig(nextWarehouse);
         setTenantMemories(nextMemories);
+        setLlmSettings(nextLlm);
+        setLlmModelDraft(nextLlm.llmModel ?? "");
+        setUsageCustomSummary(null);
+        setUsageFrom("");
+        setUsageTo("");
         setMemoryDraft("");
         setWhEditing(false);
         if (nextWarehouse.provider === "snowflake" && nextWarehouse.snowflake) {
@@ -1274,9 +1328,8 @@ function TenantsPage({
           body: form
         });
         notify({ type: "success", text: `Created ${form.tenantId}.` });
-        setSelectedTenantId(form.tenantId);
       }
-      await loadTenants();
+      await loadTenants(selectedTenant ? undefined : { selectTenantId: form.tenantId });
     } catch (caught) {
       notify({ type: "error", text: sectionError(caught) });
     } finally {
@@ -1325,7 +1378,6 @@ function TenantsPage({
     try {
       await apiRequest(`/api/admin/tenants/${selectedTenant.tenantId}`, { method: "DELETE" });
       notify({ type: "success", text: `Deleted ${selectedTenant.tenantId}.` });
-      setSelectedTenantId(null);
       await loadTenants();
     } catch (caught) {
       notify({ type: "error", text: sectionError(caught) });
@@ -1393,6 +1445,49 @@ function TenantsPage({
       notify({ type: "error", text: sectionError(caught) });
     } finally {
       setSavingMemory(false);
+    }
+  }
+
+  async function saveLlmSettings() {
+    if (!selectedTenant) return;
+    setSavingLlm(true);
+    try {
+      const trimmed = llmModelDraft.trim();
+      const res = await apiRequest<TenantLlmSettingsResponse>(`/api/admin/tenants/${selectedTenant.tenantId}/llm`, {
+        method: "PUT",
+        body: { llmModel: trimmed.length > 0 ? trimmed : null }
+      });
+      setLlmSettings(res);
+      setLlmModelDraft(res.llmModel ?? "");
+      notify({ type: "success", text: "LLM model settings saved." });
+    } catch (caught) {
+      notify({ type: "error", text: sectionError(caught) });
+    } finally {
+      setSavingLlm(false);
+    }
+  }
+
+  async function loadLlmUsageCustomRange() {
+    if (!selectedTenant) return;
+    setLoadingUsageRange(true);
+    try {
+      const params = new URLSearchParams();
+      if (usageFrom.trim()) params.set("from", usageFrom.trim());
+      if (usageTo.trim()) params.set("to", usageTo.trim());
+      const qs = params.toString();
+      const path = `/api/admin/tenants/${selectedTenant.tenantId}/llm/usage${qs ? `?${qs}` : ""}`;
+      const res = await apiRequest<TenantLlmUsageSummaryUi & { costNote?: string }>(path);
+      setUsageCustomSummary({
+        requestCount: res.requestCount,
+        totalPromptTokens: res.totalPromptTokens,
+        totalCompletionTokens: res.totalCompletionTokens,
+        totalTokens: res.totalTokens,
+        totalCost: res.totalCost
+      });
+    } catch (caught) {
+      notify({ type: "error", text: sectionError(caught) });
+    } finally {
+      setLoadingUsageRange(false);
     }
   }
 
@@ -1564,12 +1659,12 @@ function TenantsPage({
           ) : undefined
         }
       />
-      <div className="three-column">
-        <AppShellCard title="Tenant list" subtitle="Select a tenant to edit or inspect">
+      <div className="double-stack">
+        <div className="tenant-toolbar">
           {loading ? (
-            <div className="muted">Loading…</div>
+            <div className="muted">Loading tenants…</div>
           ) : tenants.length === 0 ? (
-            <div className="empty-state">No tenants created yet.</div>
+            <div className="muted">No tenants yet — use New tenant to create one.</div>
           ) : (
             <div className="list-stack">
               {tenants.map((tenant) => (
@@ -1711,11 +1806,124 @@ function TenantsPage({
                   value={wizardState?.hasTelegramBotOverride ? "Configured" : "Not configured"}
                 />
                 <DetailItem label="Updated" value={formatDate(selectedTenant.updatedAt)} />
+                {wizardState?.llmUsageLast30Days ? (
+                  <>
+                    <DetailItem
+                      label="LLM usage (30d) — API calls"
+                      value={String(wizardState.llmUsageLast30Days.requestCount)}
+                    />
+                    <DetailItem
+                      label="LLM usage (30d) — total tokens"
+                      value={String(wizardState.llmUsageLast30Days.totalTokens)}
+                    />
+                    <DetailItem
+                      label="LLM usage (30d) — credits"
+                      value={formatLlmCost(wizardState.llmUsageLast30Days.totalCost)}
+                    />
+                  </>
+                ) : (
+                  <DetailItem label="LLM usage (30d)" value="No data yet" />
+                )}
               </div>
             ) : (
               <div className="empty-state">Create or select a tenant to inspect operational state.</div>
             )}
           </AppShellCard>
+
+          {selectedTenant ? (
+            <AppShellCard
+              title="LLM model and usage"
+              subtitle="Tenant default model and OpenRouter-reported spend. Costs are provider credits when available."
+              action={
+                <div className="button-row">
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    disabled={savingLlm}
+                    onClick={() => setLlmModelDraft(llmSettings?.llmModel ?? "")}
+                  >
+                    Reset model draft
+                  </button>
+                  <button type="button" disabled={savingLlm} onClick={() => void saveLlmSettings()}>
+                    {savingLlm ? "Saving…" : "Save model"}
+                  </button>
+                </div>
+              }
+            >
+              <div className="details-grid">
+                <DetailItem label="Effective model" value={llmSettings?.effectiveLlmModel ?? "—"} />
+                <DetailItem label="Deployment default (LLM_MODEL)" value={llmSettings?.defaultLlmModel ?? "—"} />
+              </div>
+              <label>
+                Tenant model override
+                <input
+                  value={llmModelDraft}
+                  onChange={(event) => setLlmModelDraft(event.target.value)}
+                  placeholder="provider/model — leave empty to use deployment default"
+                  autoComplete="off"
+                />
+              </label>
+              <p className="muted">Clear the field and save to remove the override. Applies when channels do not pass an explicit model.</p>
+
+              <div className="subsection-title" style={{ marginTop: "1rem" }}>
+                Last 30 days
+              </div>
+              {wizardState?.llmUsageLast30Days && wizardState.llmUsageLast30Days.requestCount > 0 ? (
+                <div className="details-grid">
+                  <DetailItem label="LLM API calls" value={String(wizardState.llmUsageLast30Days.requestCount)} />
+                  <DetailItem label="Prompt tokens" value={String(wizardState.llmUsageLast30Days.totalPromptTokens)} />
+                  <DetailItem label="Completion tokens" value={String(wizardState.llmUsageLast30Days.totalCompletionTokens)} />
+                  <DetailItem label="Total tokens" value={String(wizardState.llmUsageLast30Days.totalTokens)} />
+                  <DetailItem label="Reported cost (credits)" value={formatLlmCost(wizardState.llmUsageLast30Days.totalCost)} />
+                </div>
+              ) : (
+                <p className="muted">No LLM usage recorded in the last 30 days.</p>
+              )}
+
+              <div className="subsection-title" style={{ marginTop: "1rem" }}>
+                Custom range
+              </div>
+              <div className="form-grid">
+                <label>
+                  From (ISO date/time)
+                  <input
+                    value={usageFrom}
+                    onChange={(event) => setUsageFrom(event.target.value)}
+                    placeholder="2026-01-01 or 2026-01-01T00:00:00.000Z"
+                    autoComplete="off"
+                  />
+                </label>
+                <label>
+                  To (ISO date/time)
+                  <input
+                    value={usageTo}
+                    onChange={(event) => setUsageTo(event.target.value)}
+                    placeholder="Optional upper bound"
+                    autoComplete="off"
+                  />
+                </label>
+              </div>
+              <div className="button-row">
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={loadingUsageRange}
+                  onClick={() => void loadLlmUsageCustomRange()}
+                >
+                  {loadingUsageRange ? "Loading…" : "Load summary"}
+                </button>
+              </div>
+              {usageCustomSummary ? (
+                <div className="details-grid" style={{ marginTop: "0.75rem" }}>
+                  <DetailItem label="LLM API calls" value={String(usageCustomSummary.requestCount)} />
+                  <DetailItem label="Prompt tokens" value={String(usageCustomSummary.totalPromptTokens)} />
+                  <DetailItem label="Completion tokens" value={String(usageCustomSummary.totalCompletionTokens)} />
+                  <DetailItem label="Total tokens" value={String(usageCustomSummary.totalTokens)} />
+                  <DetailItem label="Reported cost (credits)" value={formatLlmCost(usageCustomSummary.totalCost)} />
+                </div>
+              ) : null}
+            </AppShellCard>
+          ) : null}
 
           {selectedTenant ? (
             <AppShellCard
@@ -1953,7 +2161,6 @@ function TenantsPage({
               )}
             </AppShellCard>
           ) : null}
-        </div>
       </div>
     </div>
   );
@@ -2341,6 +2548,24 @@ function SchedulesPage({
           )}
         </AppShellCard>
       </div>
+    </div>
+  );
+}
+
+function ExecutionTurnLlmUsage({ debug }: { debug: Record<string, unknown> }): ReactElement | null {
+  const raw = debug.llmUsage;
+  if (!raw || typeof raw !== "object") return null;
+  const u = raw as { totals?: Record<string, number>; calls?: unknown[] };
+  const t = u.totals;
+  if (!t) return null;
+  const calls = Array.isArray(u.calls) ? u.calls.length : 0;
+  return (
+    <div className="details-grid" style={{ marginBottom: "0.75rem" }}>
+      <DetailItem label="LLM sub-calls (turn)" value={String(calls)} />
+      <DetailItem label="Prompt tokens" value={String(t.promptTokens ?? 0)} />
+      <DetailItem label="Completion tokens" value={String(t.completionTokens ?? 0)} />
+      <DetailItem label="Total tokens" value={String(t.totalTokens ?? 0)} />
+      <DetailItem label="Cost (credits)" value={formatLlmCost(Number(t.totalCost ?? 0))} />
     </div>
   );
 }

@@ -1,5 +1,6 @@
 import { CronTime } from "cron";
 import { z } from "zod";
+import { env } from "../config/env.js";
 import {
   ChartBuildRequest,
   ChartTool,
@@ -7,6 +8,7 @@ import {
   DbtRepositoryService,
   LlmMessage,
   LlmProvider,
+  LlmUsage,
   TenantWarehouseProvider,
   WarehouseAdapter
 } from "./interfaces.js";
@@ -462,6 +464,60 @@ export class AnalyticsAgentRuntime {
       status: "running"
     });
 
+    const llmCallSnapshots: Array<{
+      callIndex: number;
+      model: string;
+      usage?: LlmUsage;
+      generationId?: string;
+    }> = [];
+    let llmCallSeq = 0;
+    let llmUsagePersisted = false;
+
+    const persistLlmUsageToStore = (): void => {
+      if (llmUsagePersisted) {
+        return;
+      }
+      llmUsagePersisted = true;
+      for (const snap of llmCallSnapshots) {
+        this.store.insertLlmUsageEvent({
+          tenantId: context.tenantId,
+          executionTurnId: executionTurn.id,
+          conversationId: context.conversationId,
+          model: snap.model,
+          generationId: snap.generationId ?? null,
+          promptTokens: snap.usage?.promptTokens ?? 0,
+          completionTokens: snap.usage?.completionTokens ?? 0,
+          totalTokens: snap.usage?.totalTokens ?? 0,
+          cost: snap.usage?.cost ?? null,
+          callIndex: snap.callIndex
+        });
+      }
+    };
+
+    const buildLlmUsageDebug = (): Record<string, unknown> => {
+      const totals = llmCallSnapshots.reduce(
+        (acc, c) => ({
+          promptTokens: acc.promptTokens + (c.usage?.promptTokens ?? 0),
+          completionTokens: acc.completionTokens + (c.usage?.completionTokens ?? 0),
+          totalTokens: acc.totalTokens + (c.usage?.totalTokens ?? 0),
+          totalCost: acc.totalCost + (c.usage?.cost ?? 0)
+        }),
+        { promptTokens: 0, completionTokens: 0, totalTokens: 0, totalCost: 0 }
+      );
+      return {
+        totals,
+        calls: llmCallSnapshots.map((c) => ({
+          callIndex: c.callIndex,
+          model: c.model,
+          promptTokens: c.usage?.promptTokens ?? 0,
+          completionTokens: c.usage?.completionTokens ?? 0,
+          totalTokens: c.usage?.totalTokens ?? 0,
+          cost: c.usage?.cost,
+          generationId: c.generationId
+        }))
+      };
+    };
+
     try {
       const profile = this.store.getOrCreateProfile(context.tenantId, context.profileName);
       timings.profileMs = Date.now() - startedAt;
@@ -480,7 +536,29 @@ export class AnalyticsAgentRuntime {
         ? (tenantWhConfig?.bigquery?.dataset?.trim() ?? process.env.BIGQUERY_DATASET?.trim() ?? "")
         : (tenantWhConfig?.snowflake?.schema?.trim() ?? process.env.SNOWFLAKE_SCHEMA?.trim() ?? "");
 
-      const llmModel = context.llmModel?.trim() || process.env.LLM_MODEL || "openai/gpt-4o-mini";
+      const tenantLlmOverride = this.store.getTenantLlmSettings(context.tenantId)?.llmModel?.trim();
+      const llmModel =
+        (tenantLlmOverride && tenantLlmOverride.length > 0 ? tenantLlmOverride : "") ||
+        context.llmModel?.trim() ||
+        env.llmModel ||
+        "openai/gpt-4o-mini";
+
+      const runLlm = async (input: { messages: LlmMessage[]; temperature: number }): Promise<string> => {
+        const callIndex = llmCallSeq++;
+        const result = await this.llm.generateText({
+          model: llmModel,
+          messages: input.messages,
+          temperature: input.temperature
+        });
+        llmCallSnapshots.push({
+          callIndex,
+          model: llmModel,
+          usage: result.usage,
+          generationId: result.generationId
+        });
+        return result.text;
+      };
+
       const now = new Date();
       const currentDateIso = now.toISOString();
       const currentDate = currentDateIso.slice(0, 10);
@@ -505,7 +583,12 @@ export class AnalyticsAgentRuntime {
         }
       });
       const schemaCandidates = isBigQuery
-        ? [whSchema].filter((v) => v.length > 0)
+        ? Array.from(
+            new Set([
+              whSchema,
+              ...dbtModels.map((m) => inferSchemaHintFromModelPath(m.relativePath, whSchema).toLowerCase())
+            ].filter((v) => v.length > 0))
+          )
         : Array.from(
             new Set(
               [whSchema.toUpperCase(), "INT", "MARTS", "STAGING", "CORE", "PUBLIC"].filter(
@@ -654,7 +737,8 @@ export class AnalyticsAgentRuntime {
               return `${m.name} -> ${m.relativePath}`;
             }
             if (isBigQuery) {
-              return `${m.name} -> ${m.relativePath} -> \`${whDatabase}.${whSchema}.${m.name}\``;
+              const hintedDataset = inferSchemaHintFromModelPath(m.relativePath, whSchema).toLowerCase();
+              return `${m.name} -> ${m.relativePath} -> \`${whDatabase}.${hintedDataset}.${m.name}\``;
             }
             const hintedSchema = inferSchemaHintFromModelPath(m.relativePath, whSchema.toUpperCase());
             return `${m.name} -> ${m.relativePath} -> "${whDatabase}"."${hintedSchema}".${quoteSqlIdent(m.name)}`;
@@ -673,6 +757,8 @@ export class AnalyticsAgentRuntime {
         debug: Record<string, unknown>,
         artifacts?: AgentArtifact[]
       ): AgentResponse => {
+        persistLlmUsageToStore();
+        const mergedDebug = { ...debug, llmUsage: buildLlmUsageDebug() };
         this.store.addMessage({
           tenantId: context.tenantId,
           conversationId: context.conversationId,
@@ -683,12 +769,12 @@ export class AnalyticsAgentRuntime {
           turnId: executionTurn.id,
           status: "completed",
           assistantText: text,
-          debug
+          debug: mergedDebug
         });
         return {
           text,
           artifacts,
-          debug
+          debug: mergedDebug
         };
       };
 
@@ -703,8 +789,7 @@ export class AnalyticsAgentRuntime {
 
       for (let step = 1; step <= maxToolSteps; step += 1) {
       const planRaw = await measure(`plannerMs_step${step}`, async () =>
-        this.llm.generateText({
-          model: llmModel,
+        runLlm({
           messages: [...baseMessages(), ...loopMessages],
           temperature: 0
         })
@@ -1045,8 +1130,7 @@ export class AnalyticsAgentRuntime {
       if (lastSuccessfulQuery) {
         let text = "";
         try {
-          text = await this.llm.generateText({
-            model: llmModel,
+          text = await runLlm({
             temperature: 0.1,
             messages: [
               {
@@ -1119,6 +1203,7 @@ export class AnalyticsAgentRuntime {
         latestChartArtifact ? [latestChartArtifact] : undefined
       );
     } catch (error) {
+      persistLlmUsageToStore();
       this.store.completeExecutionTurn({
         turnId: executionTurn.id,
         status: "failed",
@@ -1126,7 +1211,8 @@ export class AnalyticsAgentRuntime {
         debug: {
           plannerAttempts,
           toolCalls,
-          timings: { ...timings, totalMs: Date.now() - startedAt }
+          timings: { ...timings, totalMs: Date.now() - startedAt },
+          llmUsage: buildLlmUsageDebug()
         }
       });
       throw error;

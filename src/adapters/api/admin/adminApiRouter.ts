@@ -113,6 +113,90 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
     }
   });
 
+  router.get("/tenants/:tenantId/llm", (req: Request, res: Response) => {
+    try {
+      const tenantId = param(req, "tenantId");
+      if (denyUnlessTenantAccess(req, res, tenantId)) {
+        return;
+      }
+      if (!store.getTenantRepo(tenantId)) {
+        res.status(404).json({ error: "Tenant not found" });
+        return;
+      }
+      const settings = store.getTenantLlmSettings(tenantId);
+      const override = settings?.llmModel?.trim() ? settings.llmModel.trim() : null;
+      const effectiveLlmModel = override || env.llmModel;
+      res.json({
+        llmModel: override,
+        effectiveLlmModel,
+        defaultLlmModel: env.llmModel
+      });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.put("/tenants/:tenantId/llm", (req: Request, res: Response) => {
+    try {
+      const tenantId = param(req, "tenantId");
+      if (denyUnlessTenantAccess(req, res, tenantId)) {
+        return;
+      }
+      if (!store.getTenantRepo(tenantId)) {
+        res.status(404).json({ error: "Tenant not found" });
+        return;
+      }
+      const body = req.body as { llmModel?: string | null };
+      if (!("llmModel" in body)) {
+        res.status(400).json({ error: "llmModel is required (use null or empty string to clear)" });
+        return;
+      }
+      const raw = body.llmModel;
+      const normalized =
+        raw === null || raw === undefined
+          ? null
+          : typeof raw === "string"
+            ? raw.trim() || null
+            : null;
+      const updated = store.upsertTenantLlmSettings(tenantId, normalized);
+      const effectiveLlmModel = updated.llmModel || env.llmModel;
+      res.json({
+        llmModel: updated.llmModel,
+        effectiveLlmModel,
+        defaultLlmModel: env.llmModel,
+        updatedAt: updated.updatedAt
+      });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.get("/tenants/:tenantId/llm/usage", (req: Request, res: Response) => {
+    try {
+      const tenantId = param(req, "tenantId");
+      if (denyUnlessTenantAccess(req, res, tenantId)) {
+        return;
+      }
+      if (!store.getTenantRepo(tenantId)) {
+        res.status(404).json({ error: "Tenant not found" });
+        return;
+      }
+      const fromIso = typeof req.query.from === "string" ? req.query.from.trim() : undefined;
+      const toIso = typeof req.query.to === "string" ? req.query.to.trim() : undefined;
+      const summary = store.getTenantLlmUsageSummary(tenantId, {
+        fromIso: fromIso || undefined,
+        toIso: toIso || undefined
+      });
+      res.json({
+        ...summary,
+        costNote:
+          "totalCost sums provider-reported cost when present (OpenRouter returns account credits)."
+      });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
   router.post("/tenants", (req: Request, res: Response) => {
     try {
       if (denyUnlessSuperadmin(req, res)) {
@@ -1271,6 +1355,8 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
       const users = store.listSlackUserMappings().filter((entry) => entry.tenantId === tenantId);
       const sharedTeams = store.listSlackSharedTeamMappings().filter((entry) => entry.tenantId === tenantId);
       const botFlags = channelBotPublicFlags(tenantId);
+      const thirtyDaysAgo = new Date(Date.now() - 30 * 86_400_000).toISOString();
+      const llmUsageLast30Days = store.getTenantLlmUsageSummary(tenantId, { fromIso: thirtyDaysAgo });
       res.json({
         tenantId,
         hasRepo: true,
@@ -1281,7 +1367,8 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
         slackSharedTeamCount: sharedTeams.length,
         hasSlackBotOverride: botFlags.hasSlackBotOverride,
         hasTelegramBotOverride: botFlags.hasTelegramBotOverride,
-        slackEventsPathSuffix: `/slack/events/tenants/${encodeURIComponent(tenantId)}`
+        slackEventsPathSuffix: `/slack/events/tenants/${encodeURIComponent(tenantId)}`,
+        llmUsageLast30Days
       });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
