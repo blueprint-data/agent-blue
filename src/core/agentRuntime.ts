@@ -1,3 +1,5 @@
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { z } from "zod";
 import {
   ChartBuildRequest,
@@ -11,6 +13,7 @@ import {
 } from "./interfaces.js";
 import { AgentArtifact, AgentContext, AgentResponse, QueryResult } from "./types.js";
 import { SqlGuard } from "./sqlGuard.js";
+import { env } from "../config/env.js";
 
 const metadataLookupSchema = z.object({
   kind: z.enum(["schemas", "tables", "columns"]),
@@ -44,10 +47,15 @@ const chartRequestSchema = z.object({
   maxPoints: z.number().int().positive().max(500).optional()
 });
 
+const contextReadSchema = z.object({
+  type: z.enum(["model", "metric"]),
+  name: z.string()
+});
+
 const toolDecisionSchema = z.object({
   type: z.enum(["tool_call", "final_answer"]),
   tool: z
-    .enum(["warehouse.query", "dbt.listModels", "dbt.getModelSql", "warehouse.lookupMetadata", "chartjs.build"])
+    .enum(["warehouse.query", "dbt.listModels", "dbt.getModelSql", "warehouse.lookupMetadata", "chartjs.build", "context.read"])
     .optional(),
   args: z.record(z.string(), z.unknown()).optional(),
   answer: z.string().optional(),
@@ -192,6 +200,28 @@ function inferSchemaHintFromModelPath(relativePath: string, fallbackSchema: stri
   return fallbackSchema || "PUBLIC";
 }
 
+function resolveContextDir(tenantId: string): string {
+  return join(env.appDataDir, "context", tenantId);
+}
+
+function readContextFile(contextDir: string, ...segments: string[]): string | null {
+  try {
+    return readFileSync(join(contextDir, ...segments), "utf-8");
+  } catch {
+    return null;
+  }
+}
+
+function listContextFiles(contextDir: string, subdir: string): string[] {
+  try {
+    return readdirSync(join(contextDir, subdir))
+      .filter((f) => f.endsWith(".md"))
+      .map((f) => f.replace(/\.md$/, ""));
+  } catch {
+    return [];
+  }
+}
+
 export type WarehouseResolver = WarehouseAdapter | ((tenantId: string) => WarehouseAdapter);
 
 export interface RuntimeRespondOptions {
@@ -334,6 +364,12 @@ export class AnalyticsAgentRuntime {
             )
           );
 
+      const contextDir = resolveContextDir(context.tenantId);
+      const tenantSummary = readContextFile(contextDir, "tenant_summary.md");
+      const availableModelContexts = listContextFiles(contextDir, "models");
+      const availableMetricContexts = listContextFiles(contextDir, "metrics");
+      const hasPrecomputedContext = availableModelContexts.length > 0 || availableMetricContexts.length > 0;
+
       const historyMessages: LlmMessage[] = history
         .filter((m) => m.role !== "tool" && m.role !== "system")
         .map((m): LlmMessage => ({
@@ -421,9 +457,10 @@ export class AnalyticsAgentRuntime {
           "- dbt.getModelSql: { modelName: string }",
           `- warehouse.lookupMetadata: { kind: "schemas"|"tables"|"columns", ${dbLabel}?: string, ${schemaLabel}?: string, table?: string, search?: string }`,
           '- chartjs.build: { type?: "bar"|"line"|"pie"|"doughnut", title?: string, xKey?: string, yKey?: string, seriesKey?: string, horizontal?: boolean, stacked?: boolean, grouped?: boolean, percentStacked?: boolean, sort?: "none"|"asc"|"desc"|"label_asc"|"label_desc", smooth?: boolean, tension?: number, fill?: boolean, step?: boolean, pointRadius?: number, donutCutout?: number, showPercentLabels?: boolean, topN?: number, otherLabel?: string, stackId?: string, maxPoints?: number }',
+          '- context.read: { type: "model"|"metric", name: string } — retrieves pre-computed context (column schemas, descriptions, relationships, caveats, SQL recipes) for a model or metric. Use before writing SQL to understand table structure and business logic.',
           "",
           "Return ONLY valid JSON in one of these shapes:",
-          '{ "type": "tool_call", "tool": "warehouse.query|dbt.listModels|dbt.getModelSql|warehouse.lookupMetadata|chartjs.build", "args": { ... }, "reasoning"?: string }',
+          '{ "type": "tool_call", "tool": "warehouse.query|dbt.listModels|dbt.getModelSql|warehouse.lookupMetadata|chartjs.build|context.read", "args": { ... }, "reasoning"?: string }',
           '{ "type": "final_answer", "answer": string, "reasoning"?: string }',
           "- If the user request is not analytical, ALWAYS return final_answer with the refusal text and do not call tools.",
           "",
@@ -442,7 +479,8 @@ export class AnalyticsAgentRuntime {
           `- ${schemaLabel}: ${whSchema || "(not set)"}`,
           isBigQuery ? "" : `- schema_candidates: ${schemaCandidates.join(", ")}`,
           `- dbt subpath: ${tenantRepo?.dbtSubpath ?? "(unknown)"}`,
-          exampleRelation
+          exampleRelation,
+          ...(tenantSummary ? ["", "Tenant background:", tenantSummary] : [])
         ].filter(Boolean).join("\n")
       },
       {
@@ -461,6 +499,24 @@ export class AnalyticsAgentRuntime {
           })
           .join("\n")}`
       },
+      ...(hasPrecomputedContext
+        ? [
+            {
+              role: "system" as const,
+              content: [
+                "Pre-computed context available (use context.read to fetch details before writing SQL):",
+                ...(availableModelContexts.length > 0
+                  ? [`- Models: ${availableModelContexts.join(", ")}`]
+                  : []),
+                ...(availableMetricContexts.length > 0
+                  ? [`- Metrics: ${availableMetricContexts.join(", ")}`]
+                  : []),
+                "Context includes column schemas, descriptions, relationships, caveats, and SQL recipes.",
+                "Call context.read for any listed model/metric to get this information before querying."
+              ].join("\n")
+            }
+          ]
+        : []),
       ...historyMessages,
       {
         role: "user",
@@ -660,6 +716,33 @@ export class AnalyticsAgentRuntime {
           loopMessages.push({
             role: "user",
             content: `Tool result (chartjs.build): ${asJsonBlock(chartBuild.summary)}`
+          });
+          continue;
+        }
+
+        if (plan.tool === "context.read") {
+          const parsed = contextReadSchema.safeParse(args);
+          if (!parsed.success) {
+            throw new Error('context.read requires { type: "model"|"metric", name: string }.');
+          }
+          const subdir = parsed.data.type === "model" ? "models" : "metrics";
+          const content = await runTool(
+            "context.read",
+            { type: parsed.data.type, name: parsed.data.name },
+            async () => {
+              const text = readContextFile(contextDir, subdir, `${parsed.data.name}.md`);
+              if (!text) {
+                throw new Error(
+                  `No pre-computed context found for ${parsed.data.type} "${parsed.data.name}". Use dbt.getModelSql or warehouse.lookupMetadata instead.`
+                );
+              }
+              return text;
+            },
+            (text) => ({ type: parsed.data.type, name: parsed.data.name, length: text.length })
+          );
+          loopMessages.push({
+            role: "user",
+            content: `Tool result (context.read): ${content}`
           });
           continue;
         }

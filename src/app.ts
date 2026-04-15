@@ -50,6 +50,29 @@ export function buildRuntime(store: SqliteConversationStore): AnalyticsAgentRunt
   return new AnalyticsAgentRuntime(llm, warehouseResolver, chartTool, dbtRepo, store, sqlGuard);
 }
 
+export function buildWarehouseResolver(store: SqliteConversationStore): (tenantId: string) => WarehouseAdapter {
+  let defaultWarehouse: WarehouseAdapter | null = null;
+  return (tenantId: string) => {
+    const config = store.getTenantWarehouseConfig(tenantId);
+    if (config) {
+      return buildWarehouseFromTenantConfig(config);
+    }
+    if (!defaultWarehouse) {
+      if (env.bigqueryProjectId) {
+        defaultWarehouse = buildBigQueryWarehouse();
+      } else if (env.snowflakeAccount) {
+        defaultWarehouse = buildSnowflakeWarehouse();
+      } else {
+        throw new Error(
+          `No warehouse config found for tenant "${tenantId}". ` +
+          "Save one with: npm run dev -- set-warehouse --tenant <id> --provider bigquery --project <gcp-project>"
+        );
+      }
+    }
+    return defaultWarehouse;
+  };
+}
+
 export function buildLlmProvider(): OpenAiCompatibleProvider {
   return new OpenAiCompatibleProvider(env.llmBaseUrl, env.llmApiKey, {
     "HTTP-Referer": "https://agent-blue.local",
