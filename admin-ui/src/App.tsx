@@ -3,6 +3,10 @@ import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "re
 import { Link, Navigate, Route, Routes } from "react-router-dom";
 import { ApiError, apiRequest, uploadRequest } from "./api";
 import { AppSidebar } from "./components/app-sidebar";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { SidebarInset, SidebarProvider, SidebarTrigger } from "./components/ui/sidebar";
 
 interface SessionState {
@@ -210,15 +214,15 @@ function StatusBadge({ label, tone }: { label: string; tone?: string }) {
 
 function AppShellCard(props: { title: string; subtitle?: string; action?: ReactElement; children: ReactNode }) {
   return (
-    <section className="card">
-      <div className="card-header">
+    <section className="bp-card">
+      <div className="flex items-start justify-between px-6 pt-6 pb-4">
         <div>
-          <h3>{props.title}</h3>
-          {props.subtitle ? <p>{props.subtitle}</p> : null}
+          <h3 className="font-semibold leading-none tracking-tight text-[var(--semantic-text-strong)]">{props.title}</h3>
+          {props.subtitle ? <p className="text-sm text-[var(--semantic-text-body)] mt-1.5">{props.subtitle}</p> : null}
         </div>
         {props.action}
       </div>
-      <div className="card-body">{props.children}</div>
+      <div className="px-6 pb-6 flex flex-col gap-4">{props.children}</div>
     </section>
   );
 }
@@ -313,7 +317,9 @@ function LoginScreen({
         <div className="login-card">
           <span className="eyebrow">Agent Blue Admin</span>
           <h1 className="hero-title">Sign in</h1>
-          <p>Secure, session-based admin access for tenant operations and channel routing.</p>
+          <p className="text-sm mt-2 mb-4" style={{ color: "var(--semantic-text-body)" }}>
+            Secure, session-based admin access for tenant operations and channel routing.
+          </p>
           {!session.loginEnabled ? (
             <div className="banner error">
               No browser login is configured. Set Google OAuth (ADMIN_AUTH_GOOGLE_ENABLED and related vars) and/or
@@ -350,23 +356,29 @@ function LoginScreen({
           ) : null}
           {error ? <div className="banner error">{error}</div> : null}
           {session.passwordLoginEnabled ? (
-            <form onSubmit={handleSubmit} className="stack">
-              <label>
-                Username
-                <input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" />
-              </label>
-              <label>
-                Password
-                <input
+            <form onSubmit={handleSubmit} className="flex flex-col gap-4 mt-2">
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="login-username" style={{ color: "var(--semantic-text-body)" }}>Username</Label>
+                <Input
+                  id="login-username"
+                  value={username}
+                  onChange={(event) => setUsername(event.target.value)}
+                  autoComplete="username"
+                />
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="login-password" style={{ color: "var(--semantic-text-body)" }}>Password</Label>
+                <Input
+                  id="login-password"
                   type="password"
                   value={password}
                   onChange={(event) => setPassword(event.target.value)}
                   autoComplete="current-password"
                 />
-              </label>
-              <button type="submit" disabled={submitting}>
+              </div>
+              <Button type="submit" disabled={submitting} className="w-full mt-2">
                 {submitting ? "Signing in…" : "Sign in"}
-              </button>
+              </Button>
             </form>
           ) : null}
         </div>
@@ -498,10 +510,10 @@ function PageHeader({
 }): ReactElement {
   return (
     <header className="page-header">
-      <div>
+      <div className="min-w-0">
         <span className="eyebrow">Admin panel</span>
-        <h2>{title}</h2>
-        <p>{subtitle}</p>
+        <h2 className="mt-1.5 mb-1">{title}</h2>
+        <p className="text-sm leading-relaxed" style={{ color: "var(--semantic-text-body)" }}>{subtitle}</p>
       </div>
       {actions}
     </header>
@@ -548,9 +560,9 @@ function OverviewPage({ notify }: { notify: (value: NotificationState | null) =>
         title="Overview"
         subtitle="Tenants, Slack and Telegram routing, and recent conversations. Run Slack and Telegram worker processes via Docker Compose."
         actions={
-          <button className="secondary-button" onClick={() => void loadOverview()}>
+          <Button variant="outline" onClick={() => void loadOverview()}>
             Refresh
-          </button>
+          </Button>
         }
       />
       {error ? <div className="banner error">{error}</div> : null}
@@ -659,10 +671,10 @@ function StatCard({
   tone?: string;
 }): ReactElement {
   return (
-    <div className={`stat-card ${tone ?? ""}`.trim()}>
-      <span>{label}</span>
-      <strong>{value}</strong>
-      <p>{hint}</p>
+    <div className={`bp-card p-6 ${tone ?? ""}`.trim()}>
+      <p className="text-xs text-[var(--semantic-text-body)] mb-1">{label}</p>
+      <strong className="block text-2xl font-semibold text-[var(--semantic-text-strong)]">{value}</strong>
+      <p className="text-xs text-[var(--semantic-text-body)] mt-1">{hint}</p>
     </div>
   );
 }
@@ -720,18 +732,18 @@ function NewTenantPage({ notify }: { notify: (value: NotificationState | null) =
           <div className="form-grid">
             <label>
               Tenant ID
-              <input value={tenantId} onChange={(event) => setTenantId(event.target.value)} placeholder="acme" />
+              <Input value={tenantId} onChange={(event) => setTenantId(event.target.value)} placeholder="acme" />
             </label>
             <label>
               Repo URL
-              <input value={repoUrl} onChange={(event) => setRepoUrl(event.target.value)} placeholder="git@github.com:org/dbt.git" />
+              <Input value={repoUrl} onChange={(event) => setRepoUrl(event.target.value)} placeholder="git@github.com:org/dbt.git" />
             </label>
             <label>
               dbt subpath
-              <input value={dbtSubpath} onChange={(event) => setDbtSubpath(event.target.value)} />
+              <Input value={dbtSubpath} onChange={(event) => setDbtSubpath(event.target.value)} />
             </label>
           </div>
-          <button
+          <Button
             onClick={() =>
               void runStep("init", async () => {
                 const response = await apiRequest<{ tenantId: string; publicKey: string; message: string }>("/api/admin/wizard/tenant/init", {
@@ -744,14 +756,14 @@ function NewTenantPage({ notify }: { notify: (value: NotificationState | null) =
             }
           >
             Initialize tenant
-          </button>
+          </Button>
           {results.init ? <JsonBlock value={results.init} /> : null}
         </AppShellCard>
 
         <AppShellCard title="2. Verify repo access" subtitle="Confirm the deploy key works after you add it on GitHub">
-          <button disabled={!wizardTenantId} onClick={() => wizardTenantId && void runStep("repo_verify", () => apiRequest(`/api/admin/wizard/tenant/${wizardTenantId}/repo-verify`, { method: "POST" }))}>
+          <Button disabled={!wizardTenantId} onClick={() => wizardTenantId && void runStep("repo_verify", () => apiRequest(`/api/admin/wizard/tenant/${wizardTenantId}/repo-verify`, { method: "POST" }))}>
             Verify repo
-          </button>
+          </Button>
           {results.repo_verify ? <JsonBlock value={results.repo_verify} /> : null}
         </AppShellCard>
 
@@ -768,27 +780,27 @@ function NewTenantPage({ notify }: { notify: (value: NotificationState | null) =
               <>
                 <label>
                   Account
-                  <input value={account} onChange={(event) => setAccount(event.target.value)} />
+                  <Input value={account} onChange={(event) => setAccount(event.target.value)} />
                 </label>
                 <label>
                   Username
-                  <input value={username} onChange={(event) => setUsername(event.target.value)} />
+                  <Input value={username} onChange={(event) => setUsername(event.target.value)} />
                 </label>
                 <label>
                   Warehouse
-                  <input value={warehouse} onChange={(event) => setWarehouse(event.target.value)} />
+                  <Input value={warehouse} onChange={(event) => setWarehouse(event.target.value)} />
                 </label>
                 <label>
                   Database
-                  <input value={database} onChange={(event) => setDatabase(event.target.value)} />
+                  <Input value={database} onChange={(event) => setDatabase(event.target.value)} />
                 </label>
                 <label>
                   Schema
-                  <input value={schema} onChange={(event) => setSchema(event.target.value)} />
+                  <Input value={schema} onChange={(event) => setSchema(event.target.value)} />
                 </label>
                 <label>
                   Role
-                  <input value={role} onChange={(event) => setRole(event.target.value)} placeholder="Optional" />
+                  <Input value={role} onChange={(event) => setRole(event.target.value)} placeholder="Optional" />
                 </label>
                 <label>
                   Auth type
@@ -800,12 +812,12 @@ function NewTenantPage({ notify }: { notify: (value: NotificationState | null) =
                 {authType === "keypair" ? (
                   <label>
                     Private key path
-                    <input value={privateKeyPath} onChange={(event) => setPrivateKeyPath(event.target.value)} placeholder="/path/to/key.p8" />
+                    <Input value={privateKeyPath} onChange={(event) => setPrivateKeyPath(event.target.value)} placeholder="/path/to/key.p8" />
                   </label>
                 ) : (
                   <label>
                     Password env var
-                    <input value={passwordEnvVar} onChange={(event) => setPasswordEnvVar(event.target.value)} />
+                    <Input value={passwordEnvVar} onChange={(event) => setPasswordEnvVar(event.target.value)} />
                   </label>
                 )}
               </>
@@ -813,15 +825,15 @@ function NewTenantPage({ notify }: { notify: (value: NotificationState | null) =
               <>
                 <label>
                   Project ID
-                  <input value={bqProjectId} onChange={(event) => setBqProjectId(event.target.value)} placeholder="my-gcp-project" />
+                  <Input value={bqProjectId} onChange={(event) => setBqProjectId(event.target.value)} placeholder="my-gcp-project" />
                 </label>
                 <label>
                   Dataset
-                  <input value={bqDataset} onChange={(event) => setBqDataset(event.target.value)} placeholder="Optional" />
+                  <Input value={bqDataset} onChange={(event) => setBqDataset(event.target.value)} placeholder="Optional" />
                 </label>
                 <label>
                   Location
-                  <input value={bqLocation} onChange={(event) => setBqLocation(event.target.value)} placeholder="Optional (e.g. US, EU)" />
+                  <Input value={bqLocation} onChange={(event) => setBqLocation(event.target.value)} placeholder="Optional (e.g. US, EU)" />
                 </label>
                 <label>
                   Auth type
@@ -833,7 +845,7 @@ function NewTenantPage({ notify }: { notify: (value: NotificationState | null) =
                 {bqAuthType === "service-account-key" && wizardTenantId ? (
                   <label>
                     Service account key (.json)
-                    <input
+                    <Input
                       type="file"
                       accept=".json"
                       onChange={(event) => {
@@ -852,7 +864,7 @@ function NewTenantPage({ notify }: { notify: (value: NotificationState | null) =
               </>
             )}
           </div>
-          <button
+          <Button
             disabled={!wizardTenantId}
             onClick={() =>
               wizardTenantId &&
@@ -888,38 +900,38 @@ function NewTenantPage({ notify }: { notify: (value: NotificationState | null) =
             }
           >
             Save warehouse config
-          </button>
+          </Button>
           {results.warehouse ? <JsonBlock value={results.warehouse} /> : null}
         </AppShellCard>
 
         <AppShellCard title="4. Test warehouse" subtitle="Run a lightweight connection check">
-          <button disabled={!wizardTenantId} onClick={() => wizardTenantId && void runStep("warehouse_test", () => apiRequest(`/api/admin/wizard/tenant/${wizardTenantId}/warehouse-test`, { method: "POST" }))}>
+          <Button disabled={!wizardTenantId} onClick={() => wizardTenantId && void runStep("warehouse_test", () => apiRequest(`/api/admin/wizard/tenant/${wizardTenantId}/warehouse-test`, { method: "POST" }))}>
             Test connectivity
-          </button>
+          </Button>
           {results.warehouse_test ? <JsonBlock value={results.warehouse_test} /> : null}
         </AppShellCard>
 
         <AppShellCard title="5. Slack mappings" subtitle="Add the Slack contexts that should resolve to this tenant">
           <div className="chip-composer">
-            <input value={channelInput} onChange={(event) => setChannelInput(event.target.value)} placeholder="Channel ID" />
-            <button className="secondary-button" onClick={() => channelInput && (setChannels((current) => [...current, channelInput]), setChannelInput(""))}>
+            <Input value={channelInput} onChange={(event) => setChannelInput(event.target.value)} placeholder="Channel ID" />
+            <Button variant="outline" onClick={() => channelInput && (setChannels((current) => [...current, channelInput]), setChannelInput(""))}>
               Add channel
-            </button>
-            <input value={userInput} onChange={(event) => setUserInput(event.target.value)} placeholder="User ID" />
-            <button className="secondary-button" onClick={() => userInput && (setUsers((current) => [...current, userInput]), setUserInput(""))}>
+            </Button>
+            <Input value={userInput} onChange={(event) => setUserInput(event.target.value)} placeholder="User ID" />
+            <Button variant="outline" onClick={() => userInput && (setUsers((current) => [...current, userInput]), setUserInput(""))}>
               Add user
-            </button>
-            <input value={teamInput} onChange={(event) => setTeamInput(event.target.value)} placeholder="Shared team ID" />
-            <button className="secondary-button" onClick={() => teamInput && (setSharedTeams((current) => [...current, teamInput]), setTeamInput(""))}>
+            </Button>
+            <Input value={teamInput} onChange={(event) => setTeamInput(event.target.value)} placeholder="Shared team ID" />
+            <Button variant="outline" onClick={() => teamInput && (setSharedTeams((current) => [...current, teamInput]), setTeamInput(""))}>
               Add team
-            </button>
+            </Button>
           </div>
           <div className="tag-row">
             {channels.map((entry) => <span key={entry} className="tag">{entry}</span>)}
             {users.map((entry) => <span key={entry} className="tag">{entry}</span>)}
             {sharedTeams.map((entry) => <span key={entry} className="tag">{entry}</span>)}
           </div>
-          <button
+          <Button
             disabled={!wizardTenantId}
             onClick={() =>
               wizardTenantId &&
@@ -936,7 +948,7 @@ function NewTenantPage({ notify }: { notify: (value: NotificationState | null) =
             }
           >
             Save Slack mappings
-          </button>
+          </Button>
           {results.slack_mappings ? <JsonBlock value={results.slack_mappings} /> : null}
         </AppShellCard>
 
@@ -957,7 +969,7 @@ function NewTenantPage({ notify }: { notify: (value: NotificationState | null) =
           <div className="form-grid">
             <label>
               Slack bot token (xoxb-…)
-              <input
+              <Input
                 type="password"
                 autoComplete="off"
                 value={wizSlackBotToken}
@@ -967,7 +979,7 @@ function NewTenantPage({ notify }: { notify: (value: NotificationState | null) =
             </label>
             <label>
               Slack signing secret
-              <input
+              <Input
                 type="password"
                 autoComplete="off"
                 value={wizSlackSigningSecret}
@@ -977,7 +989,7 @@ function NewTenantPage({ notify }: { notify: (value: NotificationState | null) =
             </label>
             <label>
               Telegram bot token
-              <input
+              <Input
                 type="password"
                 autoComplete="off"
                 value={wizTelegramBotToken}
@@ -986,7 +998,7 @@ function NewTenantPage({ notify }: { notify: (value: NotificationState | null) =
               />
             </label>
           </div>
-          <button
+          <Button
             disabled={!wizardTenantId}
             onClick={() =>
               wizardTenantId &&
@@ -1019,14 +1031,14 @@ function NewTenantPage({ notify }: { notify: (value: NotificationState | null) =
             }
           >
             Save channel bot credentials
-          </button>
+          </Button>
           {results.channel_bots ? <JsonBlock value={results.channel_bots} /> : null}
         </AppShellCard>
 
         <AppShellCard title="7. Final validation" subtitle="Run the final go-live checks">
-          <button disabled={!wizardTenantId} onClick={() => wizardTenantId && void runStep("final_validate", () => apiRequest(`/api/admin/wizard/tenant/${wizardTenantId}/final-validate`, { method: "POST" }))}>
+          <Button disabled={!wizardTenantId} onClick={() => wizardTenantId && void runStep("final_validate", () => apiRequest(`/api/admin/wizard/tenant/${wizardTenantId}/final-validate`, { method: "POST" }))}>
             Run final checks
-          </button>
+          </Button>
           {results.final_validate ? <JsonBlock value={results.final_validate} /> : null}
         </AppShellCard>
       </div>
@@ -1540,15 +1552,15 @@ function TenantsPage({
         subtitle="Manage configured tenants, credential references, and day-two operational actions."
         actions={
           isSuperadmin ? (
-            <button
-              className="secondary-button"
+            <Button
+              variant="outline"
               onClick={() => {
                 setSelectedTenantId(null);
                 setForm({ tenantId: "", repoUrl: "", dbtSubpath: "models" });
               }}
             >
               New tenant
-            </button>
+            </Button>
           ) : undefined
         }
       />
@@ -1561,7 +1573,7 @@ function TenantsPage({
           ) : (
             <div className="list-stack">
               {tenants.map((tenant) => (
-                <button
+                <Button
                   key={tenant.tenantId}
                   type="button"
                   className={`tenant-list-item ${selectedTenantId === tenant.tenantId ? "selected" : ""}`}
@@ -1574,7 +1586,7 @@ function TenantsPage({
                 >
                   <strong>{tenant.tenantId}</strong>
                   <span>{compactText(tenant.repoUrl, 42)}</span>
-                </button>
+                </Button>
               ))}
             </div>
           )}
@@ -1585,15 +1597,15 @@ function TenantsPage({
             title={selectedTenant ? `Tenant · ${selectedTenant.tenantId}` : "Create tenant"}
             subtitle="Repo configuration and primary tenant identifiers"
             action={
-              <button onClick={() => void handleSave()} disabled={saving}>
+              <Button onClick={() => void handleSave()} disabled={saving}>
                 {saving ? "Saving…" : selectedTenant ? "Save changes" : "Create tenant"}
-              </button>
+              </Button>
             }
           >
             <div className="form-grid">
               <label>
                 Tenant ID
-                <input
+                <Input
                   value={form.tenantId}
                   onChange={(event) => setForm((current) => ({ ...current, tenantId: event.target.value }))}
                   disabled={Boolean(selectedTenant)}
@@ -1601,30 +1613,30 @@ function TenantsPage({
               </label>
               <label>
                 Repo URL
-                <input value={form.repoUrl} onChange={(event) => setForm((current) => ({ ...current, repoUrl: event.target.value }))} />
+                <Input value={form.repoUrl} onChange={(event) => setForm((current) => ({ ...current, repoUrl: event.target.value }))} />
               </label>
               <label>
                 dbt subpath
-                <input value={form.dbtSubpath} onChange={(event) => setForm((current) => ({ ...current, dbtSubpath: event.target.value }))} />
+                <Input value={form.dbtSubpath} onChange={(event) => setForm((current) => ({ ...current, dbtSubpath: event.target.value }))} />
               </label>
             </div>
             {selectedTenant ? (
               <div className="stack">
                 <div className="button-row">
-                  <button
-                    className="secondary-button"
+                  <Button
+                    variant="outline"
                     type="button"
                     onClick={() => void refreshRepo()}
                     disabled={refreshingRepo || saving}
                   >
                     {refreshingRepo ? "Refreshing…" : "Refresh repo"}
-                  </button>
+                  </Button>
                 {warehouseConfig?.provider === "snowflake" ? (
                   <>
-                    <button className="secondary-button" onClick={() => fileInputRef.current?.click()}>
+                    <Button variant="outline" onClick={() => fileInputRef.current?.click()}>
                       Upload .p8 key
-                    </button>
-                    <input
+                    </Button>
+                    <Input
                       ref={fileInputRef}
                       type="file"
                       accept=".p8"
@@ -1641,10 +1653,10 @@ function TenantsPage({
                 ) : null}
                 {warehouseConfig?.provider === "bigquery" ? (
                   <>
-                    <button className="secondary-button" onClick={() => bqFileInputRef.current?.click()}>
+                    <Button variant="outline" onClick={() => bqFileInputRef.current?.click()}>
                       Upload SA key (.json)
-                    </button>
-                    <input
+                    </Button>
+                    <Input
                       ref={bqFileInputRef}
                       type="file"
                       accept=".json"
@@ -1660,9 +1672,9 @@ function TenantsPage({
                   </>
                 ) : null}
                   {isSuperadmin ? (
-                    <button className="danger-button" onClick={() => void deleteTenant()}>
+                    <Button variant="destructive" onClick={() => void deleteTenant()}>
                       Delete tenant
-                    </button>
+                    </Button>
                   ) : null}
                 </div>
                 {lastRepoRefresh ? (
@@ -1711,25 +1723,25 @@ function TenantsPage({
               subtitle="Optional dedicated Slack app (token + signing secret) or Telegram bot token. Secrets are write-only."
               action={
                 <div className="button-row">
-                  <button
+                  <Button
                     type="button"
-                    className="secondary-button"
+                    variant="outline"
                     disabled={savingChannelBots}
                     onClick={() => void clearChannelSlack()}
                   >
                     Clear Slack
-                  </button>
-                  <button
+                  </Button>
+                  <Button
                     type="button"
-                    className="secondary-button"
+                    variant="outline"
                     disabled={savingChannelBots}
                     onClick={() => void clearChannelTelegram()}
                   >
                     Clear Telegram
-                  </button>
-                  <button type="button" disabled={savingChannelBots} onClick={() => void saveChannelBots()}>
+                  </Button>
+                  <Button type="button" disabled={savingChannelBots} onClick={() => void saveChannelBots()}>
                     {savingChannelBots ? "Saving…" : "Save credentials"}
-                  </button>
+                  </Button>
                 </div>
               }
             >
@@ -1741,7 +1753,7 @@ function TenantsPage({
               <div className="form-grid">
                 <label>
                   Slack bot token
-                  <input
+                  <Input
                     type="password"
                     autoComplete="off"
                     value={chSlackBotToken}
@@ -1751,7 +1763,7 @@ function TenantsPage({
                 </label>
                 <label>
                   Slack signing secret
-                  <input
+                  <Input
                     type="password"
                     autoComplete="off"
                     value={chSlackSigningSecret}
@@ -1761,7 +1773,7 @@ function TenantsPage({
                 </label>
                 <label>
                   Telegram bot token
-                  <input
+                  <Input
                     type="password"
                     autoComplete="off"
                     value={chTelegramBotToken}
@@ -1777,19 +1789,19 @@ function TenantsPage({
             <AppShellCard
               title="Google admin login domains"
               action={
-                <button
+                <Button
                   type="button"
-                  className="secondary-button"
+                  variant="outline"
                   disabled={savingLoginDomains}
                   onClick={() => void saveLoginDomains()}
                 >
                   {savingLoginDomains ? "Saving…" : "Save domains"}
-                </button>
+                </Button>
               }
             >
               <label>
                 Domains (one per line or comma-separated)
-                <textarea
+                <Textarea
                   rows={4}
                   value={loginDomainsDraft}
                   onChange={(event) => setLoginDomainsDraft(event.target.value)}
@@ -1807,7 +1819,7 @@ function TenantsPage({
               <div className="stack">
                 <label>
                   Add manual memory
-                  <textarea
+                  <Textarea
                     rows={3}
                     value={memoryDraft}
                     maxLength={300}
@@ -1816,9 +1828,9 @@ function TenantsPage({
                   />
                 </label>
                 <div className="button-row">
-                  <button onClick={() => void addTenantMemory()} disabled={savingMemory || memoryDraft.trim().length === 0}>
+                  <Button onClick={() => void addTenantMemory()} disabled={savingMemory || memoryDraft.trim().length === 0}>
                     {savingMemory ? "Adding…" : "Add memory"}
-                  </button>
+                  </Button>
                   <span className="muted">{memoryDraft.trim().length}/300</span>
                 </div>
                 {tenantMemories.length === 0 ? (
@@ -1834,13 +1846,13 @@ function TenantsPage({
                               {memory.source} · created {formatDate(memory.createdAt)} · updated {formatDate(memory.updatedAt)}
                             </div>
                           </div>
-                          <button
-                            className="danger-button small"
+                          <Button
+                            variant="destructive" size="sm"
                             onClick={() => void deleteTenantMemory(memory.id)}
                             disabled={deletingMemoryId === memory.id}
                           >
                             {deletingMemoryId === memory.id ? "Deleting…" : "Delete"}
-                          </button>
+                          </Button>
                         </div>
                       </div>
                     ))}
@@ -1857,13 +1869,13 @@ function TenantsPage({
               action={
                 whEditing ? (
                   <div className="button-row">
-                    <button onClick={() => void saveWarehouse()} disabled={savingWarehouse}>
+                    <Button onClick={() => void saveWarehouse()} disabled={savingWarehouse}>
                       {savingWarehouse ? "Saving…" : "Save"}
-                    </button>
-                    <button className="secondary-button" onClick={() => setWhEditing(false)}>Cancel</button>
+                    </Button>
+                    <Button variant="outline" onClick={() => setWhEditing(false)}>Cancel</Button>
                   </div>
                 ) : (
-                  <button className="secondary-button" onClick={() => setWhEditing(true)}>Edit</button>
+                  <Button variant="outline" onClick={() => setWhEditing(true)}>Edit</Button>
                 )
               }
             >
@@ -1878,12 +1890,12 @@ function TenantsPage({
                   </label>
                   {whProvider === "snowflake" ? (
                     <>
-                      <label>Account<input value={whSnowflake.account} onChange={(e) => setWhSnowflake((c) => ({ ...c, account: e.target.value }))} /></label>
-                      <label>Username<input value={whSnowflake.username} onChange={(e) => setWhSnowflake((c) => ({ ...c, username: e.target.value }))} /></label>
-                      <label>Warehouse<input value={whSnowflake.warehouse} onChange={(e) => setWhSnowflake((c) => ({ ...c, warehouse: e.target.value }))} /></label>
-                      <label>Database<input value={whSnowflake.database} onChange={(e) => setWhSnowflake((c) => ({ ...c, database: e.target.value }))} /></label>
-                      <label>Schema<input value={whSnowflake.schema} onChange={(e) => setWhSnowflake((c) => ({ ...c, schema: e.target.value }))} /></label>
-                      <label>Role<input value={whSnowflake.role} onChange={(e) => setWhSnowflake((c) => ({ ...c, role: e.target.value }))} placeholder="Optional" /></label>
+                      <label>Account<Input value={whSnowflake.account} onChange={(e) => setWhSnowflake((c) => ({ ...c, account: e.target.value }))} /></label>
+                      <label>Username<Input value={whSnowflake.username} onChange={(e) => setWhSnowflake((c) => ({ ...c, username: e.target.value }))} /></label>
+                      <label>Warehouse<Input value={whSnowflake.warehouse} onChange={(e) => setWhSnowflake((c) => ({ ...c, warehouse: e.target.value }))} /></label>
+                      <label>Database<Input value={whSnowflake.database} onChange={(e) => setWhSnowflake((c) => ({ ...c, database: e.target.value }))} /></label>
+                      <label>Schema<Input value={whSnowflake.schema} onChange={(e) => setWhSnowflake((c) => ({ ...c, schema: e.target.value }))} /></label>
+                      <label>Role<Input value={whSnowflake.role} onChange={(e) => setWhSnowflake((c) => ({ ...c, role: e.target.value }))} placeholder="Optional" /></label>
                       <label>
                         Auth type
                         <select value={whSnowflake.authType} onChange={(e) => setWhSnowflake((c) => ({ ...c, authType: e.target.value as "keypair" | "password" }))}>
@@ -1892,16 +1904,16 @@ function TenantsPage({
                         </select>
                       </label>
                       {whSnowflake.authType === "keypair" ? (
-                        <label>Private key path<input value={whSnowflake.privateKeyPath} onChange={(e) => setWhSnowflake((c) => ({ ...c, privateKeyPath: e.target.value }))} placeholder="/path/to/key.p8" /></label>
+                        <label>Private key path<Input value={whSnowflake.privateKeyPath} onChange={(e) => setWhSnowflake((c) => ({ ...c, privateKeyPath: e.target.value }))} placeholder="/path/to/key.p8" /></label>
                       ) : (
-                        <label>Password env var<input value={whSnowflake.passwordEnvVar} onChange={(e) => setWhSnowflake((c) => ({ ...c, passwordEnvVar: e.target.value }))} /></label>
+                        <label>Password env var<Input value={whSnowflake.passwordEnvVar} onChange={(e) => setWhSnowflake((c) => ({ ...c, passwordEnvVar: e.target.value }))} /></label>
                       )}
                     </>
                   ) : (
                     <>
-                      <label>Project ID<input value={whBigQuery.projectId} onChange={(e) => setWhBigQuery((c) => ({ ...c, projectId: e.target.value }))} placeholder="my-gcp-project" /></label>
-                      <label>Dataset<input value={whBigQuery.dataset} onChange={(e) => setWhBigQuery((c) => ({ ...c, dataset: e.target.value }))} placeholder="Optional" /></label>
-                      <label>Location<input value={whBigQuery.location} onChange={(e) => setWhBigQuery((c) => ({ ...c, location: e.target.value }))} placeholder="Optional (e.g. US, EU)" /></label>
+                      <label>Project ID<Input value={whBigQuery.projectId} onChange={(e) => setWhBigQuery((c) => ({ ...c, projectId: e.target.value }))} placeholder="my-gcp-project" /></label>
+                      <label>Dataset<Input value={whBigQuery.dataset} onChange={(e) => setWhBigQuery((c) => ({ ...c, dataset: e.target.value }))} placeholder="Optional" /></label>
+                      <label>Location<Input value={whBigQuery.location} onChange={(e) => setWhBigQuery((c) => ({ ...c, location: e.target.value }))} placeholder="Optional (e.g. US, EU)" /></label>
                       <label>
                         Auth type
                         <select value={whBigQuery.authType} onChange={(e) => setWhBigQuery((c) => ({ ...c, authType: e.target.value as "adc" | "service-account-key" }))}>
@@ -2132,9 +2144,9 @@ function SchedulesPage({
         title="Schedules"
         subtitle="Create recurring prompts per tenant and deliver them to Slack, Telegram, or console channels."
         actions={
-          <button className="secondary-button" onClick={() => void loadSchedules()}>
+          <Button variant="outline" onClick={() => void loadSchedules()}>
             Refresh
-          </button>
+          </Button>
         }
       />
       <div className="two-column">
@@ -2157,35 +2169,35 @@ function SchedulesPage({
                   </option>
                 ))}
               </select>
-              <button className="secondary-button" onClick={() => void refreshChannels()} disabled={!effectiveTenantId || loadingOptions}>
+              <Button variant="outline" onClick={() => void refreshChannels()} disabled={!effectiveTenantId || loadingOptions}>
                 Refresh channels
-              </button>
+              </Button>
             </div>
           }
         >
           {!effectiveTenantId ? (
             <div className="muted">Choose a tenant to manage schedules.</div>
           ) : (
-            <form className="stack" onSubmit={handleSave}>
+            <form className="flex flex-col gap-3" onSubmit={handleSave}>
               <label>
                 User request
-                <textarea
+                <Textarea
                   required
-                  rows={3}
+                  rows={2}
                   value={form.userRequest}
                   onChange={(event) => setForm((current) => ({ ...current, userRequest: event.target.value }))}
                 />
               </label>
-              <div className="filters-row">
-                <label className="field">
+              <div className="schedule-form-grid">
+                <label>
                   Cron (UTC)
-                  <input
+                  <Input
                     required
                     value={form.cron}
                     onChange={(event) => setForm((current) => ({ ...current, cron: event.target.value }))}
                   />
                 </label>
-                <label className="field">
+                <label>
                   Channel type
                   <select
                     value={form.channelType}
@@ -2197,46 +2209,48 @@ function SchedulesPage({
                     <option value="custom">Custom</option>
                   </select>
                 </label>
+                <label>
+                  Channel reference
+                  {channelOptionsForType.length > 0 ? (
+                    <select
+                      value={form.channelRef}
+                      onChange={(event) => setForm((current) => ({ ...current, channelRef: event.target.value }))}
+                    >
+                      <option value="">Select destination</option>
+                      {channelOptionsForType.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <Input
+                      value={form.channelRef}
+                      onChange={(event) => setForm((current) => ({ ...current, channelRef: event.target.value }))}
+                      placeholder={form.channelType === "console" ? "optional" : "Channel ID or chat ID"}
+                    />
+                  )}
+                </label>
               </div>
-              <label>
-                Channel reference
-                {channelOptionsForType.length > 0 ? (
-                  <select
-                    value={form.channelRef}
-                    onChange={(event) => setForm((current) => ({ ...current, channelRef: event.target.value }))}
-                  >
-                    <option value="">Select destination</option>
-                    {channelOptionsForType.map((opt) => (
-                      <option key={opt.value} value={opt.value}>
-                        {opt.label}
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <input
-                    value={form.channelRef}
-                    onChange={(event) => setForm((current) => ({ ...current, channelRef: event.target.value }))}
-                    placeholder={form.channelType === "console" ? "(optional for console/custom)" : "Channel ID or chat ID"}
+              <div className="flex items-center justify-between gap-3">
+                <label className="checkbox-row">
+                  <Input
+                    type="checkbox"
+                    checked={form.active}
+                    onChange={(event) => setForm((current) => ({ ...current, active: event.target.checked }))}
                   />
-                )}
-              </label>
-              <label className="checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={form.active}
-                  onChange={(event) => setForm((current) => ({ ...current, active: event.target.checked }))}
-                />
-                Active
-              </label>
-              <div className="button-row">
-                <button type="submit" disabled={saving || !form.userRequest.trim()}>
-                  {saving ? "Saving…" : editingId ? "Update schedule" : "Create schedule"}
-                </button>
-                {editingId ? (
-                  <button type="button" className="secondary-button" onClick={() => setEditingId(null)}>
-                    Cancel edit
-                  </button>
-                ) : null}
+                  Active
+                </label>
+                <div className="button-row">
+                  <Button type="submit" disabled={saving || !form.userRequest.trim()}>
+                    {saving ? "Saving…" : editingId ? "Update" : "Create schedule"}
+                  </Button>
+                  {editingId ? (
+                    <Button type="button" variant="outline" onClick={() => setEditingId(null)}>
+                      Cancel
+                    </Button>
+                  ) : null}
+                </div>
               </div>
             </form>
           )}
@@ -2262,8 +2276,8 @@ function SchedulesPage({
                     </div>
                   </div>
                   <div className="button-row">
-                    <button
-                      className="secondary-button"
+                    <Button
+                      variant="outline"
                       onClick={() => {
                         setEditingId(schedule.id);
                         setForm({
@@ -2276,13 +2290,13 @@ function SchedulesPage({
                       }}
                     >
                       Edit
-                    </button>
-                    <button className="secondary-button" onClick={() => void handleTestRun(schedule.id)}>
+                    </Button>
+                    <Button variant="outline" onClick={() => void handleTestRun(schedule.id)}>
                       Test run
-                    </button>
-                    <button className="danger-button" onClick={() => void handleDelete(schedule.id)}>
+                    </Button>
+                    <Button variant="destructive" onClick={() => void handleDelete(schedule.id)}>
                       Delete
-                    </button>
+                    </Button>
                   </div>
                 </div>
               ))}
@@ -2392,103 +2406,171 @@ function ConversationsPage({
   return (
     <div className="page-grid">
       <PageHeader title="Conversations" subtitle="Inspect raw messages, execution turns, SQL/debug traces, and Slack origin metadata." />
-      <AppShellCard title="Filters" subtitle="Slice by tenant, source, or message text">
-        <div className="filters-row">
-          {scopedTenantId ? (
-            <span className="muted">Tenant: {scopedTenantId}</span>
-          ) : (
-            <input
-              placeholder="Tenant ID"
-              value={filters.tenantId}
-              onChange={(event) => setFilters((current) => ({ ...current, tenantId: event.target.value }))}
-            />
-          )}
-          <select value={filters.source} onChange={(event) => setFilters((current) => ({ ...current, source: event.target.value }))}>
-            <option value="">All sources</option>
-            <option value="cli">CLI</option>
-            <option value="slack">Slack</option>
-            <option value="admin">Admin</option>
-          </select>
-          <input placeholder="Search user / assistant text" value={filters.search} onChange={(event) => setFilters((current) => ({ ...current, search: event.target.value }))} />
-          <button onClick={() => void loadConversations()}>Apply</button>
-        </div>
-      </AppShellCard>
-      <div className="three-column">
-        <AppShellCard title="Conversation list" subtitle="Newest threads first">
+
+      {/* Filters bar — compact inline */}
+      <div className="conv-filters">
+        {scopedTenantId ? (
+          <span className="muted text-sm">Tenant: <strong>{scopedTenantId}</strong></span>
+        ) : (
+          <Input
+            placeholder="Tenant ID"
+            value={filters.tenantId}
+            onChange={(event) => setFilters((current) => ({ ...current, tenantId: event.target.value }))}
+          />
+        )}
+        <select
+          value={filters.source}
+          onChange={(event) => setFilters((current) => ({ ...current, source: event.target.value }))}
+        >
+          <option value="">All sources</option>
+          <option value="cli">CLI</option>
+          <option value="slack">Slack</option>
+          <option value="admin">Admin</option>
+        </select>
+        <Input
+          placeholder="Search messages…"
+          value={filters.search}
+          onChange={(event) => setFilters((current) => ({ ...current, search: event.target.value }))}
+        />
+        <Button variant="outline" size="sm" onClick={() => void loadConversations()}>
+          Apply
+        </Button>
+      </div>
+
+      {/* Main split layout */}
+      <div className="conv-layout">
+        {/* Left: conversation list */}
+        <div className="conv-list-panel bp-card">
+          <div className="conv-panel-header">
+            <span className="conv-panel-title">Threads</span>
+            <span className="conv-panel-count">{items.length}</span>
+          </div>
           {loading ? (
-            <div className="muted">Loading…</div>
+            <div className="conv-empty">Loading…</div>
           ) : items.length === 0 ? (
-            <div className="empty-state">No conversations match your filters.</div>
+            <div className="conv-empty">No conversations match your filters.</div>
           ) : (
-            <div className="list-stack">
+            <div className="conv-list">
               {items.map((item) => (
                 <button
                   key={item.conversationId}
-                  className={`tenant-list-item ${selectedId === item.conversationId ? "selected" : ""}`}
+                  className={`conv-item${selectedId === item.conversationId ? " conv-item--active" : ""}`}
                   onClick={() => setSelectedId(item.conversationId)}
                 >
-                  <strong>{item.tenantId}</strong>
-                  <span>{compactText(item.latestUserText)}</span>
+                  <div className="conv-item__header">
+                    <span className="conv-item__tenant">{item.tenantId}</span>
+                    {item.latestTurnStatus ? (
+                      <StatusBadge
+                        label={item.latestTurnStatus}
+                        tone={item.latestTurnStatus === "completed" ? "success" : item.latestTurnStatus === "failed" ? "error" : "warning"}
+                      />
+                    ) : null}
+                  </div>
+                  {item.latestUserText ? (
+                    <p className="conv-item__text">{compactText(item.latestUserText, 80)}</p>
+                  ) : null}
+                  <span className="conv-item__date">{formatDate(item.lastMessageAt)}</span>
                 </button>
               ))}
             </div>
           )}
-        </AppShellCard>
-        <div className="double-stack">
-          <AppShellCard title="Conversation detail" subtitle="Raw message timeline for the selected thread">
+        </div>
+
+        {/* Right: detail panels */}
+        <div className="conv-detail-col">
+          {/* Metadata + messages */}
+          <div className="bp-card">
+            <div className="conv-panel-header">
+              <span className="conv-panel-title">Messages</span>
+              {detail ? (
+                <div className="flex items-center gap-2">
+                  <span className="conv-meta-chip">{detail.summary.tenantId}</span>
+                  {detail.summary.source ? <span className="conv-meta-chip">{detail.summary.source}</span> : null}
+                </div>
+              ) : null}
+            </div>
             {!detail ? (
-              <div className="empty-state">Select a conversation to inspect.</div>
+              <div className="conv-empty">Select a conversation to inspect.</div>
             ) : (
               <>
-                <div className="details-grid">
-                  <DetailItem label="Tenant" value={detail.summary.tenantId} />
-                  <DetailItem label="Source" value={detail.summary.source ?? "—"} />
-                  <DetailItem label="Channel" value={detail.summary.channelId ?? "—"} />
-                  <DetailItem label="Thread" value={detail.summary.threadTs ?? "—"} />
-                  <DetailItem label="Latest status" value={detail.summary.latestTurnStatus ?? "—"} />
-                  <DetailItem label="Last activity" value={formatDate(detail.summary.lastMessageAt)} />
+                {/* Compact metadata row */}
+                <div className="conv-meta-row">
+                  {detail.summary.channelId ? (
+                    <div className="conv-meta-item"><span>Channel</span><strong>{detail.summary.channelId}</strong></div>
+                  ) : null}
+                  {detail.summary.threadTs ? (
+                    <div className="conv-meta-item"><span>Thread</span><strong>{detail.summary.threadTs}</strong></div>
+                  ) : null}
+                  <div className="conv-meta-item"><span>Messages</span><strong>{detail.messages.length}</strong></div>
+                  <div className="conv-meta-item"><span>Last active</span><strong>{formatDate(detail.summary.lastMessageAt)}</strong></div>
                 </div>
-                <div className="timeline">
+
+                {/* Message timeline */}
+                <div className="conv-messages">
                   {detail.messages.map((message) => (
-                    <div key={message.id} className={`message-bubble ${message.role}`}>
-                      <div className="message-meta">
-                        <strong>{message.role}</strong>
-                        <span>{formatDate(message.createdAt)}</span>
+                    <div key={message.id} className={`conv-bubble conv-bubble--${message.role}`}>
+                      <div className="conv-bubble__meta">
+                        <span className="conv-bubble__role">{message.role}</span>
+                        <span className="conv-bubble__time">{formatDate(message.createdAt)}</span>
                       </div>
-                      <div className="message-text">{message.content}</div>
+                      <div className="conv-bubble__body">{message.content}</div>
                     </div>
                   ))}
                 </div>
               </>
             )}
-          </AppShellCard>
-          <AppShellCard title="Execution turns" subtitle="Stored prompt vs raw request, assistant result, and debug payload">
+          </div>
+
+          {/* Execution turns */}
+          <div className="bp-card">
+            <div className="conv-panel-header">
+              <span className="conv-panel-title">Execution turns</span>
+              {detail ? <span className="conv-panel-count">{detail.executionTurns.length}</span> : null}
+            </div>
             {!detail ? (
-              <div className="empty-state">Execution detail will appear here once you choose a conversation.</div>
+              <div className="conv-empty">Choose a conversation to see execution details.</div>
+            ) : detail.executionTurns.length === 0 ? (
+              <div className="conv-empty">No execution turns recorded.</div>
             ) : (
-              <div className="stack">
+              <div className="conv-turns">
                 {detail.executionTurns.map((turn) => (
-                  <div key={turn.id} className="turn-card">
-                    <div className="turn-header">
-                      <div>
-                        <strong>{turn.id}</strong>
-                        <div className="muted">{formatDate(turn.createdAt)}</div>
+                  <details key={turn.id} className="conv-turn">
+                    <summary className="conv-turn__header">
+                      <div className="conv-turn__meta">
+                        <code className="conv-turn__id">{turn.id.slice(0, 8)}…</code>
+                        <span className="conv-turn__date">{formatDate(turn.createdAt)}</span>
                       </div>
                       <StatusBadge
                         label={turn.status}
                         tone={turn.status === "completed" ? "success" : turn.status === "failed" ? "error" : "warning"}
                       />
+                    </summary>
+                    <div className="conv-turn__body">
+                      {turn.rawUserText ? (
+                        <div className="conv-turn__field">
+                          <span className="conv-turn__label">User</span>
+                          <p className="conv-turn__value">{compactText(turn.rawUserText, 200)}</p>
+                        </div>
+                      ) : null}
+                      {turn.assistantText ? (
+                        <div className="conv-turn__field">
+                          <span className="conv-turn__label">Assistant</span>
+                          <p className="conv-turn__value">{compactText(turn.assistantText, 200)}</p>
+                        </div>
+                      ) : null}
+                      {turn.errorMessage ? (
+                        <div className="conv-turn__field conv-turn__field--error">
+                          <span className="conv-turn__label">Error</span>
+                          <p className="conv-turn__value">{turn.errorMessage}</p>
+                        </div>
+                      ) : null}
+                      {turn.debug ? <JsonBlock value={turn.debug} /> : null}
                     </div>
-                    <DetailItem label="Raw user text" value={turn.rawUserText} multiline />
-                    <DetailItem label="Prompt text" value={turn.promptText} multiline />
-                    <DetailItem label="Assistant text" value={turn.assistantText ?? "—"} multiline />
-                    {turn.errorMessage ? <DetailItem label="Error" value={turn.errorMessage} multiline /> : null}
-                    {turn.debug ? <JsonBlock value={turn.debug} /> : null}
-                  </div>
+                  </details>
                 ))}
               </div>
             )}
-          </AppShellCard>
+          </div>
         </div>
       </div>
     </div>
@@ -2574,15 +2656,15 @@ function TelegramRoutingPage({
         title="Telegram routing"
         subtitle="Map Telegram chat IDs to tenants. Run the Telegram worker with Docker Compose; avoid starting a second bot process elsewhere."
         actions={
-          <button className="secondary-button" onClick={() => void loadData()}>
+          <Button variant="outline" onClick={() => void loadData()}>
             Refresh
-          </button>
+          </Button>
         }
       />
       <div className="two-column">
         <AppShellCard title="Chat-to-tenant mappings" subtitle="Route Telegram chats to specific tenants">
           <div className="filters-row">
-            <input placeholder="Chat ID" value={chatId} onChange={(event) => setChatId(event.target.value)} />
+            <Input placeholder="Chat ID" value={chatId} onChange={(event) => setChatId(event.target.value)} />
             {scopedTenantId ? (
               <span className="muted">Tenant: {scopedTenantId}</span>
             ) : (
@@ -2595,9 +2677,9 @@ function TelegramRoutingPage({
                 ))}
               </select>
             )}
-            <button className="secondary-button" onClick={() => void addMapping()} disabled={!chatId || !tenantId}>
+            <Button variant="outline" onClick={() => void addMapping()} disabled={!chatId || !tenantId}>
               Add mapping
-            </button>
+            </Button>
           </div>
           {loading ? (
             <div className="muted">Loading…</div>
@@ -2611,9 +2693,9 @@ function TelegramRoutingPage({
                     <strong>{mapping.chatId}</strong>
                     <div className="muted">{mapping.tenantId}{mapping.source ? ` · ${mapping.source}` : ""} · {formatDate(mapping.updatedAt)}</div>
                   </div>
-                  <button className="danger-button small" onClick={() => void deleteMapping(mapping.chatId)}>
+                  <Button variant="destructive" size="sm" onClick={() => void deleteMapping(mapping.chatId)}>
                     Delete
-                  </button>
+                  </Button>
                 </div>
               ))}
             </div>
@@ -2621,10 +2703,10 @@ function TelegramRoutingPage({
         </AppShellCard>
 
         <AppShellCard title="Configuration reference" subtitle="Set these on the Telegram Compose service (or host) for the worker process">
-          <div className="details-grid">
-            <DetailItem label="TELEGRAM_BOT_TOKEN" value="Bot token from @BotFather (required)" />
-            <DetailItem label="TELEGRAM_DEFAULT_TENANT_ID" value="Fallback tenant for unmapped chats (optional)" />
-            <DetailItem label="TELEGRAM_DEFAULT_PROFILE_NAME" value="Agent profile name (default: 'default')" />
+          <div className="config-ref-list">
+            <ConfigRefItem name="TELEGRAM_BOT_TOKEN" desc="Bot token from @BotFather (required)" />
+            <ConfigRefItem name="TELEGRAM_DEFAULT_TENANT_ID" desc="Fallback tenant for unmapped chats (optional)" />
+            <ConfigRefItem name="TELEGRAM_DEFAULT_PROFILE_NAME" desc="Agent profile name (default: 'default')" />
           </div>
         </AppShellCard>
       </div>
@@ -2712,11 +2794,11 @@ function SettingsPage({ notify }: { notify: (value: NotificationState | null) =>
             <form className="stack" onSubmit={saveGuardrails}>
               <label>
                 Default tenant ID
-                <input value={guardrails.defaultTenantId ?? ""} onChange={(event) => setGuardrails((current) => current ? { ...current, defaultTenantId: event.target.value } : current)} />
+                <Input value={guardrails.defaultTenantId ?? ""} onChange={(event) => setGuardrails((current) => current ? { ...current, defaultTenantId: event.target.value } : current)} />
               </label>
               <label>
                 Owner team IDs
-                <input
+                <Input
                   value={guardrails.ownerTeamIds.join(", ")}
                   onChange={(event) =>
                     setGuardrails((current) =>
@@ -2732,7 +2814,7 @@ function SettingsPage({ notify }: { notify: (value: NotificationState | null) =>
               </label>
               <label>
                 Owner enterprise IDs
-                <input
+                <Input
                   value={guardrails.ownerEnterpriseIds.join(", ")}
                   onChange={(event) =>
                     setGuardrails((current) =>
@@ -2747,7 +2829,7 @@ function SettingsPage({ notify }: { notify: (value: NotificationState | null) =>
                 />
               </label>
               <label className="checkbox-row">
-                <input
+                <Input
                   type="checkbox"
                   checked={guardrails.strictTenantRouting}
                   onChange={(event) => setGuardrails((current) => current ? { ...current, strictTenantRouting: event.target.checked } : current)}
@@ -2756,13 +2838,13 @@ function SettingsPage({ notify }: { notify: (value: NotificationState | null) =>
               </label>
               <label>
                 Team → tenant map (JSON)
-                <textarea
+                <Textarea
                   rows={8}
                   value={teamTenantMapText}
                   onChange={(event) => setTeamTenantMapText(event.target.value)}
                 />
               </label>
-              <button type="submit">Save guardrails</button>
+              <Button type="submit">Save guardrails</Button>
             </form>
           )}
         </AppShellCard>
@@ -2824,11 +2906,11 @@ function MappingEditor({
 }) {
   return (
     <div className="filters-row">
-      <input placeholder={`${label} ID`} value={idValue} onChange={(event) => onIdChange(event.target.value)} />
-      <input placeholder="Tenant ID" value={tenantValue} onChange={(event) => onTenantChange(event.target.value)} />
-      <button className="secondary-button" onClick={onSave}>
+      <Input placeholder={`${label} ID`} value={idValue} onChange={(event) => onIdChange(event.target.value)} />
+      <Input placeholder="Tenant ID" value={tenantValue} onChange={(event) => onTenantChange(event.target.value)} />
+      <Button variant="outline" onClick={onSave}>
         Save {label.toLowerCase()}
-      </button>
+      </Button>
     </div>
   );
 }
@@ -2854,9 +2936,9 @@ function MappingTable({
               <strong>{item.id}</strong>
               <div className="muted">{item.tenantId}{item.meta ? ` · ${item.meta}` : ""}</div>
             </div>
-            <button className="danger-button small" onClick={() => onDelete(item.id)}>
+            <Button variant="destructive" size="sm" onClick={() => onDelete(item.id)}>
               Delete
-            </button>
+            </Button>
           </div>
         ))
       )}
@@ -2869,6 +2951,15 @@ function DetailItem({ label, value, multiline = false }: { label: string; value:
     <div className={`detail-item ${multiline ? "full-width" : ""}`}>
       <span>{label}</span>
       <strong className={multiline ? "multiline" : ""}>{value}</strong>
+    </div>
+  );
+}
+
+function ConfigRefItem({ name, desc }: { name: string; desc: string }) {
+  return (
+    <div className="config-ref-item">
+      <code className="config-ref-name">{name}</code>
+      <span className="config-ref-desc">{desc}</span>
     </div>
   );
 }
