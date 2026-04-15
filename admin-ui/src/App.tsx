@@ -1660,7 +1660,7 @@ function TenantsPage({
         }
       />
       <div className="double-stack">
-        <div className="tenant-toolbar">
+        <AppShellCard title="Tenant list" subtitle="Select a tenant to edit or inspect">
           {loading ? (
             <div className="muted">Loading tenants…</div>
           ) : tenants.length === 0 ? (
@@ -2161,6 +2161,7 @@ function TenantsPage({
               )}
             </AppShellCard>
           ) : null}
+        </div>
       </div>
     </div>
   );
