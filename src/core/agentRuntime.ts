@@ -583,7 +583,12 @@ export class AnalyticsAgentRuntime {
         }
       });
       const schemaCandidates = isBigQuery
-        ? [whSchema].filter((v) => v.length > 0)
+        ? Array.from(
+            new Set([
+              whSchema,
+              ...dbtModels.map((m) => inferSchemaHintFromModelPath(m.relativePath, whSchema).toLowerCase())
+            ].filter((v) => v.length > 0))
+          )
         : Array.from(
             new Set(
               [whSchema.toUpperCase(), "INT", "MARTS", "STAGING", "CORE", "PUBLIC"].filter(
@@ -732,7 +737,8 @@ export class AnalyticsAgentRuntime {
               return `${m.name} -> ${m.relativePath}`;
             }
             if (isBigQuery) {
-              return `${m.name} -> ${m.relativePath} -> \`${whDatabase}.${whSchema}.${m.name}\``;
+              const hintedDataset = inferSchemaHintFromModelPath(m.relativePath, whSchema).toLowerCase();
+              return `${m.name} -> ${m.relativePath} -> \`${whDatabase}.${hintedDataset}.${m.name}\``;
             }
             const hintedSchema = inferSchemaHintFromModelPath(m.relativePath, whSchema.toUpperCase());
             return `${m.name} -> ${m.relativePath} -> "${whDatabase}"."${hintedSchema}".${quoteSqlIdent(m.name)}`;
