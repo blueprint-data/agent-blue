@@ -1,4 +1,5 @@
 import { NavLink } from "react-router-dom";
+import logoSrc from "@/assets/logo.png";
 import {
   Sidebar,
   SidebarContent,
@@ -34,7 +35,7 @@ export function AppSidebar({ username, method, isSuperadmin = true, onLogout }: 
         <div className="sidebar-brand">
           <div className="sidebar-brand-row">
             <div className="sidebar-brand-mark" aria-hidden>
-              <span>AB</span>
+              <img src={logoSrc} alt="Agent Blue" />
             </div>
             <div className="sidebar-brand-text">
               <span className="eyebrow sidebar-brand-eyebrow">Console</span>

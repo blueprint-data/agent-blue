@@ -1,4 +1,5 @@
 import path from "node:path";
+import tailwindcss from "@tailwindcss/vite";
 import type { Plugin } from "vite";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
@@ -26,7 +27,12 @@ function adminCanonicalBaseRedirect(): Plugin {
 export default defineConfig({
   root: path.resolve(__dirname),
   base: "/admin/",
-  plugins: [adminCanonicalBaseRedirect(), react()],
+  plugins: [adminCanonicalBaseRedirect(), tailwindcss(), react()],
+  resolve: {
+    alias: {
+      "@": path.resolve(__dirname, "./src")
+    }
+  },
   server: {
     port: 5173,
     // Fail fast if 5173 is taken — otherwise Vite picks 5174 while the tunnel still targets 5173 and you
