@@ -84,6 +84,19 @@
     color: var(--brand-secondary-600);
   }
 
+  .bp-btn-destructive {
+    border-color: var(--danger);
+    background: var(--danger);
+    color: #ffffff;
+    box-shadow: 0 8px 20px rgba(239, 68, 68, 0.22);
+  }
+
+  .bp-btn-destructive:hover {
+    background: transparent;
+    color: var(--danger);
+    box-shadow: 0 12px 26px rgba(239, 68, 68, 0.28);
+  }
+
   .bp-btn-outline {
     border-color: var(--brand-primary-500);
     background: transparent;

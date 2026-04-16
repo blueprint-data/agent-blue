@@ -1861,17 +1861,17 @@ function TenantsPage({
               subtitle="Tenant default model and OpenRouter-reported spend. Costs are provider credits when available."
               action={
                 <div className="button-row">
-                  <button
+                  <Button
                     type="button"
-                    className="secondary-button"
+                    variant="outline"
                     disabled={savingLlm}
                     onClick={() => setLlmModelDraft(llmSettings?.llmModel ?? "")}
                   >
                     Reset model draft
-                  </button>
-                  <button type="button" disabled={savingLlm} onClick={() => void saveLlmSettings()}>
+                  </Button>
+                  <Button type="button" disabled={savingLlm} onClick={() => void saveLlmSettings()}>
                     {savingLlm ? "Saving…" : "Save model"}
-                  </button>
+                  </Button>
                 </div>
               }
             >
@@ -1929,14 +1929,14 @@ function TenantsPage({
                 </label>
               </div>
               <div className="button-row">
-                <button
+                <Button
                   type="button"
-                  className="secondary-button"
+                  variant="outline"
                   disabled={loadingUsageRange}
                   onClick={() => void loadLlmUsageCustomRange()}
                 >
                   {loadingUsageRange ? "Loading…" : "Load summary"}
-                </button>
+                </Button>
               </div>
               {usageCustomSummary ? (
                 <div className="details-grid" style={{ marginTop: "0.75rem" }}>
