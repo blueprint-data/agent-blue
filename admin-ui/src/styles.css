@@ -362,7 +362,7 @@ button:not([data-slot="button"]):not(.conv-item):not(.tenant-list-item):disabled
 }
 
 /* Legacy input/select styles — Blueprint UI Input/Textarea manage their own styles via data-slot */
-input:not([data-slot="input"]),
+input:not([data-slot="input"]):not([type="checkbox"]):not([type="radio"]),
 textarea:not([data-slot="textarea"]) {
   width: 100%;
   border-radius: var(--component-input-radius);
@@ -397,7 +397,7 @@ select {
     box-shadow 220ms ease;
 }
 
-input:not([data-slot="input"]):focus-visible,
+input:not([data-slot="input"]):not([type="checkbox"]):not([type="radio"]):focus-visible,
 select:focus-visible,
 textarea:not([data-slot="textarea"]):focus-visible,
 button:not([data-slot="button"]):not(.conv-item):not(.tenant-list-item):focus-visible {
@@ -406,7 +406,7 @@ button:not([data-slot="button"]):not(.conv-item):not(.tenant-list-item):focus-vi
   box-shadow: 0 0 0 3px var(--component-focus-ring);
 }
 
-input:not([data-slot="input"])::placeholder,
+input:not([data-slot="input"]):not([type="checkbox"]):not([type="radio"])::placeholder,
 textarea:not([data-slot="textarea"])::placeholder {
   color: var(--semantic-text-body);
   opacity: 0.7;
@@ -1248,6 +1248,32 @@ button.sidebar-logout-button:focus-visible {
   gap: 0.8rem;
 }
 
+.tenant-list-scroll {
+  max-height: min(60vh, 34rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 0.25rem;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(81, 81, 243, 0.24) transparent;
+}
+
+.tenant-list-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+
+.tenant-list-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.tenant-list-scroll::-webkit-scrollbar-thumb {
+  background: rgba(81, 81, 243, 0.24);
+  border-radius: var(--radius-pill);
+}
+
+.tenant-list-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(81, 81, 243, 0.36);
+}
+
 .list-row,
 .tenant-list-item,
 .turn-card,
@@ -1533,11 +1559,17 @@ button.tenant-list-item.selected:hover:not(:disabled) {
   gap: 0.75rem;
 }
 
-.checkbox-row input {
-  width: auto;
+.checkbox-row input[type="checkbox"] {
+  width: 1rem;
+  height: 1rem;
+  min-height: 1rem;
+  margin: 0;
+  padding: 0;
+  flex-shrink: 0;
+  accent-color: var(--brand-primary-500);
 }
 
-.checkbox-row input:focus-visible {
+.checkbox-row input[type="checkbox"]:focus-visible {
   box-shadow: 0 0 0 2px var(--bp-page), 0 0 0 4px var(--bp-primary);
 }
 

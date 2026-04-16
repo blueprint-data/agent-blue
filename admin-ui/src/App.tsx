@@ -1114,11 +1114,20 @@ function TenantsPage({
   const [usageTo, setUsageTo] = useState("");
   const [usageCustomSummary, setUsageCustomSummary] = useState<TenantLlmUsageSummaryUi | null>(null);
   const [loadingUsageRange, setLoadingUsageRange] = useState(false);
+  const [tenantFilter, setTenantFilter] = useState("");
 
   const selectedTenant = useMemo(
     () => tenants.find((tenant) => tenant.tenantId === selectedTenantId) ?? null,
     [selectedTenantId, tenants]
   );
+
+  const filteredTenants = useMemo(() => {
+    const query = tenantFilter.trim().toLowerCase();
+    if (!query) return tenants;
+    return tenants.filter(
+      (tenant) => tenant.tenantId.toLowerCase().includes(query) || tenant.repoUrl.toLowerCase().includes(query)
+    );
+  }, [tenantFilter, tenants]);
 
   const loadTenants = useCallback(async (opts?: { selectTenantId?: string }) => {
     setLoading(true);
@@ -1666,23 +1675,39 @@ function TenantsPage({
           ) : tenants.length === 0 ? (
             <div className="muted">No tenants yet — use New tenant to create one.</div>
           ) : (
-            <div className="list-stack">
-              {tenants.map((tenant) => (
-                <Button
-                  key={tenant.tenantId}
-                  type="button"
-                  className={`tenant-list-item ${selectedTenantId === tenant.tenantId ? "selected" : ""}`}
-                  onClick={() => {
-                    if (!isSuperadmin && scopedTenantId && tenant.tenantId !== scopedTenantId) {
-                      return;
-                    }
-                    setSelectedTenantId(tenant.tenantId);
-                  }}
-                >
-                  <strong>{tenant.tenantId}</strong>
-                  <span>{compactText(tenant.repoUrl, 42)}</span>
-                </Button>
-              ))}
+            <div className="stack">
+              <Input
+                type="search"
+                autoComplete="off"
+                value={tenantFilter}
+                onChange={(event) => setTenantFilter(event.target.value)}
+                placeholder="Filter tenants by ID or repo…"
+                aria-label="Filter tenants"
+              />
+              {filteredTenants.length === 0 ? (
+                <div className="muted">No tenants match the current filter.</div>
+              ) : (
+                <div className="tenant-list-scroll">
+                  <div className="list-stack">
+                    {filteredTenants.map((tenant) => (
+                      <Button
+                        key={tenant.tenantId}
+                        type="button"
+                        className={`tenant-list-item ${selectedTenantId === tenant.tenantId ? "selected" : ""}`}
+                        onClick={() => {
+                          if (!isSuperadmin && scopedTenantId && tenant.tenantId !== scopedTenantId) {
+                            return;
+                          }
+                          setSelectedTenantId(tenant.tenantId);
+                        }}
+                      >
+                        <strong>{tenant.tenantId}</strong>
+                        <span>{compactText(tenant.repoUrl, 42)}</span>
+                      </Button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </AppShellCard>
@@ -2442,7 +2467,7 @@ function SchedulesPage({
               </div>
               <div className="flex items-center justify-between gap-3">
                 <label className="checkbox-row">
-                  <Input
+                  <input
                     type="checkbox"
                     checked={form.active}
                     onChange={(event) => setForm((current) => ({ ...current, active: event.target.checked }))}
@@ -3055,7 +3080,7 @@ function SettingsPage({ notify }: { notify: (value: NotificationState | null) =>
                 />
               </label>
               <label className="checkbox-row">
-                <Input
+                <input
                   type="checkbox"
                   checked={guardrails.strictTenantRouting}
                   onChange={(event) => setGuardrails((current) => current ? { ...current, strictTenantRouting: event.target.checked } : current)}
