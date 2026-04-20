@@ -1,14 +1,19 @@
+import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { faSlack, faTelegram } from "@fortawesome/free-brands-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import logoSrc from "@/assets/logo.png";
 import sofiaAvatarSrc from "@/assets/sofia.png";
-import { AnimatedNumber } from "@/components/ui/animated-number";
 import { AnimatedText } from "@/components/ui/animated-text";
 import { BlueprintCard } from "@/components/ui/blueprint-card";
 import { Button } from "@/components/ui/button";
 import SoftAurora from "@/components/ui/soft-aurora";
 import AILoadingState from "./AILoadingState";
+import OnboardingFlow from "./OnboardingFlow";
+import PillarShowcase from "./PillarShowcase";
 import "./landing.css";
+
+const LANDING_MOBILE_MENU_ID = "landing-mobile-menu";
 
 type ChatRole = "user" | "bot";
 interface ChatMessage {
@@ -18,116 +23,44 @@ interface ChatMessage {
   chart?: string;
 }
 
-const plans = [
-  {
-    name: "Trial",
-    price: "$0",
-    tagline: "Try Agent Blue with your own data, no credit card required",
-    featured: false,
-    features: [
-      { label: "AI provider", value: "GPT-4o mini" },
-      { label: "Queries per month", value: "50" },
-      { label: "Workspaces", value: "1" },
-      { label: "Scheduled reports", value: "None" },
-      { label: "Dashboard exports", value: "None" },
-      { label: "Customization", value: "Standard" },
-      { label: "Support", value: "Community" }
-    ]
-  },
-  {
-    name: "Pro",
-    price: "$150",
-    tagline: "For data teams that need real answers, every day",
-    featured: true,
-    features: [
-      { label: "AI provider", value: "GPT-4o / Claude Sonnet" },
-      { label: "Queries per month", value: "1,000" },
-      { label: "Workspaces", value: "2" },
-      { label: "Scheduled reports", value: "Up to 20" },
-      { label: "Dashboard exports", value: "Full" },
-      { label: "Customization", value: "Custom dbt models" },
-      { label: "Support", value: "Priority email" }
-    ]
-  },
-  {
-    name: "Enterprise",
-    price: "Custom",
-    tagline: "For orgs with advanced governance requirements",
-    featured: false,
-    features: [
-      { label: "AI provider", value: "Your choice" },
-      { label: "Queries per month", value: "Unlimited" },
-      { label: "Workspaces", value: "Unlimited" },
-      { label: "Scheduled reports", value: "Unlimited" },
-      { label: "Dashboard exports", value: "Full + white-label" },
-      { label: "Customization", value: "Full custom" },
-      { label: "Support", value: "Dedicated + SLA" }
-    ]
-  }
-];
-
-const pillars = [
-  {
-    title: "Works inside your team's chat",
-    description:
-      "No new tool, no dashboard. Ask Agent Blue directly in Telegram or Slack. Your team works where they already are."
-  },
-  {
-    title: "Answers, charts and dashboards",
-    description:
-      "Every response is backed by your dbt models and SQL guardrails. Agent Blue sends text answers, charts, and full dashboards directly to your channel."
-  },
-  {
-    title: "Scheduled reports, delivered to your channel",
-    description:
-      "Declare analytical schedules for your reports. Agent Blue sends structured insights at the cadence your team needs. No manual pulls, no bottlenecks."
-  },
-  {
-    title: "Governance without friction",
-    description:
-      "Channel-level permissions and role-based access mean every team gets the right data without slowing anyone down."
-  }
-];
-
-const onboardingSteps = [
-  {
-    title: "Connect the bot",
-    description: "Add Agent Blue to your Slack workspace or Telegram group in minutes."
-  },
-  {
-    title: "Link your data stack",
-    description: "Connect your dbt repo and data warehouse. Agent Blue validates context automatically."
-  },
-  {
-    title: "Set access rules",
-    description: "Configure channel permissions and role-based data access for each team."
-  },
-  {
-    title: "Your team asks, Agent Blue answers",
-    description: "Natural language questions get traceable, actionable answers. 24/7, no analyst required."
-  }
-];
-
-
-const proofPoints = [
-  { label: "Available in your chat", value: 24, suffix: "/7" },
-  { label: "Less analytics bottleneck", value: 68, suffix: "%" },
-  { label: "Faster strategic answers", value: 3, suffix: "x" }
-];
-
 const chatMessages: ChatMessage[] = [
-  { role: "user", name: "Sofia R.", text: "What's driving churn in our highest-value cohort this quarter?" },
+  { role: "user", name: "Sofia R.", text: "What's driving churn in our top cohort this quarter?" },
   {
     role: "bot",
-    text: "High-value churn is up 1.8pp. Top signal: customers who downgraded in month 4 have 3x higher 90-day churn. LTV impact is estimated at $420K ARR.",
-    chart: "churn_by_cohort · LTV risk breakdown"
+    text: "Churn up 1.8pp. Month-4 downgrades show 3x higher 90-day churn. ~$420K ARR at risk.",
+    chart: "churn_by_cohort · LTV risk"
   },
-  { role: "user", name: "Sofia R.", text: "Show me the full revenue breakdown by acquisition channel" }
+  { role: "user", name: "Sofia R.", text: "Show revenue by acquisition channel" }
 ];
 
 export default function LandingPage() {
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const menuToggleRef = useRef<HTMLButtonElement>(null);
+  const menuPanelRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!mobileMenuOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMobileMenuOpen(false);
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [mobileMenuOpen]);
+
+  useEffect(() => {
+    if (!mobileMenuOpen) return;
+    const onPointerDown = (e: PointerEvent) => {
+      const node = e.target as Node;
+      if (menuToggleRef.current?.contains(node)) return;
+      if (menuPanelRef.current?.contains(node)) return;
+      setMobileMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown, true);
+    return () => document.removeEventListener("pointerdown", onPointerDown, true);
+  }, [mobileMenuOpen]);
+
   return (
-    <>
+    <div className="landing-root">
     <div className="landing-shell">
       <div className="landing-aurora-global" aria-hidden="true">
         <SoftAurora
@@ -148,7 +81,10 @@ export default function LandingPage() {
         />
       </div>
 
-      <header className="landing-topbar bp-card" aria-label="Primary navigation">
+      <header
+        className={`landing-topbar bp-card${mobileMenuOpen ? " landing-topbar--menu-open" : ""}`}
+        aria-label="Primary navigation"
+      >
         <a className="landing-brand" href="/" aria-label="Agent Blue home">
           <img src={logoSrc} alt="Agent Blue" className="landing-brand-logo" loading="eager" decoding="async" />
           <span className="landing-brand-copy">
@@ -157,20 +93,61 @@ export default function LandingPage() {
           </span>
         </a>
 
-        <nav className="landing-nav" aria-label="Product sections">
-          <a href="#product">Why Agent Blue</a>
-          <a href="#onboarding">Setup</a>
-          <a href="#pricing">Get started</a>
-          <a href="#trust">Trust</a>
-        </nav>
-
-        <div className="landing-nav-actions">
+        <div className="landing-nav-actions landing-nav-actions--desktop">
           <Button asChild variant="outline" size="pill">
-            <a href="/login">Admin login</a>
+            <a href="/login">Login</a>
           </Button>
           <Button asChild variant="default" size="pill">
             <a href="/register">Book demo</a>
           </Button>
+        </div>
+
+        <div className="landing-topbar-mobile">
+          <button
+            ref={menuToggleRef}
+            type="button"
+            className="landing-menu-toggle"
+            aria-expanded={mobileMenuOpen}
+            aria-controls={LANDING_MOBILE_MENU_ID}
+            aria-haspopup="true"
+            aria-label={mobileMenuOpen ? "Close menu" : "Open menu"}
+            onClick={(e) => {
+              e.stopPropagation();
+              setMobileMenuOpen((open) => !open);
+            }}
+          >
+            <span className="landing-menu-toggle-bars" aria-hidden="true">
+              <span />
+              <span />
+              <span />
+            </span>
+          </button>
+
+          {mobileMenuOpen
+            ? createPortal(
+                <div
+                  ref={menuPanelRef}
+                  id={LANDING_MOBILE_MENU_ID}
+                  className="landing-menu-drawer bp-card"
+                  role="region"
+                  aria-label="Account actions"
+                >
+                  <div className="landing-menu-drawer-actions">
+                    <Button asChild variant="outline" size="pill" className="landing-menu-drawer-btn">
+                      <a href="/login" onClick={() => setMobileMenuOpen(false)}>
+                        Login
+                      </a>
+                    </Button>
+                    <Button asChild variant="default" size="pill" className="landing-menu-drawer-btn">
+                      <a href="/register" onClick={() => setMobileMenuOpen(false)}>
+                        Book demo
+                      </a>
+                    </Button>
+                  </div>
+                </div>,
+                document.body
+              )
+            : null}
         </div>
       </header>
 
@@ -186,14 +163,13 @@ export default function LandingPage() {
             </p>
             <h1 id="landing-hero-title" className="landing-hero-title">
               <AnimatedText
-                text="Your data team in every conversation. Answers, charts and dashboards without leaving the chat."
+                text="Your data team, in every conversation."
                 immediate
                 staggerMs={34}
               />
             </h1>
             <p className="landing-hero-description">
-              Agent Blue connects to your dbt models and data warehouse, then delivers answers, charts, and dashboards
-              directly in Telegram or Slack. No GUI, no context switching.
+              Answers, charts and dashboards in Slack and Telegram (powered by your dbt models and warehouse).
             </p>
 
             <div className="landing-hero-actions">
@@ -255,97 +231,36 @@ export default function LandingPage() {
           </aside>
         </section>
 
-        <section className="landing-proof-strip" aria-label="Impact indicators">
-          {proofPoints.map((item) => (
-            <BlueprintCard key={item.label} title={item.label}>
-              <p className="landing-proof-value">
-                <AnimatedNumber end={item.value} suffix={item.suffix} />
-              </p>
-            </BlueprintCard>
-          ))}
-        </section>
-
         <section id="product" className="landing-section" aria-labelledby="landing-product-title">
           <h2 id="landing-product-title" className="landing-section-title">
-            Built for teams that work in chat, not dashboards
+            Built for teams that work in chat
           </h2>
-          <p className="landing-section-description">
-            Strategic data answers where decisions actually happen: in the conversation, not a separate tool.
-          </p>
 
-          <div className="landing-pillar-grid">
-            {pillars.map((card) => (
-              <BlueprintCard key={card.title} title={card.title} description={card.description} interactive />
-            ))}
-          </div>
+          <PillarShowcase />
         </section>
 
         <section id="onboarding" className="landing-section" aria-labelledby="landing-onboarding-title">
           <h2 id="landing-onboarding-title" className="landing-section-title">
-            Live in your team's chat in 4 steps
+            Live in 4 steps
           </h2>
-          <p className="landing-section-description">
-            From zero to 24/7 data answers in your channels. No engineering sprint required.
-          </p>
 
-          <div className="landing-journey-grid">
-            {onboardingSteps.map((step, index) => (
-              <BlueprintCard
-                key={step.title}
-                className="landing-journey-card"
-                title={
-                  <span className="landing-step-title">
-                    <span className="landing-step-index">{index + 1}</span>
-                    <span>{step.title}</span>
-                  </span>
-                }
-                description={step.description}
-                interactive
-              />
-            ))}
-          </div>
+          <OnboardingFlow />
         </section>
 
         <section id="pricing" className="landing-section" aria-labelledby="landing-pricing-title">
           <h2 id="landing-pricing-title" className="landing-section-title">
-            Simple, transparent pricing
+            Pricing
           </h2>
-          <p className="landing-section-description">
-            Every plan includes Slack and Telegram integration, dbt context, and warehouse connectivity.
-          </p>
 
-          <div className="landing-pricing-grid">
-            {plans.map((plan) => (
-              <div
-                key={plan.name}
-                className={`landing-pricing-card bp-card${plan.featured ? " landing-pricing-card--featured" : ""}`}
-              >
-                {plan.featured && <span className="landing-pricing-badge">Most popular</span>}
-                <div className="landing-pricing-header">
-                  <h3 className="landing-pricing-name">{plan.name}</h3>
-                  <div className="landing-pricing-price">
-                    <span className="landing-pricing-amount">{plan.price}</span>
-                    {plan.price !== "Custom" && <span className="landing-pricing-period">/mo</span>}
-                  </div>
-                  <p className="landing-pricing-tagline">{plan.tagline}</p>
-                </div>
-                <ul className="landing-pricing-features">
-                  {plan.features.map((f) => (
-                    <li key={f.label} className="landing-pricing-feature">
-                      <span className="landing-pricing-feature-label">{f.label}</span>
-                      <span className="landing-pricing-feature-value">{f.value}</span>
-                    </li>
-                  ))}
-                </ul>
-                <Button asChild variant={plan.featured ? "default" : "outline"} size="pill" className="landing-pricing-cta">
-                  <a href="mailto:hello@blueprintdata.ai">Write to us</a>
-                </Button>
-              </div>
-            ))}
-          </div>
-          <p className="landing-pricing-note">
-            Not sure which plan fits? Write to us and we will set it up together.
-          </p>
+          <article className="landing-pricing-soon bp-card">
+            <p className="landing-pricing-soon-text">
+              Agent Blue is brand new and we're still figuring out the right pricing.
+              Reach out and we'll set something up that fits your team.
+            </p>
+            <Button asChild variant="default" size="pill-lg" className="landing-pricing-cta">
+              <a href="mailto:contact@blueprintdata.xyz">Contact us</a>
+            </Button>
+          </article>
         </section>
 
         <section id="trust" className="landing-section" aria-labelledby="landing-trust-title">
@@ -355,8 +270,7 @@ export default function LandingPage() {
                 Your data. Your channels. Your answers.
               </h2>
               <p className="landing-trust-description">
-                Agent Blue runs where your team already works: Slack and Telegram. With dbt governance and
-                warehouse traceability built in.
+                dbt governance and warehouse traceability, built in.
               </p>
             </div>
             <div className="landing-trust-actions">
@@ -364,7 +278,7 @@ export default function LandingPage() {
                 <a href="/register">Book demo</a>
               </Button>
               <Button asChild variant="outline" size="pill-lg">
-                <a href="/login">Admin login</a>
+                <a href="/login">Login</a>
               </Button>
             </div>
           </article>
@@ -420,6 +334,6 @@ export default function LandingPage() {
         <span>© {new Date().getFullYear()} Agent Blue · Blueprint Data</span>
       </div>
     </footer>
-    </>
+    </div>
   );
 }
