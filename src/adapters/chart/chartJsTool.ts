@@ -95,6 +95,18 @@ function reorderByIndices<T>(items: T[], indices: number[]): T[] {
   return indices.map((idx) => items[idx]);
 }
 
+function resolveColumnName(result: QueryResult, requested: string | null | undefined): string | null {
+  if (!requested) {
+    return null;
+  }
+  if (result.columns.includes(requested)) {
+    return requested;
+  }
+  const lowered = requested.toLowerCase();
+  const match = result.columns.find((column) => column.toLowerCase() === lowered);
+  return match ?? null;
+}
+
 export class ChartJsTool implements ChartTool {
   buildFromQueryResult(input: {
     request: ChartBuildRequest;
@@ -106,14 +118,33 @@ export class ChartJsTool implements ChartTool {
       requestedType === "line" || requestedType === "pie" || requestedType === "doughnut" ? requestedType : "bar";
     const limit = Math.max(1, Math.min(input.request.maxPoints ?? input.maxPoints, input.maxPoints));
     const rows = input.result.rows.slice(0, limit);
-    const yKey = input.request.yKey ?? pickFirstNumericColumn(input.result);
-    const xKey =
+    const requestedYKey = input.request.yKey ?? pickFirstNumericColumn(input.result);
+    const yKey = resolveColumnName(input.result, requestedYKey);
+    const requestedXKey =
       input.request.xKey ??
       pickFirstTextColumn(input.result, new Set(yKey ? [yKey] : [])) ??
       input.result.columns[0] ??
       null;
-    const seriesKey = input.request.seriesKey ?? null;
+    const xKey = resolveColumnName(input.result, requestedXKey);
+    const seriesKey = input.request.seriesKey ? resolveColumnName(input.result, input.request.seriesKey) : null;
+    const explicitYKey = input.request.yKey ? resolveColumnName(input.result, input.request.yKey) : null;
+    const explicitXKey = input.request.xKey ? resolveColumnName(input.result, input.request.xKey) : null;
 
+    if (input.request.yKey && !explicitYKey) {
+      throw new Error(
+        `chartRequest.yKey "${input.request.yKey}" was not found in query columns: ${input.result.columns.join(", ")}`
+      );
+    }
+    if (input.request.xKey && !explicitXKey) {
+      throw new Error(
+        `chartRequest.xKey "${input.request.xKey}" was not found in query columns: ${input.result.columns.join(", ")}`
+      );
+    }
+    if (input.request.seriesKey && !seriesKey) {
+      throw new Error(
+        `chartRequest.seriesKey "${input.request.seriesKey}" was not found in query columns: ${input.result.columns.join(", ")}`
+      );
+    }
     if (!xKey) {
       throw new Error("Could not infer chart xKey from query result. Provide chartRequest.xKey.");
     }

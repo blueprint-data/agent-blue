@@ -237,6 +237,132 @@ function ensureAccurateTenantMemorySaveText(text: string, memorySaveSucceededThi
   return stripped ? `${stripped}\n\n${note}` : note;
 }
 
+function asFiniteNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
+function resolveColumnNameCaseInsensitive(columns: string[], requested: string | null | undefined): string | null {
+  if (!requested) {
+    return null;
+  }
+  if (columns.includes(requested)) {
+    return requested;
+  }
+  const lowered = requested.toLowerCase();
+  const match = columns.find((column) => column.toLowerCase() === lowered);
+  return match ?? null;
+}
+
+function getCellValueCaseInsensitive(row: Record<string, unknown>, columnName: string): unknown {
+  if (columnName in row) {
+    return row[columnName];
+  }
+  const lowered = columnName.toLowerCase();
+  const match = Object.keys(row).find((key) => key.toLowerCase() === lowered);
+  return match ? row[match] : undefined;
+}
+
+function pickFirstNumericColumn(result: QueryResult, maxRows: number): string | null {
+  const rows = result.rows.slice(0, maxRows);
+  for (const column of result.columns) {
+    for (const row of rows) {
+      if (asFiniteNumber(getCellValueCaseInsensitive(row, column)) !== null) {
+        return column;
+      }
+    }
+  }
+  return null;
+}
+
+function pickFirstTextColumn(result: QueryResult, exclude: Set<string>, maxRows: number): string | null {
+  const rows = result.rows.slice(0, maxRows);
+  for (const column of result.columns) {
+    if (exclude.has(column)) {
+      continue;
+    }
+    for (const row of rows) {
+      const value = getCellValueCaseInsensitive(row, column);
+      if (value !== null && value !== undefined) {
+        return column;
+      }
+    }
+  }
+  return null;
+}
+
+type ChartQueryPreflight = {
+  ok: boolean;
+  reason?: string;
+  resolvedXKey?: string;
+  resolvedYKey?: string;
+  resolvedSeriesKey?: string;
+  numericPoints?: number;
+};
+
+function preflightChartQuery(
+  result: QueryResult,
+  request: ChartBuildRequest,
+  maxRows: number
+): ChartQueryPreflight {
+  const rows = result.rows.slice(0, maxRows);
+  if (rows.length === 0) {
+    return { ok: false, reason: "query returned 0 rows" };
+  }
+
+  const requestedYKey = request.yKey ?? pickFirstNumericColumn(result, maxRows);
+  const resolvedYKey = resolveColumnNameCaseInsensitive(result.columns, requestedYKey);
+  if (!resolvedYKey) {
+    return {
+      ok: false,
+      reason: request.yKey
+        ? `yKey "${request.yKey}" not found in query columns`
+        : "could not infer a numeric yKey from query result"
+    };
+  }
+
+  const resolvedSeriesKey = request.seriesKey
+    ? (resolveColumnNameCaseInsensitive(result.columns, request.seriesKey) ?? undefined)
+    : undefined;
+  if (request.seriesKey && !resolvedSeriesKey) {
+    return { ok: false, reason: `seriesKey "${request.seriesKey}" not found in query columns` };
+  }
+
+  const requestedXKey = request.xKey ?? pickFirstTextColumn(result, new Set([resolvedYKey]), maxRows);
+  const resolvedXKey = resolveColumnNameCaseInsensitive(result.columns, requestedXKey);
+  if (!resolvedXKey) {
+    return {
+      ok: false,
+      reason: request.xKey
+        ? `xKey "${request.xKey}" not found in query columns`
+        : "could not infer an xKey from query result"
+    };
+  }
+
+  let numericPoints = 0;
+  for (const row of rows) {
+    if (asFiniteNumber(getCellValueCaseInsensitive(row, resolvedYKey)) !== null) {
+      numericPoints += 1;
+    }
+  }
+  if (numericPoints === 0) {
+    return {
+      ok: false,
+      reason: `column "${resolvedYKey}" has no numeric datapoints in first ${rows.length} rows`
+    };
+  }
+
+  return { ok: true, resolvedXKey, resolvedYKey, resolvedSeriesKey, numericPoints };
+}
+
 function quoteSqlIdent(value: string, provider?: TenantWarehouseProvider): string {
   if (provider === "bigquery") {
     return `\`${value.replace(/`/g, "\\`")}\``;
@@ -782,6 +908,7 @@ export class AnalyticsAgentRuntime {
       let finalPlan: z.infer<typeof toolDecisionSchema> | undefined;
       let finalSql: string | undefined;
       let lastSuccessfulQuery: { sql: string; result: QueryResult } | undefined;
+      const successfulQueries: Array<{ sql: string; result: QueryResult; step: number }> = [];
       let latestChartArtifact: AgentArtifact | undefined;
       let memorySaveAttemptedThisTurn = false;
       let memorySaveSucceededThisTurn = false;
@@ -1048,17 +1175,49 @@ export class AnalyticsAgentRuntime {
           if (!parsedRequest.success) {
             throw new Error("chartjs.build requires valid chart args.");
           }
-          if (!lastSuccessfulQuery) {
+          if (successfulQueries.length === 0) {
             throw new Error("No successful query result available yet. Run warehouse.query first.");
           }
-          const successfulQuery = lastSuccessfulQuery;
+          const baseChartRequest = parsedRequest.data as ChartBuildRequest;
+          let selectedQuery: { sql: string; result: QueryResult; step: number } | undefined;
+          let selectedPreflight: ChartQueryPreflight | undefined;
+          const preflightFailures: string[] = [];
+
+          for (let idx = successfulQueries.length - 1; idx >= 0; idx -= 1) {
+            const candidate = successfulQueries[idx];
+            const preflight = preflightChartQuery(candidate.result, baseChartRequest, profile.maxRowsPerQuery);
+            if (preflight.ok) {
+              selectedQuery = candidate;
+              selectedPreflight = preflight;
+              break;
+            }
+            preflightFailures.push(`step ${candidate.step}: ${preflight.reason ?? "not chart-compatible"}`);
+          }
+
+          if (!selectedQuery || !selectedPreflight?.resolvedXKey || !selectedPreflight.resolvedYKey) {
+            const detail = preflightFailures[0] ?? "Run warehouse.query with chart-ready columns first.";
+            throw new Error(`No compatible query result available for chartjs.build (${detail}).`);
+          }
+
+          const effectiveChartRequest: ChartBuildRequest = {
+            ...baseChartRequest,
+            xKey: selectedPreflight.resolvedXKey,
+            yKey: selectedPreflight.resolvedYKey,
+            ...(selectedPreflight.resolvedSeriesKey ? { seriesKey: selectedPreflight.resolvedSeriesKey } : {})
+          };
           const chartBuild = await runTool(
             "chartjs.build",
-            { chartRequest: parsedRequest.data as ChartBuildRequest, sourceSql: successfulQuery.sql },
+            {
+              chartRequest: effectiveChartRequest,
+              sourceSql: selectedQuery.sql,
+              sourceStep: selectedQuery.step,
+              sourceRowCount: selectedQuery.result.rowCount,
+              sourceNumericPoints: selectedPreflight.numericPoints
+            },
             async () =>
               this.chartTool.buildFromQueryResult({
-                request: parsedRequest.data as ChartBuildRequest,
-                result: successfulQuery.result,
+                request: effectiveChartRequest,
+                result: selectedQuery.result,
                 maxPoints: profile.maxRowsPerQuery
               }),
             (result) => result.summary,
@@ -1104,6 +1263,10 @@ export class AnalyticsAgentRuntime {
             )
           );
           lastSuccessfulQuery = { sql: normalizedSql, result: queryResult };
+          successfulQueries.push({ sql: normalizedSql, result: queryResult, step });
+          if (successfulQueries.length > maxToolSteps) {
+            successfulQueries.shift();
+          }
           loopMessages.push({
             role: "user",
             content: `Tool result (warehouse.query): ${asJsonBlock({
