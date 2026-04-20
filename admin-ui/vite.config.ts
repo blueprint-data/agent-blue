@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import tailwindcss from "@tailwindcss/vite";
 import type { Plugin } from "vite";
@@ -6,12 +7,41 @@ import react from "@vitejs/plugin-react";
 
 /** Vite only treats URLs under `base` (`/admin/`) as the app; `/admin` does not start with that prefix. */
 function adminCanonicalBaseRedirect(): Plugin {
+  const adminIndexPath = path.resolve(__dirname, "index.html");
+
   return {
     name: "admin-canonical-base-redirect",
     configureServer(server) {
-      server.middlewares.use((req, res, next) => {
+      server.middlewares.use(async (req, res, next) => {
         const raw = req.url ?? "";
         const pathname = raw.split("?")[0] ?? "";
+
+        if (pathname === "/login" || pathname === "/login/" || pathname === "/register" || pathname === "/register/") {
+          res.writeHead(302, { Location: "/admin/" });
+          res.end();
+          return;
+        }
+
+        if (pathname === "/" || pathname === "/index.html") {
+          if (!fs.existsSync(adminIndexPath)) {
+            res.writeHead(302, { Location: "/admin/" });
+            res.end();
+            return;
+          }
+
+          try {
+            const html = fs.readFileSync(adminIndexPath, "utf8");
+            const transformed = await server.transformIndexHtml(raw, html, req.originalUrl);
+            res.statusCode = 200;
+            res.setHeader("Content-Type", "text/html; charset=utf-8");
+            res.setHeader("Cache-Control", "no-store");
+            res.end(transformed);
+          } catch (error) {
+            next(error as Error);
+          }
+          return;
+        }
+
         if (pathname !== "/admin") {
           next();
           return;
