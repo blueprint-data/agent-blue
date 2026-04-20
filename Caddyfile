@@ -1,7 +1,7 @@
 agent.blueprintdata.xyz {
   encode zstd gzip
 
-  @admin path /admin /admin/* /api/admin/* 
+  @admin path / /admin /admin/* /api/admin/* /login /login/* /register /register/*
   handle @admin {
     reverse_proxy admin:3100
   }

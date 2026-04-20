@@ -537,6 +537,15 @@ export function startAdminServer(options: AdminServerOptions): void {
   );
 
   const { staticDir, indexFile } = resolveAdminUiPaths();
+
+  app.get(/^\/(login|register)\/?$/, (_req: Request, res: Response) => {
+    res.redirect(302, "/admin/");
+  });
+
+  app.get("/", (_req: Request, res: Response) => {
+    res.sendFile(indexFile);
+  });
+
   app.use(
     "/admin",
     express.static(staticDir, {
