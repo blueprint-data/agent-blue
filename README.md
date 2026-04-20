@@ -227,7 +227,13 @@ npm run admin:dev
 ```
 
 - Admin API / session auth: `http://localhost:3100`
-- Vite dev UI: `http://localhost:5173/admin/`
+- Vite dev home page: `http://localhost:5173/`
+- Vite dev admin UI: `http://localhost:5173/admin/`
+
+Landing entry shortcuts:
+
+- `http://localhost:5173/login` → redirects to `/admin/`
+- `http://localhost:5173/register` → redirects to `/admin/`
 
 Vite proxies `/api/*` to the admin API, so browser sessions still work with `credentials: include`.
 
@@ -246,8 +252,8 @@ npm run admin:ui
 # or: npm run dev -- admin-ui --port 3100
 ```
 
-2. Open `http://localhost:3100/admin` in a browser.
-3. Sign in with the configured admin credentials.
+2. Open `http://localhost:3100/` for the public home page.
+3. Use the landing CTAs (Book demo / Login), or open `http://localhost:3100/admin` directly, and sign in with configured credentials.
 
 ### Single-VPS deployment (Hetzner + Docker Compose)
 
@@ -262,7 +268,7 @@ The production topology is:
 
 Routing is path-based on the same hostname:
 
-- `/admin` and `/api/admin/*` -> `admin`
+- `/`, `/login`, `/register`, `/admin`, and `/api/admin/*` -> `admin`
 - `/slack/events` -> `slack`
 
 Before starting the stack:
@@ -299,6 +305,15 @@ docker compose build
 docker compose up -d
 ```
 
+Open the home page at:
+
+`https://agent.blueprintdata.xyz/`
+
+Public entry shortcuts:
+
+- `https://agent.blueprintdata.xyz/login` → `/admin/`
+- `https://agent.blueprintdata.xyz/register` → `/admin/`
+
 Open the admin UI at:
 
 `https://agent.blueprintdata.xyz/admin`
@@ -322,7 +337,7 @@ Notes for this deployment mode:
 
 Post-deploy verification checklist:
 
-1. Open `https://agent.blueprintdata.xyz/admin` and confirm the login page loads.
+1. Open `https://agent.blueprintdata.xyz/` and confirm the home page loads, then go to `/admin` and confirm the login page loads.
 2. Log in and confirm `GET /api/admin/auth/session` reports an authenticated session through the UI.
 3. Create or load a tenant, then verify repo refresh and warehouse test succeed.
 4. Confirm the VPS `data/` directory now contains `agent.db`, tenant keys, and repo clones as you use the app.
