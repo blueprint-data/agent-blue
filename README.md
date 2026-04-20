@@ -268,8 +268,8 @@ The production topology is:
 
 Routing is path-based on the same hostname:
 
-- `/`, `/login`, `/register`, `/admin`, and `/api/admin/*` -> `admin`
-- `/slack/events` -> `slack`
+- `/slack/events` and `/slack/events/tenants/*` -> `slack`
+- all other paths (`/`, `/login`, `/register`, `/admin`, `/api/admin/*`, etc.) -> `admin`
 
 Before starting the stack:
 
@@ -320,7 +320,8 @@ Open the admin UI at:
 
 Point Slack Event Subscriptions to:
 
-`https://agent.blueprintdata.xyz/slack/events`
+- Global Slack app: `https://agent.blueprintdata.xyz/slack/events`
+- Per-tenant Slack apps: `https://agent.blueprintdata.xyz/slack/events/tenants/<tenantId>`
 
 Persistence is filesystem-backed through `./data` on the VPS. This directory stores:
 
