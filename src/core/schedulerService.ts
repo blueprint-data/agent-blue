@@ -244,7 +244,8 @@ export class SchedulerService {
     }
 
     if (channelType === "slack") {
-      const token = this.options.slackBotToken || process.env.SLACK_BOT_TOKEN || "";
+      const secrets = this.options.store.getTenantChannelBotSecrets(schedule.tenantId);
+      const token = secrets?.slackBotToken || this.options.slackBotToken || process.env.SLACK_BOT_TOKEN || "";
       if (!token) return;
       try {
         const { WebClient } = await import("@slack/web-api");
@@ -263,7 +264,8 @@ export class SchedulerService {
     }
 
     if (channelType === "telegram") {
-      const token = this.options.telegramBotToken || process.env.TELEGRAM_BOT_TOKEN || "";
+      const secrets = this.options.store.getTenantChannelBotSecrets(schedule.tenantId);
+      const token = secrets?.telegramBotToken || this.options.telegramBotToken || process.env.TELEGRAM_BOT_TOKEN || "";
       if (!token) return;
       try {
         const form = new FormData();
@@ -299,7 +301,8 @@ export class SchedulerService {
     }
 
     if (channelType === "slack") {
-      const token = this.options.slackBotToken || process.env.SLACK_BOT_TOKEN || "";
+      const secrets = this.options.store.getTenantChannelBotSecrets(schedule.tenantId);
+      const token = secrets?.slackBotToken || this.options.slackBotToken || process.env.SLACK_BOT_TOKEN || "";
       if (!token) {
         throw new Error("SLACK_BOT_TOKEN is required for Slack delivery.");
       }
@@ -322,7 +325,8 @@ export class SchedulerService {
     }
 
     if (channelType === "telegram") {
-      const token = this.options.telegramBotToken || process.env.TELEGRAM_BOT_TOKEN || "";
+      const secrets = this.options.store.getTenantChannelBotSecrets(schedule.tenantId);
+      const token = secrets?.telegramBotToken || this.options.telegramBotToken || process.env.TELEGRAM_BOT_TOKEN || "";
       if (!token) {
         throw new Error("TELEGRAM_BOT_TOKEN is required for Telegram delivery.");
       }
