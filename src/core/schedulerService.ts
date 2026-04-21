@@ -1,7 +1,8 @@
 import { CronJob, CronTime } from "cron";
+import type { ChartConfiguration } from "chart.js";
 import type { AnalyticsAgentRuntime } from "./agentRuntime.js";
 import type { ConversationStore } from "./interfaces.js";
-import type { ScheduleChannelType, TenantSchedule } from "./types.js";
+import type { AgentArtifact, ScheduleChannelType, TenantSchedule } from "./types.js";
 
 export interface SchedulerServiceOptions {
   store: ConversationStore;
@@ -11,6 +12,24 @@ export interface SchedulerServiceOptions {
   timezone?: string;
   llmModel?: string;
   refreshIntervalMs?: number;
+}
+
+function getChartConfigFromArtifacts(artifacts: AgentArtifact[] | undefined): Record<string, unknown> | null {
+  if (!Array.isArray(artifacts)) {
+    return null;
+  }
+  for (const artifact of artifacts) {
+    if (artifact.type === "chartjs_config" && artifact.format === "json" && artifact.payload) {
+      return artifact.payload;
+    }
+  }
+  return null;
+}
+
+async function buildChartPngBuffer(config: Record<string, unknown>): Promise<Buffer> {
+  const { ChartJSNodeCanvas } = await import("chartjs-node-canvas");
+  const renderer = new ChartJSNodeCanvas({ width: 900, height: 500, backgroundColour: "white" });
+  return renderer.renderToBuffer(config as unknown as ChartConfiguration);
 }
 
 export class SchedulerService {
@@ -78,7 +97,7 @@ export class SchedulerService {
       if (!schedule) {
         return { ok: false, error: "Schedule not found" };
       }
-      await this.executeSchedule(scheduleId, tenantId);
+      await this.executeSchedule(scheduleId, tenantId, true);
       return { ok: true };
     } catch (error) {
       return { ok: false, error: (error as Error).message };
@@ -149,15 +168,16 @@ export class SchedulerService {
     this.options.store.updateTenantSchedule(id, { lastError: null });
   }
 
-  private async executeSchedule(scheduleId: string, tenantId: string): Promise<void> {
+  private async executeSchedule(scheduleId: string, tenantId: string, forceRun = false): Promise<void> {
     const schedule = this.options.store.getTenantSchedule(tenantId, scheduleId);
-    if (!schedule || !schedule.active) {
+    if (!schedule || (!schedule.active && !forceRun)) {
       return;
     }
 
     const runtime = await this.getRuntime();
     const normalizedId = schedule.id.replace(/^sched_?/, "");
-    const conversationId = `sched_${normalizedId}`;
+    const runId = Date.now().toString(36);
+    const conversationId = `sched_${normalizedId}_${runId}`;
     const startedAt = new Date().toISOString();
     try {
       this.options.store.createConversation({
@@ -189,6 +209,10 @@ export class SchedulerService {
         { promptText: schedule.userRequest }
       );
       await this.deliverText(schedule, response.text);
+      const chartConfig = getChartConfigFromArtifacts(response.artifacts);
+      if (chartConfig) {
+        await this.deliverChart(schedule, chartConfig);
+      }
       this.options.store.updateTenantSchedule(schedule.id, {
         lastRunAt: startedAt,
         lastError: null
@@ -198,6 +222,65 @@ export class SchedulerService {
         lastRunAt: startedAt,
         lastError: (error as Error).message
       });
+    }
+  }
+
+  private async deliverChart(schedule: TenantSchedule, chartConfig: Record<string, unknown>): Promise<void> {
+    const channelType = schedule.channelType as ScheduleChannelType;
+    if (channelType !== "slack" && channelType !== "telegram") {
+      return;
+    }
+    if (!schedule.channelRef?.trim()) {
+      return;
+    }
+
+    let chartPng: Buffer;
+    try {
+      chartPng = await buildChartPngBuffer(chartConfig);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(`[scheduler] chart render failed for ${schedule.id}:`, err);
+      return;
+    }
+
+    if (channelType === "slack") {
+      const token = this.options.slackBotToken || process.env.SLACK_BOT_TOKEN || "";
+      if (!token) return;
+      try {
+        const { WebClient } = await import("@slack/web-api");
+        const client = new WebClient(token);
+        await client.files.uploadV2({
+          channel_id: schedule.channelRef,
+          filename: `chart-${Date.now()}.png`,
+          title: "Generated chart",
+          file: chartPng
+        });
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error(`[scheduler] Slack chart upload failed for ${schedule.id}:`, err);
+      }
+      return;
+    }
+
+    if (channelType === "telegram") {
+      const token = this.options.telegramBotToken || process.env.TELEGRAM_BOT_TOKEN || "";
+      if (!token) return;
+      try {
+        const form = new FormData();
+        form.append("chat_id", schedule.channelRef);
+        form.append(
+          "photo",
+          new Blob([chartPng.buffer as ArrayBuffer], { type: "image/png" }),
+          `chart-${Date.now()}.png`
+        );
+        await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
+          method: "POST",
+          body: form
+        });
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error(`[scheduler] Telegram chart upload failed for ${schedule.id}:`, err);
+      }
     }
   }
 
@@ -219,6 +302,9 @@ export class SchedulerService {
       const token = this.options.slackBotToken || process.env.SLACK_BOT_TOKEN || "";
       if (!token) {
         throw new Error("SLACK_BOT_TOKEN is required for Slack delivery.");
+      }
+      if (!text?.trim()) {
+        throw new Error("Agent returned an empty response — nothing to deliver to Slack.");
       }
       const response = await fetch("https://slack.com/api/chat.postMessage", {
         method: "POST",
