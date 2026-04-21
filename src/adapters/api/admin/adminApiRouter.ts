@@ -669,7 +669,12 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
         return;
       }
 
-      void schedulerService.runNow(tenantId, scheduleId);
+      void schedulerService.runNow(tenantId, scheduleId).then((result) => {
+        if (!result.ok) {
+          // eslint-disable-next-line no-console
+          console.error(`[scheduler] test run failed for ${scheduleId}: ${result.error}`);
+        }
+      });
       store.appendAdminBotEvent({
         botName: "scheduler",
         level: "info",
