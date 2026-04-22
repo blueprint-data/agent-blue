@@ -879,15 +879,23 @@ label:not([data-slot="label"]) {
   border-radius: var(--radius-md);
   gap: 0.65rem;
   box-shadow: none;
+  min-width: 0;
 }
 
-.sidebar-footer .session-chip > span:first-child {
+.sidebar-footer .session-chip .session-chip-user {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  min-width: 0;
+  flex: 1 1 auto;
   font-size: 0.8125rem;
   font-weight: 500;
   color: var(--bp-text-strong);
+}
+
+.sidebar-footer .session-chip .status-badge {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .sidebar-inset {

@@ -7,8 +7,10 @@ import multer from "multer";
 import type { ConversationStore } from "../../../core/interfaces.js";
 import type {
   AdminGuardrails,
+  DbtRepositoryService,
   TenantBigQueryConfig,
   TenantCredentialsRef,
+  TenantIntegrationTokenScope,
   TenantSnowflakeConfig,
   TenantWarehouseProvider
 } from "../../../core/interfaces.js";
@@ -19,6 +21,8 @@ import { GitDbtRepositoryService } from "../../dbt/dbtRepoService.js";
 import { env } from "../../../config/env.js";
 import type { AdminRequestAuth } from "./adminAccess.js";
 import { adminAuthFromRequest, denyUnlessSuperadmin, denyUnlessTenantAccess } from "./adminApiAuth.js";
+import { generateRepoRefreshIntegrationToken } from "./integrationTokenAuth.js";
+import { runTenantRepoRefresh, TenantRepoRefreshInProgressError } from "./repoRefresh.js";
 
 function param(req: Request, name: string): string {
   const value = req.params[name];
@@ -29,13 +33,17 @@ export interface AdminApiRouterOptions {
   store: ConversationStore;
   appDataDir: string;
   schedulerService?: SchedulerService;
+  dbtRepo?: DbtRepositoryService;
+  repoRefreshLocks?: Set<string>;
 }
 
 export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
   const { store, appDataDir, schedulerService } = options;
   const router = Router();
-  const dbtRepo = new GitDbtRepositoryService(store);
+  const dbtRepo = options.dbtRepo ?? new GitDbtRepositoryService(store);
   const maxTenantMemoryChars = 300;
+  // In-process lock per tenant to prevent concurrent repo refreshes on this admin instance.
+  const tenantRepoRefreshLocks = options.repoRefreshLocks ?? new Set<string>();
 
   function channelBotPublicFlags(tenantId: string): {
     hasSlackBotOverride: boolean;
@@ -66,6 +74,14 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
       users: full.users.filter((u) => u.tenantId === tid),
       sharedTeams: full.sharedTeams.filter((s) => s.tenantId === tid)
     };
+  }
+
+  function normalizeIntegrationTokenScope(value: unknown): TenantIntegrationTokenScope | null {
+    const raw = typeof value === "string" ? value.trim() : "";
+    if (!raw || raw === "repo_refresh") {
+      return "repo_refresh";
+    }
+    return null;
   }
 
   router.get("/tenants", (req: Request, res: Response) => {
@@ -312,6 +328,82 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
         telegramBotToken
       });
       res.json({ ok: true, ...channelBotPublicFlags(tenantId) });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.get("/tenants/:tenantId/integration-tokens", (req: Request, res: Response) => {
+    try {
+      const tenantId = param(req, "tenantId");
+      if (denyUnlessTenantAccess(req, res, tenantId)) {
+        return;
+      }
+      if (!store.getTenantRepo(tenantId)) {
+        res.status(404).json({ error: "Tenant not found" });
+        return;
+      }
+      res.json(store.listTenantIntegrationTokens(tenantId));
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.post("/tenants/:tenantId/integration-tokens", (req: Request, res: Response) => {
+    try {
+      const tenantId = param(req, "tenantId");
+      if (denyUnlessTenantAccess(req, res, tenantId)) {
+        return;
+      }
+      if (!store.getTenantRepo(tenantId)) {
+        res.status(404).json({ error: "Tenant not found" });
+        return;
+      }
+
+      const body = req.body as { name?: string; scope?: string };
+      const scope = normalizeIntegrationTokenScope(body?.scope);
+      if (!scope) {
+        res.status(400).json({ error: "Invalid scope. Supported scopes: repo_refresh" });
+        return;
+      }
+
+      const generated = generateRepoRefreshIntegrationToken();
+      const token = store.createTenantIntegrationToken({
+        tokenId: generated.tokenId,
+        tenantId,
+        name: typeof body?.name === "string" ? body.name : undefined,
+        scope,
+        tokenPrefix: generated.tokenPrefix,
+        secretHash: generated.secretHash
+      });
+
+      res.status(201).json({
+        token,
+        plaintextToken: generated.plaintextToken,
+        warning: "Save this token now. You will not be able to view it again."
+      });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.delete("/tenants/:tenantId/integration-tokens/:tokenId", (req: Request, res: Response) => {
+    try {
+      const tenantId = param(req, "tenantId");
+      const tokenId = param(req, "tokenId");
+      if (denyUnlessTenantAccess(req, res, tenantId)) {
+        return;
+      }
+      if (!store.getTenantRepo(tenantId)) {
+        res.status(404).json({ error: "Tenant not found" });
+        return;
+      }
+      const revoked = store.revokeTenantIntegrationToken(tenantId, tokenId);
+      if (!revoked) {
+        res.status(404).json({ error: "Integration token not found" });
+        return;
+      }
+      res.json({ ok: true, token: revoked });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }
@@ -881,8 +973,8 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
   );
 
   router.post("/tenants/:tenantId/repo-refresh", async (req: Request, res: Response) => {
+    const tenantId = param(req, "tenantId");
     try {
-      const tenantId = param(req, "tenantId");
       if (denyUnlessTenantAccess(req, res, tenantId)) {
         return;
       }
@@ -891,15 +983,29 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
         res.status(404).json({ status: "failed", error: "Tenant not found", refreshedAt: null });
         return;
       }
-      await dbtRepo.syncRepo(tenantId);
-      const models = await dbtRepo.listModels(tenantId);
+
+      const refreshed = await runTenantRepoRefresh({
+        tenantId,
+        dbtRepo,
+        locks: tenantRepoRefreshLocks
+      });
+
       res.json({
         status: "success",
-        message: `Repo refreshed. ${models.length} dbt models found.`,
-        refreshedAt: new Date().toISOString(),
-        modelCount: models.length
+        message: refreshed.message,
+        refreshedAt: refreshed.refreshedAt,
+        modelCount: refreshed.modelCount
       });
     } catch (error) {
+      if (error instanceof TenantRepoRefreshInProgressError) {
+        res.status(409).json({
+          status: "busy",
+          code: "repo_refresh_in_progress",
+          error: error.message,
+          refreshedAt: null
+        });
+        return;
+      }
       res.status(500).json({
         status: "failed",
         error: (error as Error).message,
@@ -1314,8 +1420,8 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
   });
 
   router.post("/wizard/tenant/:tenantId/repo-verify", async (req: Request, res: Response) => {
+    const tenantId = param(req, "tenantId");
     try {
-      const tenantId = param(req, "tenantId");
       if (denyUnlessTenantAccess(req, res, tenantId)) {
         return;
       }
@@ -1327,15 +1433,30 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
         });
         return;
       }
-      await dbtRepo.syncRepo(tenantId);
-      const models = await dbtRepo.listModels(tenantId);
+
+      const refreshed = await runTenantRepoRefresh({
+        tenantId,
+        dbtRepo,
+        locks: tenantRepoRefreshLocks
+      });
+
       res.json({
         status: "passed",
         step: "repo_verify",
-        modelCount: models.length,
-        message: `Repo synced successfully. ${models.length} dbt models found.`
+        modelCount: refreshed.modelCount,
+        message: `Repo synced successfully. ${refreshed.modelCount} dbt models found.`
       });
     } catch (error) {
+      if (error instanceof TenantRepoRefreshInProgressError) {
+        res.status(409).json({
+          status: "busy",
+          step: "repo_verify",
+          code: "repo_refresh_in_progress",
+          error: error.message,
+          hint: "Wait until the current refresh finishes, then retry."
+        });
+        return;
+      }
       res.status(500).json({
         status: "failed",
         step: "repo_verify",
@@ -1572,8 +1693,8 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
   });
 
   router.post("/wizard/tenant/:tenantId/final-validate", async (req: Request, res: Response) => {
+    const tenantId = param(req, "tenantId");
     try {
-      const tenantId = param(req, "tenantId");
       if (denyUnlessTenantAccess(req, res, tenantId)) {
         return;
       }
@@ -1592,11 +1713,24 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
       let warehouseOk = false;
 
       try {
-        await dbtRepo.syncRepo(tenantId);
-        const models = await dbtRepo.listModels(tenantId);
+        const refreshed = await runTenantRepoRefresh({
+          tenantId,
+          dbtRepo,
+          locks: tenantRepoRefreshLocks
+        });
         repoOk = true;
-        checks.push({ name: "repo_sync", passed: true, message: `${models.length} models` });
+        checks.push({ name: "repo_sync", passed: true, message: `${refreshed.modelCount} models` });
       } catch (error) {
+        if (error instanceof TenantRepoRefreshInProgressError) {
+          checks.push({ name: "repo_sync", passed: false, message: error.message });
+          res.status(409).json({
+            ready: false,
+            code: "repo_refresh_in_progress",
+            error: error.message,
+            checks
+          });
+          return;
+        }
         checks.push({ name: "repo_sync", passed: false, message: (error as Error).message });
       }
 

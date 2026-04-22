@@ -9,6 +9,8 @@ import type {
   LlmUsageEventRow,
   TenantChannelBotSecrets,
   TenantCredentialsRef,
+  TenantIntegrationToken,
+  TenantIntegrationTokenScope,
   TenantKeyMetadata,
   TenantLlmSettings,
   TenantLlmUsageSummary,
@@ -274,6 +276,20 @@ export class SqliteConversationStore implements ConversationStore {
         telegram_bot_token TEXT,
         updated_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS tenant_integration_tokens (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        name TEXT,
+        scope TEXT NOT NULL,
+        token_prefix TEXT NOT NULL,
+        secret_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        last_used_at TEXT,
+        revoked_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_tenant_integration_tokens_tenant ON tenant_integration_tokens(tenant_id);
+      CREATE INDEX IF NOT EXISTS idx_tenant_integration_tokens_scope ON tenant_integration_tokens(tenant_id, scope, revoked_at);
 
       CREATE TABLE IF NOT EXISTS tenant_llm_settings (
         tenant_id TEXT PRIMARY KEY,
@@ -1150,6 +1166,130 @@ export class SqliteConversationStore implements ConversationStore {
     return rows.map((r) => ({ tenantId: r.tenant_id, telegramBotToken: r.telegram_bot_token }));
   }
 
+  listTenantIntegrationTokens(tenantId: string): TenantIntegrationToken[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, tenant_id, name, scope, token_prefix, created_at, last_used_at, revoked_at
+         FROM tenant_integration_tokens
+         WHERE tenant_id = ?
+         ORDER BY created_at DESC`
+      )
+      .all(tenantId) as Array<{
+      id: string;
+      tenant_id: string;
+      name: string | null;
+      scope: string;
+      token_prefix: string;
+      created_at: string;
+      last_used_at: string | null;
+      revoked_at: string | null;
+    }>;
+    return rows.map((row) => ({
+      id: row.id,
+      tenantId: row.tenant_id,
+      name: row.name ?? undefined,
+      scope: row.scope as TenantIntegrationTokenScope,
+      tokenPrefix: row.token_prefix,
+      createdAt: row.created_at,
+      lastUsedAt: row.last_used_at,
+      revokedAt: row.revoked_at
+    }));
+  }
+
+  createTenantIntegrationToken(input: {
+    tokenId: string;
+    tenantId: string;
+    name?: string | null;
+    scope: TenantIntegrationTokenScope;
+    tokenPrefix: string;
+    secretHash: string;
+  }): TenantIntegrationToken {
+    const id = input.tokenId;
+    const normalizedName = input.name?.trim() ? input.name.trim() : null;
+    const createdAt = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO tenant_integration_tokens
+         (id, tenant_id, name, scope, token_prefix, secret_hash, created_at, last_used_at, revoked_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)`
+      )
+      .run(id, input.tenantId, normalizedName, input.scope, input.tokenPrefix, input.secretHash, createdAt);
+
+    return {
+      id,
+      tenantId: input.tenantId,
+      name: normalizedName ?? undefined,
+      scope: input.scope,
+      tokenPrefix: input.tokenPrefix,
+      createdAt,
+      lastUsedAt: null,
+      revokedAt: null
+    };
+  }
+
+  revokeTenantIntegrationToken(tenantId: string, tokenId: string): TenantIntegrationToken | null {
+    const nowIso = new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `UPDATE tenant_integration_tokens
+         SET revoked_at = COALESCE(revoked_at, ?)
+         WHERE tenant_id = ? AND id = ?`
+      )
+      .run(nowIso, tenantId, tokenId);
+    if (result.changes === 0) {
+      return null;
+    }
+    return this.listTenantIntegrationTokens(tenantId).find((token) => token.id === tokenId) ?? null;
+  }
+
+  getTenantIntegrationTokenAuthRecord(input: {
+    tenantId: string;
+    tokenId: string;
+    scope: TenantIntegrationTokenScope;
+  }): {
+    id: string;
+    tenantId: string;
+    scope: TenantIntegrationTokenScope;
+    secretHash: string;
+    revokedAt?: string | null;
+  } | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, tenant_id, scope, secret_hash, revoked_at
+         FROM tenant_integration_tokens
+         WHERE tenant_id = ? AND id = ? AND scope = ?`
+      )
+      .get(input.tenantId, input.tokenId, input.scope) as
+      | {
+          id: string;
+          tenant_id: string;
+          scope: string;
+          secret_hash: string;
+          revoked_at: string | null;
+        }
+      | undefined;
+    if (!row) {
+      return null;
+    }
+    return {
+      id: row.id,
+      tenantId: row.tenant_id,
+      scope: row.scope as TenantIntegrationTokenScope,
+      secretHash: row.secret_hash,
+      revokedAt: row.revoked_at
+    };
+  }
+
+  touchTenantIntegrationTokenLastUsed(tokenId: string, usedAt: string): void {
+    this.db
+      .prepare(
+        `UPDATE tenant_integration_tokens
+         SET last_used_at = ?
+         WHERE id = ?`
+      )
+      .run(usedAt, tokenId);
+  }
+
   getTenantLlmSettings(tenantId: string): TenantLlmSettings | null {
     const row = this.db
       .prepare("SELECT tenant_id, llm_model, updated_at FROM tenant_llm_settings WHERE tenant_id = ?")
@@ -1336,6 +1476,7 @@ export class SqliteConversationStore implements ConversationStore {
     this.db.prepare("DELETE FROM tenant_key_metadata WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM tenant_admin_login_domains WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM tenant_channel_bot_secrets WHERE tenant_id = ?").run(tenantId);
+    this.db.prepare("DELETE FROM tenant_integration_tokens WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM tenant_llm_settings WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM llm_usage_events WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM messages WHERE tenant_id = ?").run(tenantId);

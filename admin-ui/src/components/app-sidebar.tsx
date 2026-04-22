@@ -29,6 +29,8 @@ function NavItem({ to, children }: { to: string; children: string }) {
 }
 
 export function AppSidebar({ username, method, isSuperadmin = true, onLogout }: AppSidebarProps) {
+  const displayUser = username?.trim() || "admin";
+
   return (
     <Sidebar>
       <SidebarHeader>
@@ -77,7 +79,7 @@ export function AppSidebar({ username, method, isSuperadmin = true, onLogout }: 
       </SidebarContent>
       <SidebarFooter>
         <div className="session-chip">
-          <span>{username}</span>
+          <span className="session-chip-user" title={displayUser}>{displayUser}</span>
           <StatusBadge label={method ?? "session"} tone="accent" />
         </div>
         <button type="button" className="sidebar-logout-button" onClick={onLogout}>

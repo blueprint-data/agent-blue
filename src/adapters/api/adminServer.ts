@@ -24,9 +24,12 @@ import {
   verifySignedSessionCookie
 } from "./admin/adminAuth.js";
 import { createAdminApiRouter } from "./admin/adminApiRouter.js";
+import { parseRepoRefreshIntegrationToken } from "./admin/integrationTokenAuth.js";
+import { runTenantRepoRefresh, TenantRepoRefreshInProgressError } from "./admin/repoRefresh.js";
 import { buildRuntime } from "../../app.js";
 import { SchedulerService } from "../../core/schedulerService.js";
 import type { SqliteConversationStore } from "../store/sqliteConversationStore.js";
+import { GitDbtRepositoryService } from "../dbt/dbtRepoService.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const adminSessionCookieName = "agent_blue_admin_session";
@@ -41,6 +44,11 @@ export interface AdminServerOptions {
 
 function requestWithAdminAuth(req: Request): Request & { adminAuth?: AdminRequestAuth } {
   return req as Request & { adminAuth?: AdminRequestAuth };
+}
+
+function param(req: Request, name: string): string {
+  const value = req.params[name];
+  return Array.isArray(value) ? value[0] ?? "" : (value ?? "");
 }
 
 function isGoogleOAuthConfigured(): boolean {
@@ -281,6 +289,8 @@ function resolveAdminUiPaths(): { staticDir: string; indexFile: string } {
 export function startAdminServer(options: AdminServerOptions): void {
   const { store, port, appDataDir } = options;
   const app = express();
+  const dbtRepo = new GitDbtRepositoryService(store);
+  const tenantRepoRefreshLocks = new Set<string>();
   const sessionTtlSeconds = getSessionTtlSeconds();
   const passwordLoginEnabled = Boolean(env.adminPasswordHash || env.adminBasicPassword);
   const googleLoginEnabled = isGoogleOAuthConfigured();
@@ -530,10 +540,77 @@ export function startAdminServer(options: AdminServerOptions): void {
     res.status(204).send();
   });
 
+  app.post("/api/integrations/tenants/:tenantId/repo-refresh", async (req: Request, res: Response) => {
+    try {
+      const tenantId = param(req, "tenantId").trim();
+      const authHeader = req.headers.authorization;
+      const rawToken = authHeader?.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
+      const parsedToken = rawToken ? parseRepoRefreshIntegrationToken(rawToken) : null;
+
+      if (!tenantId || !parsedToken) {
+        res.status(401).json({ error: "Unauthorized integration token." });
+        return;
+      }
+
+      const tokenRecord = store.getTenantIntegrationTokenAuthRecord({
+        tenantId,
+        tokenId: parsedToken.tokenId,
+        scope: "repo_refresh"
+      });
+
+      if (!tokenRecord || tokenRecord.revokedAt || !timingSafeStringEqual(parsedToken.secretHash, tokenRecord.secretHash)) {
+        res.status(401).json({ error: "Unauthorized integration token." });
+        return;
+      }
+
+      if (!store.getTenantRepo(tenantId)) {
+        res.status(404).json({ status: "failed", error: "Tenant not found", refreshedAt: null });
+        return;
+      }
+
+      store.touchTenantIntegrationTokenLastUsed(tokenRecord.id, new Date().toISOString());
+
+      const refreshed = await runTenantRepoRefresh({
+        tenantId,
+        dbtRepo,
+        locks: tenantRepoRefreshLocks
+      });
+
+      res.json({
+        status: "success",
+        message: refreshed.message,
+        refreshedAt: refreshed.refreshedAt,
+        modelCount: refreshed.modelCount
+      });
+    } catch (error) {
+      if (error instanceof TenantRepoRefreshInProgressError) {
+        res.status(409).json({
+          status: "busy",
+          code: "repo_refresh_in_progress",
+          error: error.message,
+          refreshedAt: null
+        });
+        return;
+      }
+      res.status(500).json({
+        status: "failed",
+        error: (error as Error).message,
+        refreshedAt: null,
+        hint: "Ensure the deploy key was added to the GitHub repo as a Deploy Key (read-only)."
+      });
+    }
+  });
+
   app.use(
     "/api/admin",
     authMiddleware,
-    createAdminApiRouter({ store, appDataDir, schedulerService })
+    createAdminApiRouter({
+      store,
+      appDataDir,
+      schedulerService,
+      dbtRepo,
+      repoRefreshLocks: tenantRepoRefreshLocks
+    })
   );
 
   const { staticDir, indexFile } = resolveAdminUiPaths();
