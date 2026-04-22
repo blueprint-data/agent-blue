@@ -2176,7 +2176,7 @@ function TenantsPage({
                 <Input
                   value={integrationTokenNameDraft}
                   onChange={(event) => setIntegrationTokenNameDraft(event.target.value)}
-                  placeholder="takenos-datastack"
+                  placeholder="my-ci-token"
                   autoComplete="off"
                 />
               </label>
