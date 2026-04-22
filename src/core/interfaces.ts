@@ -292,6 +292,28 @@ export interface ConversationStore {
   }): void;
   /** Tenants with a non-empty per-tenant Telegram bot token (for multi-bot polling). */
   listTenantTelegramBotOverrides(): Array<{ tenantId: string; telegramBotToken: string }>;
+  listTenantIntegrationTokens(tenantId: string): TenantIntegrationToken[];
+  createTenantIntegrationToken(input: {
+    tokenId: string;
+    tenantId: string;
+    name?: string | null;
+    scope: TenantIntegrationTokenScope;
+    tokenPrefix: string;
+    secretHash: string;
+  }): TenantIntegrationToken;
+  revokeTenantIntegrationToken(tenantId: string, tokenId: string): TenantIntegrationToken | null;
+  getTenantIntegrationTokenAuthRecord(input: {
+    tenantId: string;
+    tokenId: string;
+    scope: TenantIntegrationTokenScope;
+  }): {
+    id: string;
+    tenantId: string;
+    scope: TenantIntegrationTokenScope;
+    secretHash: string;
+    revokedAt?: string | null;
+  } | null;
+  touchTenantIntegrationTokenLastUsed(tokenId: string, usedAt: string): void;
 
   getTenantLlmSettings(tenantId: string): TenantLlmSettings | null;
   upsertTenantLlmSettings(tenantId: string, llmModel: string | null): TenantLlmSettings;
@@ -367,6 +389,20 @@ export interface TenantChannelBotSecrets {
   slackSigningSecret: string | null;
   telegramBotToken: string | null;
   updatedAt: string;
+}
+
+export type TenantIntegrationTokenScope = "repo_refresh";
+
+/** Per-tenant integration tokens are stored hashed; plaintext is shown only at creation time. */
+export interface TenantIntegrationToken {
+  id: string;
+  tenantId: string;
+  name?: string;
+  scope: TenantIntegrationTokenScope;
+  tokenPrefix: string;
+  createdAt: string;
+  lastUsedAt?: string | null;
+  revokedAt?: string | null;
 }
 
 export type AdminPrincipalRole = "superadmin" | "tenant_admin";

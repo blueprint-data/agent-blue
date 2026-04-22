@@ -371,13 +371,21 @@ Optional API-only auth remains available for scripts/non-browser clients:
 
 The browser UI no longer fetches or stores a bearer token. Do not expose the admin server publicly without TLS and proper access control (VPN, firewall, private ingress, etc.).
 
+### Integration tokens (tenant-scoped repo refresh automation)
+
+Use tenant-scoped integration tokens (generated in Admin UI) to trigger refresh from external CI/CD pipelines.
+
+📘 Full guide (generation, GitHub Action setup, status handling, security, troubleshooting):
+
+- [`docs/REPO_REFRESH_INTEGRATION.md`](docs/REPO_REFRESH_INTEGRATION.md)
+
 ### Operator validation (auth, upload, repo refresh)
 
 After deploying, verify:
 
 1. **Auth**: Start the admin server, open `/admin`, and confirm that unauthenticated API requests to `/api/admin/tenants` return `401`. Log in through the UI and confirm the session unlocks the app.
 2. **.p8 upload**: In the Tenants page, click "Upload .p8" for a tenant. Select a valid Snowflake `.p8` key file. Expect success message; tenant metadata should show the uploaded key path. No raw key content in API responses or SQLite.
-3. **Repo refresh**: In the Tenants page, click "Refresh repo" for a tenant with a configured dbt repo. Expect `Repo refreshed. N dbt models found.` or a clear error (for example, deploy key not added).
+3. **Repo refresh**: In the Tenants page, click "Refresh selected tenant repo" for a tenant with a configured dbt repo. Expect `Repo refreshed. N dbt models found.` or a clear error (for example, deploy key not added).
 4. **Conversations**: Seed or trigger a conversation and confirm the Conversations page shows the raw user text plus stored execution trace details.
 5. **Slack delivery**: Confirm the `slack` compose service is up, trigger a Slack event against `https://agent.blueprintdata.xyz/slack/events`, and verify the conversation and any bot activity appear in the Admin UI.
 

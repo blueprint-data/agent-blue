@@ -163,6 +163,25 @@ interface TenantMemory {
   updatedAt: string;
 }
 
+type IntegrationTokenScope = "repo_refresh";
+
+interface TenantIntegrationTokenRecord {
+  id: string;
+  tenantId: string;
+  name?: string;
+  scope: IntegrationTokenScope;
+  tokenPrefix: string;
+  createdAt: string;
+  lastUsedAt?: string | null;
+  revokedAt?: string | null;
+}
+
+interface TenantIntegrationTokenCreateResponse {
+  token: TenantIntegrationTokenRecord;
+  plaintextToken: string;
+  warning?: string;
+}
+
 interface TelegramMapping {
   chatId: string;
   tenantId: string;
@@ -1107,6 +1126,12 @@ function TenantsPage({
   const [chSlackSigningSecret, setChSlackSigningSecret] = useState("");
   const [chTelegramBotToken, setChTelegramBotToken] = useState("");
   const [savingChannelBots, setSavingChannelBots] = useState(false);
+  const [integrationTokens, setIntegrationTokens] = useState<TenantIntegrationTokenRecord[]>([]);
+  const [integrationTokenNameDraft, setIntegrationTokenNameDraft] = useState("");
+  const [creatingIntegrationToken, setCreatingIntegrationToken] = useState(false);
+  const [revokingIntegrationTokenId, setRevokingIntegrationTokenId] = useState<string | null>(null);
+  const [generatedIntegrationToken, setGeneratedIntegrationToken] = useState<string | null>(null);
+  const integrationTokenClearTimeoutRef = useRef<number | null>(null);
   const [llmSettings, setLlmSettings] = useState<TenantLlmSettingsResponse | null>(null);
   const [llmModelDraft, setLlmModelDraft] = useState("");
   const [savingLlm, setSavingLlm] = useState(false);
@@ -1128,6 +1153,24 @@ function TenantsPage({
       (tenant) => tenant.tenantId.toLowerCase().includes(query) || tenant.repoUrl.toLowerCase().includes(query)
     );
   }, [tenantFilter, tenants]);
+
+  function clearGeneratedIntegrationToken(): void {
+    if (integrationTokenClearTimeoutRef.current !== null) {
+      window.clearTimeout(integrationTokenClearTimeoutRef.current);
+      integrationTokenClearTimeoutRef.current = null;
+    }
+    setGeneratedIntegrationToken(null);
+  }
+
+  function scheduleGeneratedIntegrationTokenClear(): void {
+    if (integrationTokenClearTimeoutRef.current !== null) {
+      window.clearTimeout(integrationTokenClearTimeoutRef.current);
+    }
+    integrationTokenClearTimeoutRef.current = window.setTimeout(() => {
+      integrationTokenClearTimeoutRef.current = null;
+      setGeneratedIntegrationToken(null);
+    }, 60_000);
+  }
 
   const loadTenants = useCallback(async (opts?: { selectTenantId?: string }) => {
     setLoading(true);
@@ -1183,10 +1226,20 @@ function TenantsPage({
   }, [selectedTenantId, isSuperadmin]);
 
   useEffect(() => {
+    return () => {
+      if (integrationTokenClearTimeoutRef.current !== null) {
+        window.clearTimeout(integrationTokenClearTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     setLastRepoRefresh(null);
     setChSlackBotToken("");
     setChSlackSigningSecret("");
     setChTelegramBotToken("");
+    setIntegrationTokenNameDraft("");
+    clearGeneratedIntegrationToken();
   }, [selectedTenantId]);
 
   useEffect(() => {
@@ -1195,6 +1248,7 @@ function TenantsPage({
       setWizardState(null);
       setWarehouseConfig(null);
       setTenantMemories([]);
+      setIntegrationTokens([]);
       setMemoryDraft("");
       setWhEditing(false);
       setLlmSettings(null);
@@ -1206,17 +1260,19 @@ function TenantsPage({
     }
     void (async () => {
       try {
-        const [nextCredentials, nextWizardState, nextWarehouse, nextMemories, nextLlm] = await Promise.all([
+        const [nextCredentials, nextWizardState, nextWarehouse, nextMemories, nextIntegrationTokens, nextLlm] = await Promise.all([
           apiRequest<CredentialReference>(`/api/admin/credentials-ref/${selectedTenantId}`),
           apiRequest<WizardStateResponse>(`/api/admin/wizard/tenant/${selectedTenantId}/state`),
           apiRequest<WarehouseConfigResponse>(`/api/admin/tenants/${selectedTenantId}/warehouse`),
           apiRequest<TenantMemory[]>(`/api/admin/tenants/${selectedTenantId}/memories?limit=100`),
+          apiRequest<TenantIntegrationTokenRecord[]>(`/api/admin/tenants/${selectedTenantId}/integration-tokens`),
           apiRequest<TenantLlmSettingsResponse>(`/api/admin/tenants/${selectedTenantId}/llm`)
         ]);
         setCredentials(nextCredentials);
         setWizardState(nextWizardState);
         setWarehouseConfig(nextWarehouse);
         setTenantMemories(nextMemories);
+        setIntegrationTokens(nextIntegrationTokens);
         setLlmSettings(nextLlm);
         setLlmModelDraft(nextLlm.llmModel ?? "");
         setUsageCustomSummary(null);
@@ -1361,10 +1417,11 @@ function TenantsPage({
 
   async function refreshRepo() {
     if (!selectedTenant) return;
+    const tenantId = selectedTenant.tenantId;
     setRefreshingRepo(true);
     try {
       const result = await apiRequest<{ message: string; refreshedAt?: string }>(
-        `/api/admin/tenants/${selectedTenant.tenantId}/repo-refresh`,
+        `/api/admin/tenants/${tenantId}/repo-refresh`,
         {
           method: "POST"
         }
@@ -1373,8 +1430,12 @@ function TenantsPage({
         message: result.message,
         refreshedAt: result.refreshedAt
       });
-      notify({ type: "success", text: result.message });
+      notify({ type: "success", text: `[${tenantId}] ${result.message}` });
     } catch (caught) {
+      if (caught instanceof ApiError && caught.status === 409) {
+        notify({ type: "info", text: caught.message });
+        return;
+      }
       notify({ type: "error", text: sectionError(caught) });
     } finally {
       setRefreshingRepo(false);
@@ -1435,6 +1496,13 @@ function TenantsPage({
   async function loadTenantMemories(tenantId: string) {
     const nextMemories = await apiRequest<TenantMemory[]>(`/api/admin/tenants/${tenantId}/memories?limit=100`);
     setTenantMemories(nextMemories);
+  }
+
+  async function loadIntegrationTokens(tenantId: string) {
+    const nextTokens = await apiRequest<TenantIntegrationTokenRecord[]>(
+      `/api/admin/tenants/${tenantId}/integration-tokens`
+    );
+    setIntegrationTokens(nextTokens);
   }
 
   async function addTenantMemory() {
@@ -1589,6 +1657,64 @@ function TenantsPage({
       notify({ type: "error", text: sectionError(caught) });
     } finally {
       setSavingChannelBots(false);
+    }
+  }
+
+  async function createIntegrationToken() {
+    if (!selectedTenant) return;
+    const name = integrationTokenNameDraft.trim();
+    setCreatingIntegrationToken(true);
+    try {
+      const response = await apiRequest<TenantIntegrationTokenCreateResponse>(
+        `/api/admin/tenants/${selectedTenant.tenantId}/integration-tokens`,
+        {
+          method: "POST",
+          body: {
+            name: name.length > 0 ? name : undefined,
+            scope: "repo_refresh"
+          }
+        }
+      );
+      setGeneratedIntegrationToken(response.plaintextToken);
+      scheduleGeneratedIntegrationTokenClear();
+      setIntegrationTokenNameDraft("");
+      await loadIntegrationTokens(selectedTenant.tenantId);
+      notify({ type: "success", text: "Integration token created. Copy it now; it will not be shown again." });
+    } catch (caught) {
+      notify({ type: "error", text: sectionError(caught) });
+    } finally {
+      setCreatingIntegrationToken(false);
+    }
+  }
+
+  async function revokeIntegrationToken(tokenId: string) {
+    if (!selectedTenant) return;
+    setRevokingIntegrationTokenId(tokenId);
+    try {
+      await apiRequest(`/api/admin/tenants/${selectedTenant.tenantId}/integration-tokens/${tokenId}`, {
+        method: "DELETE"
+      });
+      await loadIntegrationTokens(selectedTenant.tenantId);
+      notify({ type: "success", text: "Integration token revoked." });
+    } catch (caught) {
+      notify({ type: "error", text: sectionError(caught) });
+    } finally {
+      setRevokingIntegrationTokenId(null);
+    }
+  }
+
+  async function copyGeneratedIntegrationToken() {
+    if (!generatedIntegrationToken) return;
+    if (!navigator.clipboard) {
+      notify({ type: "error", text: "Clipboard API is not available in this browser." });
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(generatedIntegrationToken);
+      clearGeneratedIntegrationToken();
+      notify({ type: "success", text: "Integration token copied and hidden." });
+    } catch (caught) {
+      notify({ type: "error", text: sectionError(caught) });
     }
   }
 
@@ -1749,7 +1875,7 @@ function TenantsPage({
                     onClick={() => void refreshRepo()}
                     disabled={refreshingRepo || saving}
                   >
-                    {refreshingRepo ? "Refreshing…" : "Refresh repo"}
+                    {refreshingRepo ? "Refreshing…" : "Refresh selected tenant repo"}
                   </Button>
                 {warehouseConfig?.provider === "snowflake" ? (
                   <>
@@ -2015,6 +2141,89 @@ function TenantsPage({
                   />
                 </label>
               </div>
+            </AppShellCard>
+          ) : null}
+
+          {selectedTenant ? (
+            <AppShellCard
+              title="Integration tokens (repo refresh)"
+              subtitle="Create tenant-scoped bearer tokens for CI/CD to trigger dbt repo refresh automatically."
+              action={
+                <div className="button-row">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={creatingIntegrationToken}
+                    onClick={() => void createIntegrationToken()}
+                  >
+                    {creatingIntegrationToken ? "Generating…" : "Generate token"}
+                  </Button>
+                  {generatedIntegrationToken ? (
+                    <Button type="button" variant="outline" onClick={() => void copyGeneratedIntegrationToken()}>
+                      Copy token
+                    </Button>
+                  ) : null}
+                  {generatedIntegrationToken ? (
+                    <Button type="button" variant="outline" onClick={() => clearGeneratedIntegrationToken()}>
+                      Hide token
+                    </Button>
+                  ) : null}
+                </div>
+              }
+            >
+              <label>
+                Token name (optional)
+                <Input
+                  value={integrationTokenNameDraft}
+                  onChange={(event) => setIntegrationTokenNameDraft(event.target.value)}
+                  placeholder="takenos-datastack"
+                  autoComplete="off"
+                />
+              </label>
+
+              {generatedIntegrationToken ? (
+                <div className="stack">
+                  <p className="muted">Save this token now. It is auto-hidden after 60 seconds.</p>
+                  <code style={{ wordBreak: "break-all" }}>{generatedIntegrationToken}</code>
+                </div>
+              ) : null}
+
+              <p className="muted">
+                Usage: <code>Authorization: Bearer &lt;token&gt;</code> to call
+                <code> /api/integrations/tenants/{selectedTenant.tenantId}/repo-refresh</code>
+              </p>
+
+              {integrationTokens.length === 0 ? (
+                <p className="muted">No integration tokens created for this tenant yet.</p>
+              ) : (
+                <div className="stack">
+                  {integrationTokens.map((token) => (
+                    <div key={token.id} className="stack" style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-md)", padding: "0.75rem" }}>
+                      <div className="details-grid">
+                        <DetailItem label="Name" value={token.name ?? "—"} />
+                        <DetailItem label="Scope" value={token.scope} />
+                        <DetailItem label="Token prefix" value={token.tokenPrefix} />
+                        <DetailItem label="Created" value={formatDate(token.createdAt)} />
+                        <DetailItem label="Last used" value={formatDate(token.lastUsedAt ?? undefined)} />
+                        <DetailItem label="Revoked" value={formatDate(token.revokedAt ?? undefined)} />
+                      </div>
+                      <div className="button-row">
+                        <StatusBadge label={token.revokedAt ? "revoked" : "active"} tone={token.revokedAt ? "warning" : "success"} />
+                        {!token.revokedAt ? (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            disabled={revokingIntegrationTokenId === token.id}
+                            onClick={() => void revokeIntegrationToken(token.id)}
+                          >
+                            {revokingIntegrationTokenId === token.id ? "Revoking…" : "Revoke"}
+                          </Button>
+                        ) : null}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </AppShellCard>
           ) : null}
 
