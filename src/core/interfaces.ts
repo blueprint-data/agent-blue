@@ -6,6 +6,7 @@ import {
   AgentContext,
   AgentExecutionTurn,
   AgentProfile,
+  ExecutionTraceEvent,
   ConversationMessage,
   ConversationOrigin,
   ConversationSource,
@@ -14,7 +15,8 @@ import {
   ScheduleChannelType,
   TenantMemory,
   TenantMemorySource,
-  TenantSchedule
+  TenantSchedule,
+  ToolExecutionRecord
 } from "./types.js";
 
 export interface LlmMessage {
@@ -164,6 +166,7 @@ export interface ConversationStore {
   createTenantMemory(input: { tenantId: string; content: string; source: TenantMemorySource }): TenantMemory;
   deleteTenantMemory(memoryId: string): void;
   getOrCreateProfile(tenantId: string, profileName: string): AgentProfile;
+  upsertAgentProfile(input: Omit<AgentProfile, "id" | "createdAt"> & { id?: string; createdAt?: string }): AgentProfile;
   upsertTenantRepo(input: {
     tenantId: string;
     repoUrl: string;
@@ -245,6 +248,11 @@ export interface ConversationStore {
   }): void;
   getExecutionTurn(turnId: string): AgentExecutionTurn | null;
   listExecutionTurns(conversationId: string): AgentExecutionTurn[];
+  appendExecutionEvent(input: Omit<ExecutionTraceEvent, "id" | "createdAt">): ExecutionTraceEvent;
+  listExecutionEvents(turnId: string): ExecutionTraceEvent[];
+  recordToolExecution(input: Omit<ToolExecutionRecord, "id" | "createdAt" | "updatedAt">): ToolExecutionRecord;
+  getToolExecutionByCacheKey(turnId: string, cacheKey: string): ToolExecutionRecord | null;
+  listToolExecutions(turnId: string): ToolExecutionRecord[];
   listAdminConversations(input?: {
     tenantId?: string;
     source?: ConversationSource;

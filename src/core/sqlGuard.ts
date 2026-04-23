@@ -19,19 +19,33 @@ export class SqlGuard {
     this.maxLimit = options.maxLimit ?? 2000;
   }
 
+  private assertReadOnly(trimmed: string): void {
+    if (!this.enforceReadOnly) {
+      return;
+    }
+    if (!SELECT_KEYWORDS.test(trimmed)) {
+      throw new Error("Only SELECT/WITH queries are allowed.");
+    }
+    if (WRITE_KEYWORDS.test(trimmed)) {
+      throw new Error("Write/query-modifying SQL is not allowed.");
+    }
+  }
+
+  normalizeForExport(sql: string): string {
+    const trimmed = sql.trim().replace(/;+\s*$/, "");
+    if (!trimmed) {
+      throw new Error("SQL is empty.");
+    }
+    this.assertReadOnly(trimmed);
+    return trimmed;
+  }
+
   normalize(sql: string): string {
     const trimmed = sql.trim().replace(/;+\s*$/, "");
     if (!trimmed) {
       throw new Error("SQL is empty.");
     }
-    if (this.enforceReadOnly) {
-      if (!SELECT_KEYWORDS.test(trimmed)) {
-        throw new Error("Only SELECT/WITH queries are allowed.");
-      }
-      if (WRITE_KEYWORDS.test(trimmed)) {
-        throw new Error("Write/query-modifying SQL is not allowed.");
-      }
-    }
+    this.assertReadOnly(trimmed);
 
     const limitMatch = trimmed.match(LIMIT_REGEX);
     if (!limitMatch) {

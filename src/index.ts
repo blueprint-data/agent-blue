@@ -12,6 +12,7 @@ import { hashAdminPassword } from "./adapters/api/admin/adminAuth.js";
 import { createId } from "./utils/id.js";
 import { getStringArg, parseArgs } from "./utils/args.js";
 import { env } from "./config/env.js";
+import { defaultGoldenEvalCases, scoreEvaluationTurn } from "./core/evaluationHarness.js";
 
 const canUseAnsi = Boolean(output.isTTY) && process.env.NO_COLOR !== "1";
 
@@ -200,8 +201,8 @@ const e2eQuestions = [
 interface E2eTurnMetrics {
   plannerAttempts: number;
   totalMs: number | null;
-  snowflakeOk: number;
-  snowflakeErrors: number;
+  warehouseOk: number;
+  warehouseErrors: number;
   fallback: boolean;
 }
 
@@ -215,25 +216,25 @@ function parseE2eTurnMetrics(text: string, debug: Record<string, unknown> | unde
 
   const toolCallsRaw = debug?.toolCalls;
   const toolCalls = Array.isArray(toolCallsRaw) ? toolCallsRaw : [];
-  let snowflakeOk = 0;
-  let snowflakeErrors = 0;
+  let warehouseOk = 0;
+  let warehouseErrors = 0;
   for (const call of toolCalls) {
     const entry = call as { tool?: unknown; status?: unknown };
-    if (entry.tool !== "snowflake.query") {
+    if (entry.tool !== "warehouse.query") {
       continue;
     }
     if (entry.status === "ok") {
-      snowflakeOk += 1;
+      warehouseOk += 1;
     } else if (entry.status === "error") {
-      snowflakeErrors += 1;
+      warehouseErrors += 1;
     }
   }
 
   return {
     plannerAttempts,
     totalMs,
-    snowflakeOk,
-    snowflakeErrors,
+    warehouseOk,
+    warehouseErrors,
     fallback: text.includes("I could not reach a reliable final answer")
   };
 }
@@ -254,6 +255,7 @@ function usage(): string {
     "  npm run dev -- init --tenant <id> --repo-url <git@...> [--dbt-subpath models] [--force]",
     "  npm run dev -- sync-dbt --tenant <id>",
     "  npm run dev -- e2e-loop --tenant <id> [--profile default] [--model <provider/model>] [--models <m1,m2>] [--runs 1] [--verbose]",
+    "  npm run dev -- eval-harness --tenant <id> [--profile default] [--model <provider/model>] [--models <m1,m2>] [--runs 1]",
     "  npm run dev -- prod-smoke --tenant <id> [--model <provider/model>]",
     "  npm run dev -- chat --tenant <id> [--profile default] [--conversation <id>] [--message \"...\"] [--verbose] [--model <provider/model>]",
     "  npm run dev -- slack [--tenant <id>] [--profile default] [--port 3000] [--model <provider/model>]",
@@ -481,7 +483,7 @@ async function run(): Promise<void> {
             output.write(
               `${infoLabel("[metrics]")} attempts=${metrics.plannerAttempts} totalMs=${
                 metrics.totalMs ?? "n/a"
-              } snowflake.ok=${metrics.snowflakeOk} snowflake.error=${metrics.snowflakeErrors} fallback=${metrics.fallback}\n`
+              } warehouse.ok=${metrics.warehouseOk} warehouse.error=${metrics.warehouseErrors} fallback=${metrics.fallback}\n`
             );
             if (verbose) {
               printVerboseDebug(response.debug);
@@ -492,8 +494,8 @@ async function run(): Promise<void> {
             modelMetrics.push({
               plannerAttempts: 0,
               totalMs: null,
-              snowflakeOk: 0,
-              snowflakeErrors: 0,
+              warehouseOk: 0,
+              warehouseErrors: 0,
               fallback: true
             });
           }
@@ -510,16 +512,89 @@ async function run(): Promise<void> {
         totalTurns === 0
           ? 0
           : modelMetrics.reduce((acc, metric) => acc + (metric.totalMs ?? 0), 0) / totalTurns;
-      const totalSnowflakeOk = modelMetrics.reduce((acc, metric) => acc + metric.snowflakeOk, 0);
-      const totalSnowflakeErrors = modelMetrics.reduce((acc, metric) => acc + metric.snowflakeErrors, 0);
+      const totalWarehouseOk = modelMetrics.reduce((acc, metric) => acc + metric.warehouseOk, 0);
+      const totalWarehouseErrors = modelMetrics.reduce((acc, metric) => acc + metric.warehouseErrors, 0);
 
       output.write(`${paint("Model summary", 36)}\n`);
       output.write(`  - turns=${totalTurns}\n`);
       output.write(`  - fallbackTurns=${fallbackTurns}\n`);
       output.write(`  - avgPlannerAttempts=${avgAttempts.toFixed(2)}\n`);
       output.write(`  - avgTotalMs=${Math.round(avgTotalMs)}\n`);
-      output.write(`  - snowflakeOk=${totalSnowflakeOk}\n`);
-      output.write(`  - snowflakeErrors=${totalSnowflakeErrors}\n`);
+      output.write(`  - warehouseOk=${totalWarehouseOk}\n`);
+      output.write(`  - warehouseErrors=${totalWarehouseErrors}\n`);
+    }
+    return;
+  }
+
+  if (command === "eval-harness") {
+    const runtime = buildRuntime(store);
+    const tenantId = getStringArg(args, "tenant");
+    const profileName = getStringArg(args, "profile", "default");
+    const singleModel = typeof args.model === "string" ? args.model.trim() : "";
+    const modelsFromCsv = parseCsvArg(args.models);
+    const models =
+      modelsFromCsv.length > 0
+        ? modelsFromCsv
+        : singleModel.length > 0
+          ? [singleModel]
+          : [env.llmModel];
+    const runsRaw = typeof args.runs === "string" ? Number.parseInt(args.runs, 10) : 1;
+    const runs = Number.isFinite(runsRaw) && runsRaw > 0 ? runsRaw : 1;
+
+    output.write(
+      `${infoLabel("Eval harness started.")} tenant=${tenantId} profile=${profileName} runs=${runs} models=${models.join(", ")}\n`
+    );
+
+    for (const llmModel of models) {
+      output.write(`\n${paint(`=== Eval Model: ${llmModel} ===`, 35)}\n`);
+      const results: Array<ReturnType<typeof scoreEvaluationTurn>> = [];
+      for (let runIndex = 1; runIndex <= runs; runIndex += 1) {
+        output.write(`${infoLabel(`[run ${runIndex}/${runs}]`)}\n`);
+        for (const goldenCase of defaultGoldenEvalCases) {
+          const conversationId = createId("eval");
+          output.write(`${warnText(`${goldenCase.id}:`)} ${goldenCase.prompt}\n`);
+          try {
+            const response = await runtime.respond(
+              { tenantId, profileName, conversationId, llmModel, origin: { source: "cli" } },
+              goldenCase.prompt
+            );
+            const scored = scoreEvaluationTurn({
+              prompt: goldenCase.prompt,
+              text: response.text,
+              debug: response.debug,
+              goldenCase
+            });
+            results.push(scored);
+            output.write(
+              `${successText("score")}=${scored.score} planner=${scored.breakdown.planner} tools=${scored.breakdown.tools} sql=${scored.breakdown.sqlSafety} correctness=${scored.breakdown.correctnessSignals} latency=${scored.breakdown.latency}\n`
+            );
+            if (scored.notes.length > 0) {
+              output.write(`  notes=${scored.notes.join(" | ")}\n`);
+            }
+          } catch (error) {
+            output.write(`${errorText(`Error: ${(error as Error).message}`)}\n`);
+            results.push(
+              scoreEvaluationTurn({
+                prompt: goldenCase.prompt,
+                text: "I could not reach a reliable final answer after multiple tool attempts. Please try rephrasing.",
+                debug: undefined,
+                goldenCase
+              })
+            );
+          }
+        }
+      }
+
+      const avgScore =
+        results.length === 0 ? 0 : results.reduce((acc, result) => acc + result.score, 0) / results.length;
+      const lowScorers = results.filter((result) => result.score < 60);
+      output.write(`${paint("Eval summary", 36)}\n`);
+      output.write(`  - turns=${results.length}\n`);
+      output.write(`  - avgScore=${avgScore.toFixed(1)}\n`);
+      output.write(`  - lowScorers=${lowScorers.length}\n`);
+      if (lowScorers.length > 0) {
+        output.write(`  - failingCases=${Array.from(new Set(lowScorers.map((result) => result.caseId))).join(", ")}\n`);
+      }
     }
     return;
   }

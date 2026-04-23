@@ -31,6 +31,9 @@ Core orchestration lives in one place (`AnalyticsAgentRuntime`) and depends on i
   - Output is channel-agnostic so UI/PNG/ASCII rendering can be added independently.
 - Conversation memory:
   - SQLite store for conversations/messages/profiles/repo config.
+- Harness observability:
+  - Execution turns now persist trace IDs, structured step events, tool execution records, and LLM usage.
+  - Admin UI surfaces planner/tool traces so failures are easier to audit and debug.
 - Agent profile abstraction (“souls”):
   - Per-tenant profile with system prompt and query row limits.
 
@@ -150,7 +153,13 @@ Run against multiple models in one go:
 npm run dev -- e2e-loop --tenant acme --models "openai/gpt-4o-mini,openai/gpt-4.1-mini" --runs 2
 ```
 
-8. Run Slack server (Events API)
+8. Run the evaluation harness (golden prompts + scoring)
+
+```bash
+npm run dev -- eval-harness --tenant acme --models "openai/gpt-4o-mini,openai/gpt-4.1-mini" --runs 2
+```
+
+9. Run Slack server (Events API)
 
 ```bash
 npm run dev -- slack --tenant acme --profile default --port 3000
@@ -172,6 +181,12 @@ Then point your Slack app Event Subscriptions URL to:
 - `prod-smoke`
   - `--tenant <id>`
   - `--model <provider/model>` (optional; defaults to `LLM_MODEL`)
+- `eval-harness`
+  - `--tenant <id>`
+  - `--profile <name>` (default: `default`)
+  - `--model <provider/model>` (optional; single model override)
+  - `--models <m1,m2,...>` (optional; run the golden cases for multiple models)
+  - `--runs <n>` (optional; default `1`)
 - `e2e-loop`
   - `--tenant <id>`
   - `--profile <name>` (default: `default`)

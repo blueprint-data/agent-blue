@@ -115,6 +115,7 @@ interface ExecutionTurn {
   id: string;
   tenantId: string;
   conversationId: string;
+  traceId?: string;
   source: string;
   rawUserText: string;
   promptText: string;
@@ -122,6 +123,29 @@ interface ExecutionTurn {
   status: string;
   errorMessage?: string;
   debug?: Record<string, unknown>;
+  events?: Array<{
+    id: string;
+    step?: number;
+    type: string;
+    level: "info" | "success" | "warning" | "error";
+    message: string;
+    payload?: Record<string, unknown>;
+    createdAt: string;
+  }>;
+  toolExecutions?: Array<{
+    id: string;
+    step?: number;
+    cacheKey: string;
+    tool: string;
+    status: string;
+    durationMs: number;
+    attemptCount: number;
+    input: Record<string, unknown>;
+    outputSummary?: Record<string, unknown>;
+    output?: unknown;
+    error?: string;
+    createdAt: string;
+  }>;
   createdAt: string;
   updatedAt: string;
   completedAt?: string;
@@ -2596,6 +2620,72 @@ function ExecutionTurnLlmUsage({ debug }: { debug: Record<string, unknown> }): R
   );
 }
 
+function ExecutionTurnTrace({ turn }: { turn: ExecutionTurn }): ReactElement | null {
+  const events = Array.isArray(turn.events) ? turn.events : [];
+  const toolExecutions = Array.isArray(turn.toolExecutions) ? turn.toolExecutions : [];
+  if (events.length === 0 && toolExecutions.length === 0) {
+    return null;
+  }
+  return (
+    <div className="space-y-4">
+      {events.length > 0 ? (
+        <div className="conv-turn__field">
+          <span className="conv-turn__label">Trace events</span>
+          <div className="space-y-2">
+            {events.map((event) => (
+              <div key={event.id} className="rounded-md border border-slate-800/60 bg-slate-950/40 p-3">
+                <div className="flex items-center gap-2 text-xs text-slate-300">
+                  <StatusBadge
+                    label={event.level}
+                    tone={
+                      event.level === "success"
+                        ? "success"
+                        : event.level === "error"
+                          ? "error"
+                          : event.level === "warning"
+                            ? "warning"
+                            : "neutral"
+                    }
+                  />
+                  <code>{event.type}</code>
+                  {typeof event.step === "number" ? <span>step {event.step}</span> : null}
+                  <span>{formatDate(event.createdAt)}</span>
+                </div>
+                <div className="mt-2 text-sm">{event.message}</div>
+                {event.payload ? <div className="mt-2"><JsonBlock value={event.payload} /></div> : null}
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+      {toolExecutions.length > 0 ? (
+        <div className="conv-turn__field">
+          <span className="conv-turn__label">Tool executions</span>
+          <div className="space-y-2">
+            {toolExecutions.map((toolRun) => (
+              <div key={toolRun.id} className="rounded-md border border-slate-800/60 bg-slate-950/40 p-3">
+                <div className="flex items-center gap-2 text-xs text-slate-300">
+                  <code>{toolRun.tool}</code>
+                  <StatusBadge
+                    label={toolRun.status}
+                    tone={toolRun.status === "ok" ? "success" : toolRun.status === "error" ? "error" : "warning"}
+                  />
+                  {typeof toolRun.step === "number" ? <span>step {toolRun.step}</span> : null}
+                  <span>attempt {toolRun.attemptCount}</span>
+                  <span>{toolRun.durationMs}ms</span>
+                </div>
+                <div className="mt-2">
+                  <JsonBlock value={{ input: toolRun.input, outputSummary: toolRun.outputSummary, error: toolRun.error }} />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function ConversationsPage({
   notify,
   scopedTenantId
@@ -2797,10 +2887,22 @@ function ConversationsPage({
                       />
                     </summary>
                     <div className="conv-turn__body">
+                      {turn.traceId ? (
+                        <div className="conv-turn__field">
+                          <span className="conv-turn__label">Trace</span>
+                          <p className="conv-turn__value"><code>{turn.traceId}</code></p>
+                        </div>
+                      ) : null}
                       {turn.rawUserText ? (
                         <div className="conv-turn__field">
                           <span className="conv-turn__label">User</span>
                           <p className="conv-turn__value">{compactText(turn.rawUserText, 200)}</p>
+                        </div>
+                      ) : null}
+                      {turn.promptText && turn.promptText !== turn.rawUserText ? (
+                        <div className="conv-turn__field">
+                          <span className="conv-turn__label">Prompt text</span>
+                          <p className="conv-turn__value">{compactText(turn.promptText, 240)}</p>
                         </div>
                       ) : null}
                       {turn.assistantText ? (
@@ -2815,6 +2917,8 @@ function ConversationsPage({
                           <p className="conv-turn__value">{turn.errorMessage}</p>
                         </div>
                       ) : null}
+                      {turn.debug ? <ExecutionTurnLlmUsage debug={turn.debug} /> : null}
+                      <ExecutionTurnTrace turn={turn} />
                       {turn.debug ? <JsonBlock value={turn.debug} /> : null}
                     </div>
                   </details>

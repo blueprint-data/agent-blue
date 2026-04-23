@@ -180,6 +180,13 @@ export class SchedulerService {
     const conversationId = `sched_${normalizedId}_${runId}`;
     const startedAt = new Date().toISOString();
     try {
+      this.options.store.appendAdminBotEvent({
+        botName: "scheduler",
+        level: "info",
+        eventType: "schedule.execution_started",
+        message: "Schedule execution started",
+        metadata: { tenantId, scheduleId, conversationId, forceRun, startedAt }
+      });
       this.options.store.createConversation({
         tenantId: schedule.tenantId,
         profileName: "default",
@@ -217,10 +224,29 @@ export class SchedulerService {
         lastRunAt: startedAt,
         lastError: null
       });
+      this.options.store.appendAdminBotEvent({
+        botName: "scheduler",
+        level: "info",
+        eventType: "schedule.execution_completed",
+        message: "Schedule execution completed",
+        metadata: {
+          tenantId,
+          scheduleId,
+          conversationId,
+          artifactCount: Array.isArray(response.artifacts) ? response.artifacts.length : 0
+        }
+      });
     } catch (error) {
       this.options.store.updateTenantSchedule(schedule.id, {
         lastRunAt: startedAt,
         lastError: (error as Error).message
+      });
+      this.options.store.appendAdminBotEvent({
+        botName: "scheduler",
+        level: "error",
+        eventType: "schedule.execution_failed",
+        message: "Schedule execution failed",
+        metadata: { tenantId, scheduleId, conversationId, error: (error as Error).message }
       });
     }
   }
