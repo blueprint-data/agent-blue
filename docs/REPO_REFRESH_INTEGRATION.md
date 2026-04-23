@@ -1,4 +1,4 @@
-# Repo Refresh Integration (tenant-scoped token)
+# Repo Refresh Integration (token-authenticated)
 
 This guide explains how to trigger Agent Blue dbt repo refresh from an external CI/CD pipeline (for example, right after `dbt docs` in a separate data-stack repository).
 
@@ -11,10 +11,19 @@ This guide explains how to trigger Agent Blue dbt repo refresh from an external 
 ## Endpoint contract
 
 - **Method**: `POST`
-- **Path**: `/api/integrations/tenants/:tenantId/repo-refresh`
+- **Path (recommended)**: `/api/integrations/repo-refresh`
+- **Path (legacy compatible)**: `/api/integrations/tenants/:tenantId/repo-refresh`
 - **Auth**: `Authorization: Bearer <integration_token>`
 
 Example:
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer ${AGENT_BLUE_REFRESH_TOKEN}" \
+  "${AGENT_BLUE_URL}/api/integrations/repo-refresh"
+```
+
+Legacy example (still supported):
 
 ```bash
 curl -X POST \
@@ -43,7 +52,8 @@ In your data-stack repository (GitHub), add secrets:
 
 - `AGENT_BLUE_URL` (example: `https://agent.blueprintdata.xyz`)
 - `AGENT_BLUE_REFRESH_TOKEN`
-- `TENANT_ID`
+
+`TENANT_ID` is no longer required when using the recommended endpoint.
 
 ## GitHub Action step (recommended)
 
@@ -56,7 +66,7 @@ body="$(mktemp)"
 code="$(curl -sS -o "$body" -w "%{http_code}" \
   -X POST \
   -H "Authorization: Bearer ${AGENT_BLUE_REFRESH_TOKEN}" \
-  "${AGENT_BLUE_URL}/api/integrations/tenants/${TENANT_ID}/repo-refresh")"
+  "${AGENT_BLUE_URL}/api/integrations/repo-refresh")"
 
 # 200 = refreshed, 409 = already in progress (non-fatal)
 if [[ "$code" == "200" || "$code" == "409" ]]; then
@@ -72,7 +82,7 @@ exit 1
 
 - `200`: refresh executed successfully.
 - `409`: refresh already in progress (`repo_refresh_in_progress`) — safe operationally.
-- `401`: invalid, revoked, malformed, or wrong-tenant token.
+- `401`: invalid, revoked, malformed, or unauthorized integration token.
 - `404`: tenant does not exist.
 - `500`: real refresh failure (repo/deploy key access, git failure, etc.).
 
@@ -96,8 +106,8 @@ Usually indicates an old backend process/build still running.
 ### `401 Unauthorized integration token`
 
 - Token revoked or malformed.
-- Token belongs to a different tenant.
 - Wrong value in CI secret.
+- Legacy path only: `TENANT_ID` does not match the token tenant.
 
 ### `500` with git/deploy-key error
 

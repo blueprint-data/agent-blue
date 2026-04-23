@@ -35,6 +35,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const adminSessionCookieName = "agent_blue_admin_session";
 const oauthStateCookieName = "agent_blue_oauth_state";
 const randomFallbackSecret = crypto.randomBytes(32).toString("base64url");
+const integrationRepoRefreshScope = "repo_refresh" as const;
 
 export interface AdminServerOptions {
   store: ConversationStore;
@@ -110,6 +111,40 @@ function timingSafeStringEqual(left: string, right: string): boolean {
     return false;
   }
   return crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function authenticateRepoRefreshIntegrationRequest(
+  req: Request,
+  store: ConversationStore,
+  tenantId?: string
+): { tenantId: string; tokenRecordId: string } | null {
+  const authHeader = req.headers.authorization;
+  const rawToken = authHeader?.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
+  const parsedToken = rawToken ? parseRepoRefreshIntegrationToken(rawToken) : null;
+
+  if (!parsedToken) {
+    return null;
+  }
+
+  const tokenRecord = tenantId
+    ? store.getTenantIntegrationTokenAuthRecord({
+        tenantId,
+        tokenId: parsedToken.tokenId,
+        scope: integrationRepoRefreshScope
+      })
+    : store.getTenantIntegrationTokenAuthRecordByTokenId({
+        tokenId: parsedToken.tokenId,
+        scope: integrationRepoRefreshScope
+      });
+
+  if (!tokenRecord || tokenRecord.revokedAt || !timingSafeStringEqual(parsedToken.secretHash, tokenRecord.secretHash)) {
+    return null;
+  }
+
+  return {
+    tenantId: tokenRecord.tenantId,
+    tokenRecordId: tokenRecord.id
+  };
 }
 
 function verifyLoginCredentials(username: string, password: string): boolean {
@@ -540,35 +575,32 @@ export function startAdminServer(options: AdminServerOptions): void {
     res.status(204).send();
   });
 
-  app.post("/api/integrations/tenants/:tenantId/repo-refresh", async (req: Request, res: Response) => {
+  const handleTenantRepoRefresh = async (
+    req: Request,
+    res: Response,
+    tenantIdFromPath?: string
+  ): Promise<void> => {
     try {
-      const tenantId = param(req, "tenantId").trim();
-      const authHeader = req.headers.authorization;
-      const rawToken = authHeader?.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
-      const parsedToken = rawToken ? parseRepoRefreshIntegrationToken(rawToken) : null;
-
-      if (!tenantId || !parsedToken) {
+      const normalizedTenantId = tenantIdFromPath?.trim();
+      if (tenantIdFromPath !== undefined && !normalizedTenantId) {
         res.status(401).json({ error: "Unauthorized integration token." });
         return;
       }
 
-      const tokenRecord = store.getTenantIntegrationTokenAuthRecord({
-        tenantId,
-        tokenId: parsedToken.tokenId,
-        scope: "repo_refresh"
-      });
-
-      if (!tokenRecord || tokenRecord.revokedAt || !timingSafeStringEqual(parsedToken.secretHash, tokenRecord.secretHash)) {
+      const authResult = authenticateRepoRefreshIntegrationRequest(req, store, normalizedTenantId);
+      if (!authResult) {
         res.status(401).json({ error: "Unauthorized integration token." });
         return;
       }
+
+      const tenantId = authResult.tenantId;
 
       if (!store.getTenantRepo(tenantId)) {
         res.status(404).json({ status: "failed", error: "Tenant not found", refreshedAt: null });
         return;
       }
 
-      store.touchTenantIntegrationTokenLastUsed(tokenRecord.id, new Date().toISOString());
+      store.touchTenantIntegrationTokenLastUsed(authResult.tokenRecordId, new Date().toISOString());
 
       const refreshed = await runTenantRepoRefresh({
         tenantId,
@@ -599,6 +631,14 @@ export function startAdminServer(options: AdminServerOptions): void {
         hint: "Ensure the deploy key was added to the GitHub repo as a Deploy Key (read-only)."
       });
     }
+  };
+
+  app.post("/api/integrations/repo-refresh", async (req: Request, res: Response) => {
+    await handleTenantRepoRefresh(req, res);
+  });
+
+  app.post("/api/integrations/tenants/:tenantId/repo-refresh", async (req: Request, res: Response) => {
+    await handleTenantRepoRefresh(req, res, param(req, "tenantId"));
   });
 
   app.use(

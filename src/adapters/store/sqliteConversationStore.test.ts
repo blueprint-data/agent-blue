@@ -380,6 +380,69 @@ describe("SqliteConversationStore admin login domains", () => {
   });
 });
 
+describe("SqliteConversationStore integration token auth lookups", () => {
+  function seedTenant(store: SqliteConversationStore, tenantId: string): void {
+    store.upsertTenantRepo({
+      tenantId,
+      repoUrl: "https://github.com/example/repo",
+      dbtSubpath: "models",
+      deployKeyPath: "/keys/x",
+      localPath: "/repos/x"
+    });
+  }
+
+  it("looks up auth record by token id without tenant input", () => {
+    const store = createStore();
+    seedTenant(store, "acme");
+
+    store.createTenantIntegrationToken({
+      tokenId: "itok_acme_1",
+      tenantId: "acme",
+      scope: "repo_refresh",
+      tokenPrefix: "abt_rt_itok_acme",
+      secretHash: "hash_acme_1"
+    });
+
+    expect(store.getTenantIntegrationTokenAuthRecordByTokenId({ tokenId: "itok_acme_1", scope: "repo_refresh" })).toEqual(
+      expect.objectContaining({
+        id: "itok_acme_1",
+        tenantId: "acme",
+        scope: "repo_refresh",
+        secretHash: "hash_acme_1",
+        revokedAt: null
+      })
+    );
+  });
+
+  it("returns null for unknown token id", () => {
+    const store = createStore();
+    expect(store.getTenantIntegrationTokenAuthRecordByTokenId({ tokenId: "missing", scope: "repo_refresh" })).toBeNull();
+  });
+
+  it("returns revoked records so API can reject them", () => {
+    const store = createStore();
+    seedTenant(store, "acme");
+
+    store.createTenantIntegrationToken({
+      tokenId: "itok_acme_2",
+      tenantId: "acme",
+      scope: "repo_refresh",
+      tokenPrefix: "abt_rt_itok_acme",
+      secretHash: "hash_acme_2"
+    });
+    store.revokeTenantIntegrationToken("acme", "itok_acme_2");
+
+    const record = store.getTenantIntegrationTokenAuthRecordByTokenId({ tokenId: "itok_acme_2", scope: "repo_refresh" });
+    expect(record).toEqual(
+      expect.objectContaining({
+        id: "itok_acme_2",
+        tenantId: "acme",
+        revokedAt: expect.any(String)
+      })
+    );
+  });
+});
+
 describe("SqliteConversationStore LLM settings and usage", () => {
   function seedTenant(store: SqliteConversationStore, tenantId: string): void {
     store.upsertTenantRepo({

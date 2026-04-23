@@ -1280,6 +1280,43 @@ export class SqliteConversationStore implements ConversationStore {
     };
   }
 
+  getTenantIntegrationTokenAuthRecordByTokenId(input: {
+    tokenId: string;
+    scope: TenantIntegrationTokenScope;
+  }): {
+    id: string;
+    tenantId: string;
+    scope: TenantIntegrationTokenScope;
+    secretHash: string;
+    revokedAt?: string | null;
+  } | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, tenant_id, scope, secret_hash, revoked_at
+         FROM tenant_integration_tokens
+         WHERE id = ? AND scope = ?`
+      )
+      .get(input.tokenId, input.scope) as
+      | {
+          id: string;
+          tenant_id: string;
+          scope: string;
+          secret_hash: string;
+          revoked_at: string | null;
+        }
+      | undefined;
+    if (!row) {
+      return null;
+    }
+    return {
+      id: row.id,
+      tenantId: row.tenant_id,
+      scope: row.scope as TenantIntegrationTokenScope,
+      secretHash: row.secret_hash,
+      revokedAt: row.revoked_at
+    };
+  }
+
   touchTenantIntegrationTokenLastUsed(tokenId: string, usedAt: string): void {
     this.db
       .prepare(
