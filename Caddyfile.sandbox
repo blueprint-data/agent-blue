@@ -1,0 +1,12 @@
+{$SANDBOX_DOMAIN} {
+  encode zstd gzip
+
+  @slack path /slack/events /slack/events/*
+  handle @slack {
+    reverse_proxy slack:3000
+  }
+
+  handle {
+    reverse_proxy admin:3100
+  }
+}

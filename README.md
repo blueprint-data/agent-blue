@@ -344,6 +344,30 @@ Post-deploy verification checklist:
 4. Confirm the VPS `data/` directory now contains `agent.db`, tenant keys, and repo clones as you use the app.
 5. Trigger a Slack event and confirm the request reaches `/slack/events`, the response shows up in Slack, and the conversation appears in the Admin UI.
 
+### Sandbox / lower environment
+
+For a dedicated lower environment, use the sandbox stack files included in this repo:
+
+- `docker-compose.sandbox.yml`
+- `Caddyfile.sandbox`
+- `.env.sandbox.example`
+- `.github/workflows/deploy-sandbox.yml` (manual deploy)
+
+Quick start:
+
+```bash
+cp .env.sandbox.example .env.sandbox
+docker compose --env-file .env.sandbox -f docker-compose.sandbox.yml up -d --build
+```
+
+Recommended: run sandbox on a separate VPS with a dedicated subdomain (for example `sandbox.agent.blueprintdata.xyz`).
+If you must share host with production, set `SANDBOX_HTTP_PORT` / `SANDBOX_HTTPS_PORT` to non-conflicting ports and front it with an upstream proxy.
+
+Full setup guide:
+
+- [`docs/SANDBOX_ENVIRONMENT.md`](docs/SANDBOX_ENVIRONMENT.md)
+- [`docs/ENVIRONMENTS.md`](docs/ENVIRONMENTS.md)
+
 ### Authentication
 
 Browser login uses **server-managed sessions**:

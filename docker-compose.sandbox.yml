@@ -1,0 +1,59 @@
+name: agent-blue-sandbox
+
+services:
+  proxy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    depends_on:
+      - admin
+      - slack
+    ports:
+      - "${SANDBOX_HTTP_PORT:-80}:80"
+      - "${SANDBOX_HTTPS_PORT:-443}:443"
+    environment:
+      SANDBOX_DOMAIN: ${SANDBOX_DOMAIN:-sandbox.agent.blueprintdata.xyz}
+    volumes:
+      - ./Caddyfile.sandbox:/etc/caddy/Caddyfile:ro
+      - caddy_data_sandbox:/data
+      - caddy_config_sandbox:/config
+
+  admin:
+    build:
+      context: .
+    image: agent-blue:sandbox
+    restart: unless-stopped
+    command: ["npm", "run", "start:admin"]
+    env_file:
+      - ${AGENT_BLUE_ENV_FILE:-.env.sandbox}
+    environment:
+      APP_DATA_DIR: /app/data
+      ADMIN_PORT: "3100"
+    volumes:
+      - ./data-sandbox:/app/data
+
+  slack:
+    image: agent-blue:sandbox
+    restart: unless-stopped
+    command: ["npm", "run", "start:slack"]
+    env_file:
+      - ${AGENT_BLUE_ENV_FILE:-.env.sandbox}
+    environment:
+      APP_DATA_DIR: /app/data
+      SLACK_PORT: "3000"
+    volumes:
+      - ./data-sandbox:/app/data
+
+  telegram:
+    image: agent-blue:sandbox
+    restart: unless-stopped
+    command: ["npm", "run", "start:telegram"]
+    env_file:
+      - ${AGENT_BLUE_ENV_FILE:-.env.sandbox}
+    environment:
+      APP_DATA_DIR: /app/data
+    volumes:
+      - ./data-sandbox:/app/data
+
+volumes:
+  caddy_data_sandbox:
+  caddy_config_sandbox:
