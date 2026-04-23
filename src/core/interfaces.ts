@@ -313,6 +313,16 @@ export interface ConversationStore {
     secretHash: string;
     revokedAt?: string | null;
   } | null;
+  getTenantIntegrationTokenAuthRecordByTokenId(input: {
+    tokenId: string;
+    scope: TenantIntegrationTokenScope;
+  }): {
+    id: string;
+    tenantId: string;
+    scope: TenantIntegrationTokenScope;
+    secretHash: string;
+    revokedAt?: string | null;
+  } | null;
   touchTenantIntegrationTokenLastUsed(tokenId: string, usedAt: string): void;
 
   getTenantLlmSettings(tenantId: string): TenantLlmSettings | null;
