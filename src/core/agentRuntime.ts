@@ -12,7 +12,19 @@ import {
   TenantWarehouseProvider,
   WarehouseAdapter
 } from "./interfaces.js";
-import { AgentArtifact, AgentContext, AgentResponse, QueryResult, ScheduleChannelType, TenantMemory } from "./types.js";
+import {
+  AgentArtifact,
+  AgentContext,
+  AgentExecutionTurn,
+  AgentProfile,
+  AgentResponse,
+  ConversationMessage,
+  ContextSectionDiagnostic,
+  ExecutionBudget,
+  QueryResult,
+  ScheduleChannelType,
+  TenantMemory
+} from "./types.js";
 import { SqlGuard } from "./sqlGuard.js";
 
 export const TENANT_MEMORY_MAX_CONTENT_CHARS = 300;
@@ -497,6 +509,1105 @@ function inferSchemaHintFromModelPath(relativePath: string, fallbackSchema: stri
   return fallbackSchema || "PUBLIC";
 }
 
+type PlannerDecision = z.infer<typeof toolDecisionSchema>;
+type ToolCallStatus = "ok" | "error" | "reused";
+
+interface RuntimeLoopState {
+  finalPlan?: PlannerDecision;
+  finalSql?: string;
+  loopMessages: LlmMessage[];
+  attemptedSql: Set<string>;
+  successfulQueries: Array<{ sql: string; result: QueryResult; step: number }>;
+  lastSuccessfulQuery?: { sql: string; result: QueryResult };
+  latestChartArtifact?: AgentArtifact;
+  memorySaveAttemptedThisTurn: boolean;
+  memorySaveSucceededThisTurn: boolean;
+  scheduleCreateSucceededThisTurn: boolean;
+}
+
+interface ContextSnapshot {
+  profile: AgentProfile;
+  llmModel: string;
+  warehouse: WarehouseAdapter;
+  whProvider: TenantWarehouseProvider;
+  whDatabase: string;
+  whSchema: string;
+  schemaCandidates: string[];
+  dbtModels: Awaited<ReturnType<DbtRepositoryService["listModels"]>>;
+  tenantMemories: TenantMemory[];
+  userAskedToSaveMemory: boolean;
+  userRequestedSchedule: boolean;
+  currentDateIso: string;
+  currentDate: string;
+  contextDiagnostics: ContextSectionDiagnostic[];
+  executionBudget: ExecutionBudget;
+  historyMessages: LlmMessage[];
+  buildBaseMessages: (effectivePromptText: string) => LlmMessage[];
+}
+
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b));
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${stableStringify(item)}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function tokenizeForRanking(value: string): string[] {
+  return value
+    .toLowerCase()
+    .split(/[^a-z0-9_]+/i)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 3);
+}
+
+function relevanceScore(text: string, queryTokens: string[]): number {
+  const haystack = text.toLowerCase();
+  return queryTokens.reduce((score, token) => score + (haystack.includes(token) ? 1 : 0), 0);
+}
+
+function summarizeOlderHistory(messages: ConversationMessage[], keepLatestCount: number, maxChars: number): string | null {
+  const olderMessages = messages.slice(0, Math.max(0, messages.length - keepLatestCount));
+  if (olderMessages.length === 0) {
+    return null;
+  }
+  const lines: string[] = [];
+  let remaining = maxChars;
+  for (const message of olderMessages.slice(-8)) {
+    const prefix = message.role === "user" ? "User" : "Assistant";
+    const compact = message.content.replace(/\s+/g, " ").trim();
+    if (!compact) {
+      continue;
+    }
+    const line = `- ${prefix}: ${compact}`;
+    if (line.length > remaining) {
+      const truncated = `${line.slice(0, Math.max(0, remaining - 1))}…`.trim();
+      if (truncated.length > 2) {
+        lines.push(truncated);
+      }
+      break;
+    }
+    lines.push(line);
+    remaining -= line.length;
+  }
+  if (lines.length === 0) {
+    return null;
+  }
+  return ["Older conversation summary (compressed):", ...lines].join("\n");
+}
+
+function wildcardToRegex(pattern: string): RegExp {
+  const escaped = pattern.trim().replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
+  return new RegExp(`^${escaped}$`, "i");
+}
+
+function extractQualifiedRelations(sql: string): Array<{ schema: string; table: string }> {
+  const matches = Array.from(sql.matchAll(/([A-Za-z0-9_`"]+)\.([A-Za-z0-9_`"]+)\.([A-Za-z0-9_`"]+)/g));
+  return matches.map((match) => ({
+    schema: match[2]?.replace(/[`"]/g, "") ?? "",
+    table: match[3]?.replace(/[`"]/g, "") ?? ""
+  }));
+}
+
+function deepRedact(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => deepRedact(item));
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, deepRedact(item)])
+    );
+  }
+  if (typeof value !== "string") {
+    return value;
+  }
+  return value
+    .replace(/-----BEGIN [^-]+-----[\s\S]*?-----END [^-]+-----/g, "[REDACTED_KEY]")
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[REDACTED_EMAIL]")
+    .replace(/\b(?:sk|rk|pk)_[A-Za-z0-9]{16,}\b/g, "[REDACTED_TOKEN]")
+    .replace(/\bBearer\s+[A-Za-z0-9._\-+/=]+\b/gi, "Bearer [REDACTED_TOKEN]");
+}
+
+class TurnRecorder {
+  readonly traceId: string;
+  private readonly timings: Record<string, number> = {};
+  private readonly plannerAttempts: Array<{ step: number; raw?: string; parseError?: string; plan?: Record<string, unknown> }> =
+    [];
+  private readonly toolCalls: Array<{
+    tool: string;
+    input: Record<string, unknown>;
+    status: ToolCallStatus;
+    durationMs: number;
+    attemptCount?: number;
+    reused?: boolean;
+    outputSummary?: Record<string, unknown>;
+    output?: unknown;
+    error?: string;
+  }> = [];
+  private readonly llmCallSnapshots: Array<{
+    callIndex: number;
+    model: string;
+    usage?: LlmUsage;
+    generationId?: string;
+  }> = [];
+  private llmUsagePersisted = false;
+  private llmCallSeq = 0;
+
+  constructor(
+    private readonly store: ConversationStore,
+    readonly executionTurn: AgentExecutionTurn,
+    private readonly startedAt: number
+  ) {
+    this.traceId = executionTurn.traceId ?? `trace_${Date.now().toString(36)}`;
+  }
+
+  async measure<T>(label: string, fn: () => Promise<T>): Promise<T> {
+    const stepStart = Date.now();
+    const result = await fn();
+    this.timings[label] = Date.now() - stepStart;
+    return result;
+  }
+
+  appendEvent(
+    type: Parameters<ConversationStore["appendExecutionEvent"]>[0]["type"],
+    level: Parameters<ConversationStore["appendExecutionEvent"]>[0]["level"],
+    message: string,
+    payload?: Record<string, unknown>,
+    step?: number
+  ): void {
+    this.store.appendExecutionEvent({
+      turnId: this.executionTurn.id,
+      tenantId: this.executionTurn.tenantId,
+      conversationId: this.executionTurn.conversationId,
+      step,
+      type,
+      level,
+      message,
+      payload
+    });
+  }
+
+  recordPlannerAttempt(step: number, raw?: string, plan?: Record<string, unknown>, parseError?: string): void {
+    this.plannerAttempts.push({ step, raw, plan, parseError });
+  }
+
+  recordLlmCall(model: string, result: { usage?: LlmUsage; generationId?: string }): void {
+    this.llmCallSnapshots.push({
+      callIndex: this.llmCallSeq++,
+      model,
+      usage: result.usage,
+      generationId: result.generationId
+    });
+  }
+
+  persistLlmUsage(): void {
+    if (this.llmUsagePersisted) {
+      return;
+    }
+    this.llmUsagePersisted = true;
+    for (const snap of this.llmCallSnapshots) {
+      this.store.insertLlmUsageEvent({
+        tenantId: this.executionTurn.tenantId,
+        executionTurnId: this.executionTurn.id,
+        conversationId: this.executionTurn.conversationId,
+        model: snap.model,
+        generationId: snap.generationId ?? null,
+        promptTokens: snap.usage?.promptTokens ?? 0,
+        completionTokens: snap.usage?.completionTokens ?? 0,
+        totalTokens: snap.usage?.totalTokens ?? 0,
+        cost: snap.usage?.cost ?? null,
+        callIndex: snap.callIndex
+      });
+    }
+  }
+
+  buildLlmUsageDebug(): Record<string, unknown> {
+    const totals = this.llmCallSnapshots.reduce(
+      (acc, c) => ({
+        promptTokens: acc.promptTokens + (c.usage?.promptTokens ?? 0),
+        completionTokens: acc.completionTokens + (c.usage?.completionTokens ?? 0),
+        totalTokens: acc.totalTokens + (c.usage?.totalTokens ?? 0),
+        totalCost: acc.totalCost + (c.usage?.cost ?? 0)
+      }),
+      { promptTokens: 0, completionTokens: 0, totalTokens: 0, totalCost: 0 }
+    );
+    return {
+      totals,
+      calls: this.llmCallSnapshots.map((c) => ({
+        callIndex: c.callIndex,
+        model: c.model,
+        promptTokens: c.usage?.promptTokens ?? 0,
+        completionTokens: c.usage?.completionTokens ?? 0,
+        totalTokens: c.usage?.totalTokens ?? 0,
+        cost: c.usage?.cost,
+        generationId: c.generationId
+      }))
+    };
+  }
+
+  recordToolCall(entry: {
+    tool: string;
+    input: Record<string, unknown>;
+    status: ToolCallStatus;
+    durationMs: number;
+    attemptCount?: number;
+    reused?: boolean;
+    outputSummary?: Record<string, unknown>;
+    output?: unknown;
+    error?: string;
+  }): void {
+    this.toolCalls.push(entry);
+  }
+
+  buildDebug(extra: Record<string, unknown>): Record<string, unknown> {
+    return {
+      ...extra,
+      traceId: this.traceId,
+      plannerAttempts: this.plannerAttempts,
+      toolCalls: this.toolCalls,
+      timings: { ...this.timings, totalMs: Date.now() - this.startedAt },
+      llmUsage: this.buildLlmUsageDebug()
+    };
+  }
+}
+
+class ContextManager {
+  constructor(private readonly store: ConversationStore, private readonly dbtRepo: DbtRepositoryService) {}
+
+  async build(params: {
+    context: AgentContext;
+    persistedUserText: string;
+    effectivePromptText: string;
+    warehouse: WarehouseAdapter;
+  }): Promise<ContextSnapshot> {
+    const { context, persistedUserText, effectivePromptText, warehouse } = params;
+    const now = new Date();
+    const currentDateIso = now.toISOString();
+    const currentDate = currentDateIso.slice(0, 10);
+    const profile = this.store.getOrCreateProfile(context.tenantId, context.profileName);
+    const fullHistory = this.store.getMessages(context.conversationId, 40);
+    const recentHistory = fullHistory.slice(-12);
+    const olderSummary = summarizeOlderHistory(fullHistory, 12, 1200);
+    const tenantRepo = this.store.getTenantRepo(context.tenantId);
+    const tenantWhConfig = this.store.getTenantWarehouseConfig(context.tenantId);
+    const whProvider: TenantWarehouseProvider = warehouse.provider ?? tenantWhConfig?.provider ?? "snowflake";
+    const isBigQuery = whProvider === "bigquery";
+    const whDatabase = isBigQuery
+      ? (tenantWhConfig?.bigquery?.projectId?.trim() ?? process.env.BIGQUERY_PROJECT_ID?.trim() ?? "")
+      : (tenantWhConfig?.snowflake?.database?.trim() ?? process.env.SNOWFLAKE_DATABASE?.trim() ?? "");
+    const whSchema = isBigQuery
+      ? (tenantWhConfig?.bigquery?.dataset?.trim() ?? process.env.BIGQUERY_DATASET?.trim() ?? "")
+      : (tenantWhConfig?.snowflake?.schema?.trim() ?? process.env.SNOWFLAKE_SCHEMA?.trim() ?? "");
+    const tenantLlmOverride = this.store.getTenantLlmSettings(context.tenantId)?.llmModel?.trim();
+    const llmModel =
+      (tenantLlmOverride && tenantLlmOverride.length > 0 ? tenantLlmOverride : "") ||
+      context.llmModel?.trim() ||
+      env.llmModel ||
+      "openai/gpt-4o-mini";
+    const dbtModels = await this.dbtRepo.listModels(context.tenantId).catch(() => []);
+    const queryTokens = tokenizeForRanking(`${persistedUserText} ${effectivePromptText}`);
+    const rankedMemories = this.store
+      .listTenantMemories(context.tenantId, 500)
+      .slice()
+      .sort((a, b) => {
+        const diff = relevanceScore(b.content, queryTokens) - relevanceScore(a.content, queryTokens);
+        return diff !== 0 ? diff : b.updatedAt.localeCompare(a.updatedAt);
+      });
+    const rankedModels = dbtModels
+      .slice()
+      .sort((a, b) => {
+        const diff =
+          relevanceScore(`${b.name} ${b.relativePath}`, queryTokens) -
+          relevanceScore(`${a.name} ${a.relativePath}`, queryTokens);
+        return diff !== 0 ? diff : a.relativePath.localeCompare(b.relativePath);
+      });
+    const schemaCandidates = isBigQuery
+      ? Array.from(
+          new Set([
+            whSchema,
+            ...dbtModels.map((m) => inferSchemaHintFromModelPath(m.relativePath, whSchema).toLowerCase())
+          ].filter((v) => v.length > 0))
+        )
+      : Array.from(
+          new Set([whSchema.toUpperCase(), "INT", "MARTS", "STAGING", "CORE", "PUBLIC"].filter((value) => value.length > 0))
+        );
+    const historyMessages: LlmMessage[] = recentHistory
+      .filter((m) => m.role !== "tool" && m.role !== "system")
+      .map((m): LlmMessage => ({
+        role: m.role === "user" ? "user" : "assistant",
+        content: m.content
+      }));
+    const contextDiagnostics: ContextSectionDiagnostic[] = [];
+    const executionBudget: ExecutionBudget = {
+      maxPlannerSteps: profile.maxPlannerSteps,
+      maxRowsPerQuery: profile.maxRowsPerQuery,
+      toolTimeoutMs: profile.toolTimeoutMs,
+      maxToolRetries: profile.maxToolRetries,
+      contextBudgetChars: {
+        tenantMemory: TENANT_MEMORY_MAX_PROMPT_CHARS,
+        dbtModels: 5000,
+        historySummary: 1200
+      }
+    };
+
+    const buildBaseMessages = (promptText: string): LlmMessage[] => {
+      const hasWarehouseDefaults = whDatabase.length > 0 && whSchema.length > 0;
+      const fqPrefix = hasWarehouseDefaults
+        ? isBigQuery
+          ? `\`${whDatabase}.${whSchema}\``
+          : `${quoteSqlIdent(whDatabase)}.${quoteSqlIdent(whSchema)}`
+        : "";
+      const sqlGuidanceLines = isBigQuery
+        ? [
+            "SQL generation requirements (strict):",
+            "- The warehouse is Google BigQuery. Write Standard SQL (not Legacy SQL).",
+            "- Use fully-qualified BigQuery object names: `project.dataset.table`.",
+            "- Never use unqualified table names like `fct_transactions`.",
+            hasWarehouseDefaults
+              ? `- Start with ${fqPrefix} as a default guess, but verify with warehouse.lookupMetadata if unsure.`
+              : "- BigQuery project/dataset defaults are unavailable, so infer carefully and avoid guessing.",
+            `- Known dataset candidates: ${schemaCandidates.join(", ") || "(none)"}.`,
+            "- Use dbt model path hints and inspected dbt SQL to choose dataset.",
+            "- If table/dataset/column names are uncertain, use warehouse.lookupMetadata.",
+            "- If dbt lineage is uncertain, use dbt.getModelSql.",
+            "- If visualization is requested, call chartjs.build after at least one successful query.",
+            "- When a chart artifact is generated with chartjs.build, do NOT draw an ASCII/Markdown/text chart in the answer.",
+            "- With chart artifacts, keep the narrative concise: key takeaway(s), notable outliers, and caveats only.",
+            "- Do not repeat the exact same failing SQL."
+          ]
+        : [
+            "SQL generation requirements (strict):",
+            "- The warehouse is Snowflake. Write Snowflake SQL.",
+            "- Use fully-qualified Snowflake object names in every query: DATABASE.SCHEMA.OBJECT.",
+            "- Never use unqualified table names like `fct_transactions`.",
+            hasWarehouseDefaults
+              ? `- Start with ${fqPrefix} as a default guess, but do not treat schema as fixed.`
+              : "- SNOWFLAKE_DATABASE/SCHEMA defaults are unavailable, so infer carefully and avoid guessing.",
+            `- Allowed/expected schema candidates to consider: ${schemaCandidates.join(", ")}.`,
+            "- Use dbt model path hints and inspected dbt SQL to choose schema.",
+            "- If table/schema/column names are uncertain, use warehouse.lookupMetadata.",
+            "- If dbt lineage is uncertain, use dbt.getModelSql.",
+            "- If visualization is requested, call chartjs.build after at least one successful query.",
+            "- When a chart artifact is generated with chartjs.build, do NOT draw an ASCII/Markdown/text chart in the answer.",
+            "- With chart artifacts, keep the narrative concise: key takeaway(s), notable outliers, and caveats only.",
+            "- Do not repeat the exact same failing SQL."
+          ];
+      const dbLabel = isBigQuery ? "project" : "database";
+      const schemaLabel = isBigQuery ? "dataset" : "schema";
+      const exampleRelation = hasWarehouseDefaults
+        ? isBigQuery
+          ? `- example fully-qualified relation: \`${whDatabase}.${whSchema}.fct_transactions\``
+          : `- example fully-qualified relation: ${fqPrefix}.${quoteSqlIdent("fct_transactions")}`
+        : "- fully-qualified relation prefix could not be derived from env.";
+      const rankedDbtLines = rankedModels.slice(0, 80).map((m) => {
+        if (!hasWarehouseDefaults) {
+          return `${m.name} -> ${m.relativePath}`;
+        }
+        if (isBigQuery) {
+          const hintedDataset = inferSchemaHintFromModelPath(m.relativePath, whSchema).toLowerCase();
+          return `${m.name} -> ${m.relativePath} -> \`${whDatabase}.${hintedDataset}.${m.name}\``;
+        }
+        const hintedSchema = inferSchemaHintFromModelPath(m.relativePath, whSchema.toUpperCase());
+        return `${m.name} -> ${m.relativePath} -> "${whDatabase}"."${hintedSchema}".${quoteSqlIdent(m.name)}`;
+      });
+      contextDiagnostics.length = 0;
+      const tenantMemoryPrompt = buildTenantMemoryPromptBlock(rankedMemories);
+      contextDiagnostics.push({
+        section: "tenant_memory",
+        includedItems: tenantMemoryPrompt ? tenantMemoryPrompt.split("\n").filter((line) => line.startsWith("- ")).length : 0,
+        totalItems: rankedMemories.length,
+        approxChars: tenantMemoryPrompt?.length ?? 0,
+        truncated: rankedMemories.length > TENANT_MEMORY_MAX_PROMPT_ITEMS
+      });
+      contextDiagnostics.push({
+        section: "dbt_models",
+        includedItems: rankedDbtLines.length,
+        totalItems: rankedModels.length,
+        approxChars: rankedDbtLines.join("\n").length,
+        truncated: rankedDbtLines.length < rankedModels.length
+      });
+      contextDiagnostics.push({
+        section: "history",
+        includedItems: historyMessages.length,
+        totalItems: fullHistory.length,
+        approxChars: olderSummary?.length ?? 0,
+        truncated: fullHistory.length > historyMessages.length,
+        notes: olderSummary ? ["Older turns compressed into a summary block."] : undefined
+      });
+      return [
+        {
+          role: "system",
+          content: [
+            "Identity and scope (highest priority):",
+            "- You are Agent Blue.",
+            "- Your owner is Blueprintdata (https://blueprintdata.xyz/).",
+            "- Tenant context may change per request, but your identity and owner never change.",
+            "- You ONLY answer analytical questions related to data, metrics, SQL, BI, dbt models, and business performance analysis.",
+            "- For any non-analytical or unrelated request, do not call tools and return final_answer refusing the request.",
+            '- Refusal text for non-analytical requests: "I can only help with analytical questions about data and business metrics."',
+            "",
+            profile.soulPrompt,
+            "",
+            "You are an analytics assistant with tools. Use tools iteratively and then provide a final answer.",
+            `Current date/time (UTC): ${currentDateIso}`,
+            `Current date (UTC): ${currentDate}`,
+            "",
+            ...sqlGuidanceLines,
+            "",
+            "Tenant memory rules:",
+            "- Tenant memories are shared across this tenant and may be injected into future prompts.",
+            "- If the user explicitly asks in any language to remember/save/store a durable fact or preference, prefer tenantMemory.save before final_answer.",
+            "- Use tenantMemory.save only when the user explicitly asks you to remember/save/store a durable fact or preference for later.",
+            "- Save one concise durable fact or preference, not a transcript or large passage.",
+            "- Never save secrets, credentials, access tokens, or long blobs.",
+            "- If the user did not explicitly ask, do not call tenantMemory.save.",
+            "- Never claim that memory was saved unless you already received a successful Tool result (tenantMemory.save) in this turn.",
+            "- If tenantMemory.save fails or is rejected, explicitly say that the save did not happen.",
+            "",
+            "Schedule rules:",
+            "- Only call schedule.create when the user explicitly asks for a recurring/scheduled/reminder-style action (any language).",
+            "- Default cron to 0 9 * * * (UTC) when the user says 'daily' without a time.",
+            "- Default channelType from origin (slack/telegram/console) and channelRef from the origin channel/user when not provided.",
+            "- Never claim a schedule was created unless you already received a successful Tool result (schedule.create) in this turn.",
+            "- If schedule.create fails or is rejected, explicitly say that scheduling did not happen.",
+            "",
+            "Available tools and args:",
+            "- warehouse.query: { sql: string }",
+            "- dbt.listModels: {}",
+            "- dbt.getModelSql: { modelName: string }",
+            `- warehouse.lookupMetadata: { kind: "schemas"|"tables"|"columns", ${dbLabel}?: string, ${schemaLabel}?: string, table?: string, search?: string }`,
+            "- tenantMemory.save: { content: string }",
+            '- chartjs.build: { type?: "bar"|"line"|"pie"|"doughnut", title?: string, xKey?: string, yKey?: string, seriesKey?: string, horizontal?: boolean, stacked?: boolean, grouped?: boolean, percentStacked?: boolean, sort?: "none"|"asc"|"desc"|"label_asc"|"label_desc", smooth?: boolean, tension?: number, fill?: boolean, step?: boolean, pointRadius?: number, donutCutout?: number, showPercentLabels?: boolean, topN?: number, otherLabel?: string, stackId?: string, maxPoints?: number }',
+            '- schedule.create: { userRequest: string, cron: string, channelType?: "slack"|"telegram"|"console"|"custom", channelRef?: string, active?: boolean }',
+            "",
+            "Return ONLY valid JSON in one of these shapes:",
+            '{ "type": "tool_call", "tool": "warehouse.query|dbt.listModels|dbt.getModelSql|warehouse.lookupMetadata|tenantMemory.save|chartjs.build|schedule.create", "args": { ... }, "reasoning"?: string }',
+            '{ "type": "final_answer", "answer": string, "reasoning"?: string }',
+            "- If the user request is not analytical, ALWAYS return final_answer with the refusal text and do not call tools.",
+            "",
+            `Max query rows per profile: ${profile.maxRowsPerQuery}.`,
+            `Max planner steps per profile: ${profile.maxPlannerSteps}.`,
+            `Tool timeout budget (ms): ${profile.toolTimeoutMs}.`
+          ].join("\n")
+        },
+        {
+          role: "system",
+          content: [
+            "Warehouse context:",
+            `- provider: ${whProvider}`,
+            `- current_date_utc: ${currentDate}`,
+            `- current_datetime_utc: ${currentDateIso}`,
+            `- tenantId: ${context.tenantId}`,
+            `- ${dbLabel}: ${whDatabase || "(not set)"}`,
+            `- ${schemaLabel}: ${whSchema || "(not set)"}`,
+            isBigQuery ? "" : `- schema_candidates: ${schemaCandidates.join(", ")}`,
+            `- dbt subpath: ${tenantRepo?.dbtSubpath ?? "(unknown)"}`,
+            exampleRelation
+          ]
+            .filter(Boolean)
+            .join("\n")
+        },
+        ...(tenantMemoryPrompt ? [{ role: "system" as const, content: tenantMemoryPrompt }] : []),
+        ...(olderSummary ? [{ role: "system" as const, content: olderSummary }] : []),
+        {
+          role: "system",
+          content: `dbt models currently available (ranked by relevance):\n${rankedDbtLines.join("\n")}`
+        },
+        ...historyMessages,
+        {
+          role: "user",
+          content: promptText
+        }
+      ];
+    };
+
+    return {
+      profile,
+      llmModel,
+      warehouse,
+      whProvider,
+      whDatabase,
+      whSchema,
+      schemaCandidates,
+      dbtModels,
+      tenantMemories: rankedMemories,
+      userAskedToSaveMemory: userExplicitlyAskedToSaveMemory(persistedUserText),
+      userRequestedSchedule: userExplicitlyRequestedSchedule(persistedUserText),
+      currentDateIso,
+      currentDate,
+      contextDiagnostics,
+      executionBudget,
+      historyMessages,
+      buildBaseMessages
+    };
+  }
+}
+
+class PolicyGateway {
+  constructor(private readonly sqlGuard: SqlGuard) {}
+
+  approveToolCall(input: {
+    context: AgentContext;
+    snapshot: ContextSnapshot;
+    plan: PlannerDecision;
+    args: Record<string, unknown>;
+  }): {
+    approvedArgs: Record<string, unknown>;
+    timeoutMs: number;
+    cacheKey: string;
+    redactedInput: Record<string, unknown>;
+  } {
+    const { context, snapshot, plan, args } = input;
+    if (plan.type !== "tool_call" || !plan.tool) {
+      throw new Error("Only tool calls can be evaluated by the policy gateway.");
+    }
+    if (!snapshot.profile.allowedTools.includes(plan.tool)) {
+      throw new Error(`Tool "${plan.tool}" is not allowed for profile "${snapshot.profile.name}".`);
+    }
+    let approvedArgs = { ...args };
+    if (plan.tool === "warehouse.query") {
+      const sql = typeof args.sql === "string" ? args.sql.trim() : "";
+      if (!sql) {
+        throw new Error("warehouse.query requires args.sql.");
+      }
+      const normalizedSql = this.sqlGuard
+        .normalize(sql)
+        .replace(/\blimit\s+\d+\b/i, `LIMIT ${snapshot.profile.maxRowsPerQuery}`);
+      for (const relation of extractQualifiedRelations(normalizedSql)) {
+        const schemaBlocked = snapshot.profile.blockedSchemaPatterns.some((pattern) =>
+          wildcardToRegex(pattern).test(relation.schema)
+        );
+        if (schemaBlocked) {
+          throw new Error(`Query references blocked schema "${relation.schema}".`);
+        }
+        const tableBlocked = snapshot.profile.blockedTablePatterns.some((pattern) =>
+          wildcardToRegex(pattern).test(relation.table)
+        );
+        if (tableBlocked) {
+          throw new Error(`Query references blocked table "${relation.table}".`);
+        }
+      }
+      approvedArgs = { sql: normalizedSql, timeoutMs: snapshot.profile.toolTimeoutMs };
+    }
+    if (plan.tool === "dbt.getModelSql") {
+      const modelName = typeof args.modelName === "string" ? args.modelName.trim() : "";
+      if (!modelName) {
+        throw new Error("dbt.getModelSql requires args.modelName.");
+      }
+      const model = snapshot.dbtModels.find((entry) => entry.name === modelName);
+      if (
+        model &&
+        snapshot.profile.allowedDbtPathPrefixes.length > 0 &&
+        !snapshot.profile.allowedDbtPathPrefixes.some((prefix) => model.relativePath.startsWith(prefix))
+      ) {
+        throw new Error(`Model "${modelName}" is outside the allowed dbt path prefixes for this profile.`);
+      }
+      approvedArgs = { modelName };
+    }
+    if (plan.tool === "tenantMemory.save") {
+      const content = typeof args.content === "string" ? normalizeMemoryContent(args.content) : "";
+      if (!content) {
+        throw new Error("tenantMemory.save requires args.content.");
+      }
+      approvedArgs = { content };
+    }
+    const timeoutMs = snapshot.profile.toolTimeoutMs;
+    const redactedInput = deepRedact(approvedArgs) as Record<string, unknown>;
+    return {
+      approvedArgs,
+      timeoutMs,
+      cacheKey: stableStringify({ tenantId: context.tenantId, tool: plan.tool, args: approvedArgs }),
+      redactedInput
+    };
+  }
+}
+
+class Planner {
+  constructor(private readonly runLlm: (input: { messages: LlmMessage[]; temperature: number }) => Promise<string>) {}
+
+  async decide(input: {
+    step: number;
+    promptMessages: LlmMessage[];
+    recorder: TurnRecorder;
+  }): Promise<
+    | { ok: true; raw: string; plan: PlannerDecision }
+    | { ok: false; raw: string; error: string; observation: string }
+  > {
+    const raw = await input.recorder.measure(`plannerMs_step${input.step}`, async () =>
+      this.runLlm({ messages: input.promptMessages, temperature: 0 })
+    );
+    try {
+      const plan = toolDecisionSchema.parse(JSON.parse(raw));
+      input.recorder.recordPlannerAttempt(input.step, raw, plan as Record<string, unknown>);
+      input.recorder.appendEvent(
+        "planner.decision",
+        "info",
+        `Planner produced ${plan.type}.`,
+        { raw, plan: plan as Record<string, unknown> },
+        input.step
+      );
+      return { ok: true, raw, plan };
+    } catch (error) {
+      const message = (error as Error).message;
+      input.recorder.recordPlannerAttempt(input.step, raw, undefined, message);
+      input.recorder.appendEvent(
+        "planner.invalid_json",
+        "warning",
+        "Planner returned invalid JSON.",
+        { raw, error: message },
+        input.step
+      );
+      return {
+        ok: false,
+        raw,
+        error: message,
+        observation: `Invalid JSON response. Error: ${message}. Return valid JSON only.`
+      };
+    }
+  }
+}
+
+class FeedbackAssembler {
+  buildToolResult(tool: string, payload: Record<string, unknown>): LlmMessage {
+    return { role: "user", content: `Tool result (${tool}): ${asJsonBlock(payload)}` };
+  }
+
+  buildToolError(tool: string, errorText: string): LlmMessage {
+    return {
+      role: "user",
+      content:
+        tool === "tenantMemory.save"
+          ? `Tool error (tenantMemory.save): ${errorText}. Do NOT claim that memory was saved. Either issue a corrected tenantMemory.save call or return final_answer explicitly saying the save did not happen.`
+          : `Tool error (${tool}): ${errorText}. Choose a corrected tool call or final_answer.`
+    };
+  }
+
+  buildObservation(message: string): LlmMessage {
+    return { role: "user", content: message };
+  }
+
+  finalizeDebug(input: {
+    recorder: TurnRecorder;
+    snapshot: ContextSnapshot;
+    state: RuntimeLoopState;
+    plan?: PlannerDecision;
+    finalizedFromLastSuccessfulQuery?: boolean;
+  }): Record<string, unknown> {
+    return input.recorder.buildDebug({
+      plan: input.plan,
+      sql: input.state.lastSuccessfulQuery?.sql ?? input.state.finalSql,
+      mode: "managed_repl_harness",
+      finalizedFromLastSuccessfulQuery: input.finalizedFromLastSuccessfulQuery,
+      executionBudget: input.snapshot.executionBudget,
+      contextDiagnostics: input.snapshot.contextDiagnostics
+    });
+  }
+}
+
+class ToolExecutor {
+  constructor(
+    private readonly deps: {
+      store: ConversationStore;
+      dbtRepo: DbtRepositoryService;
+      chartTool: ChartTool;
+      policyGateway: PolicyGateway;
+      feedbackAssembler: FeedbackAssembler;
+    }
+  ) {}
+
+  async execute(input: {
+    context: AgentContext;
+    snapshot: ContextSnapshot;
+    plan: PlannerDecision;
+    step: number;
+    persistedUserText: string;
+    state: RuntimeLoopState;
+    recorder: TurnRecorder;
+  }): Promise<LlmMessage> {
+    const { context, snapshot, plan, step, persistedUserText, state, recorder } = input;
+    if (plan.type !== "tool_call" || !plan.tool) {
+      throw new Error("Unsupported planner result for ToolExecutor.");
+    }
+    const args = (plan.args ?? {}) as Record<string, unknown>;
+    let approved: ReturnType<PolicyGateway["approveToolCall"]>;
+    try {
+      approved = this.deps.policyGateway.approveToolCall({ context, snapshot, plan, args });
+    } catch (error) {
+      recorder.appendEvent(
+        "policy.denied",
+        "error",
+        `Policy denied ${plan.tool}.`,
+        { tool: plan.tool, error: (error as Error).message },
+        step
+      );
+      throw error;
+    }
+    recorder.appendEvent(
+      "policy.approved",
+      "success",
+      `Policy approved ${plan.tool}.`,
+      { tool: plan.tool, args: approved.redactedInput },
+      step
+    );
+
+    const previous = this.deps.store.getToolExecutionByCacheKey(recorder.executionTurn.id, approved.cacheKey);
+    if (previous && previous.output !== undefined) {
+      recorder.recordToolCall({
+        tool: plan.tool,
+        input: approved.redactedInput,
+        status: "reused",
+        durationMs: 0,
+        reused: true,
+        attemptCount: previous.attemptCount,
+        outputSummary: previous.outputSummary,
+        output: previous.output
+      });
+      recorder.appendEvent("tool.reused", "info", `Reused cached ${plan.tool} result for this turn.`, { tool: plan.tool }, step);
+      this.deps.store.recordToolExecution({
+        turnId: recorder.executionTurn.id,
+        tenantId: context.tenantId,
+        conversationId: context.conversationId,
+        step,
+        cacheKey: approved.cacheKey,
+        tool: plan.tool,
+        input: approved.redactedInput,
+        status: "reused",
+        durationMs: 0,
+        attemptCount: previous.attemptCount,
+        outputSummary: previous.outputSummary,
+        output: previous.output
+      });
+      return this.deps.feedbackAssembler.buildToolResult(plan.tool, previous.output as Record<string, unknown>);
+    }
+
+    let lastError: Error | null = null;
+    const maxAttempts = Math.max(1, snapshot.profile.maxToolRetries + 1);
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      const started = Date.now();
+      recorder.appendEvent(
+        "tool.started",
+        "info",
+        `Executing ${plan.tool} (attempt ${attempt}/${maxAttempts}).`,
+        { tool: plan.tool, args: approved.redactedInput },
+        step
+      );
+      try {
+        const result = await this.runTool(plan.tool, approved.approvedArgs, snapshot, context, persistedUserText, state, recorder, step);
+        const durationMs = Date.now() - started;
+        const redactedOutput = deepRedact(result.payload);
+        recorder.recordToolCall({
+          tool: plan.tool,
+          input: approved.redactedInput,
+          status: "ok",
+          durationMs,
+          attemptCount: attempt,
+          outputSummary: result.summary,
+          output: redactedOutput
+        });
+        this.deps.store.recordToolExecution({
+          turnId: recorder.executionTurn.id,
+          tenantId: context.tenantId,
+          conversationId: context.conversationId,
+          step,
+          cacheKey: approved.cacheKey,
+          tool: plan.tool,
+          input: approved.redactedInput,
+          status: "ok",
+          durationMs,
+          attemptCount: attempt,
+          outputSummary: result.summary,
+          output: redactedOutput
+        });
+        recorder.appendEvent(
+          "tool.completed",
+          "success",
+          `${plan.tool} succeeded.`,
+          { tool: plan.tool, durationMs, summary: result.summary },
+          step
+        );
+        return this.deps.feedbackAssembler.buildToolResult(plan.tool, redactedOutput as Record<string, unknown>);
+      } catch (error) {
+        lastError = error as Error;
+        const durationMs = Date.now() - started;
+        recorder.recordToolCall({
+          tool: plan.tool,
+          input: approved.redactedInput,
+          status: "error",
+          durationMs,
+          attemptCount: attempt,
+          error: (error as Error).message
+        });
+        this.deps.store.recordToolExecution({
+          turnId: recorder.executionTurn.id,
+          tenantId: context.tenantId,
+          conversationId: context.conversationId,
+          step,
+          cacheKey: approved.cacheKey,
+          tool: plan.tool,
+          input: approved.redactedInput,
+          status: "error",
+          durationMs,
+          attemptCount: attempt,
+          error: (error as Error).message
+        });
+        const isRetryable = this.isRetryable(plan.tool, error as Error);
+        recorder.appendEvent(
+          "tool.failed",
+          isRetryable && attempt < maxAttempts ? "warning" : "error",
+          `${plan.tool} failed.`,
+          { tool: plan.tool, error: (error as Error).message, attempt, maxAttempts },
+          step
+        );
+        if (!isRetryable || attempt >= maxAttempts) {
+          break;
+        }
+        recorder.appendEvent(
+          "tool.retry",
+          "warning",
+          `Retrying ${plan.tool} after a transient failure.`,
+          { tool: plan.tool, attempt, nextAttempt: attempt + 1 },
+          step
+        );
+        await sleep(150 * attempt);
+      }
+    }
+    throw lastError ?? new Error(`Tool ${plan.tool} failed.`);
+  }
+
+  private isRetryable(tool: string, error: Error): boolean {
+    const text = error.message.toLowerCase();
+    if (tool === "warehouse.query" || tool === "warehouse.lookupMetadata") {
+      return text.includes("timeout") || text.includes("tempor") || text.includes("network");
+    }
+    if (tool === "dbt.listModels" || tool === "dbt.getModelSql") {
+      return text.includes("tempor") || text.includes("network") || text.includes("econn");
+    }
+    return false;
+  }
+
+  private async runTool(
+    tool: string,
+    args: Record<string, unknown>,
+    snapshot: ContextSnapshot,
+    context: AgentContext,
+    persistedUserText: string,
+    state: RuntimeLoopState,
+    recorder: TurnRecorder,
+    step: number
+  ): Promise<{ summary: Record<string, unknown>; payload: Record<string, unknown> }> {
+    if (tool === "dbt.listModels") {
+      const models = await this.deps.dbtRepo.listModels(context.tenantId);
+      return {
+        summary: { modelCount: models.length },
+        payload: {
+          modelCount: models.length,
+          models: models.slice(0, 100).map((m) => ({ name: m.name, relativePath: m.relativePath }))
+        }
+      };
+    }
+    if (tool === "dbt.getModelSql") {
+      const modelName = typeof args.modelName === "string" ? args.modelName.trim() : "";
+      const modelSql = await recorder.measure("getModelSqlMs", async () =>
+        this.deps.dbtRepo.getModelSql(context.tenantId, modelName)
+      );
+      if (!modelSql) {
+        throw new Error(`Model "${modelName}" was not found in configured dbt repo.`);
+      }
+      return {
+        summary: { found: true, modelName },
+        payload: { modelName, sql: modelSql }
+      };
+    }
+    if (tool === "warehouse.lookupMetadata") {
+      const parsedLookup = metadataLookupSchema.safeParse(args);
+      if (!parsedLookup.success) {
+        throw new Error("warehouse.lookupMetadata requires valid lookup args.");
+      }
+      const metadataSql = buildMetadataLookupSql(
+        parsedLookup.data,
+        snapshot.whDatabase,
+        snapshot.whSchema,
+        snapshot.profile.maxRowsPerQuery,
+        snapshot.whProvider
+      );
+      if (!metadataSql) {
+        throw new Error(`Metadata lookup requires ${snapshot.whProvider === "bigquery" ? "project" : "database"} context.`);
+      }
+      const metadataResult = await snapshot.warehouse.query(metadataSql, { timeoutMs: snapshot.profile.toolTimeoutMs });
+      return {
+        summary: { rowCount: metadataResult.rowCount, columns: metadataResult.columns },
+        payload: {
+          columns: metadataResult.columns,
+          rowCount: metadataResult.rowCount,
+          rows: metadataResult.rows.slice(0, snapshot.profile.maxRowsPerQuery)
+        }
+      };
+    }
+    if (tool === "tenantMemory.save") {
+      state.memorySaveAttemptedThisTurn = true;
+      if (!snapshot.userAskedToSaveMemory) {
+        throw new Error("tenantMemory.save can only be used when the user explicitly asks to remember or save something.");
+      }
+      const parsedMemory = tenantMemorySaveSchema.safeParse(args);
+      if (!parsedMemory.success) {
+        throw new Error("tenantMemory.save requires args.content as a short string.");
+      }
+      const normalizedContent = normalizeMemoryContent(parsedMemory.data.content);
+      const existingMemory = this.deps.store
+        .listTenantMemories(context.tenantId, 500)
+        .find((memory) => memoryDedupKey(memory.content) === memoryDedupKey(normalizedContent));
+      const savedMemory =
+        existingMemory ??
+        this.deps.store.createTenantMemory({
+          tenantId: context.tenantId,
+          content: normalizedContent,
+          source: "agent"
+        });
+      state.memorySaveSucceededThisTurn = true;
+      snapshot.tenantMemories = this.deps.store.listTenantMemories(context.tenantId, 500);
+      return {
+        summary: { saved: !existingMemory, deduped: Boolean(existingMemory), memoryId: savedMemory.id },
+        payload: {
+          saved: !existingMemory,
+          deduped: Boolean(existingMemory),
+          memoryId: savedMemory.id,
+          content: savedMemory.content
+        }
+      };
+    }
+    if (tool === "schedule.create") {
+      if (!snapshot.userRequestedSchedule) {
+        throw new Error("schedule.create can only be used when the user explicitly requests a recurring schedule or reminder.");
+      }
+      const parsedSchedule = scheduleCreateSchema.safeParse(args);
+      if (!parsedSchedule.success) {
+        throw new Error("schedule.create requires userRequest, cron, and valid channel fields.");
+      }
+      const requestedCron = parsedSchedule.data.cron?.trim();
+      const cron = requestedCron || (/\bdaily\b/i.test(persistedUserText) ? "0 9 * * *" : "");
+      if (!cron) {
+        throw new Error("cron is required. Use 0 9 * * * for a daily schedule if no time was given.");
+      }
+      try {
+        // eslint-disable-next-line no-new
+        new CronTime(cron);
+      } catch (error) {
+        throw new Error(`Invalid cron expression: ${(error as Error).message}`);
+      }
+      const channelType = parsedSchedule.data.channelType ?? defaultChannelTypeFromOrigin(context.origin);
+      const channelRef = parsedSchedule.data.channelRef ?? defaultChannelRefFromOrigin(context.origin);
+      if ((channelType === "slack" || channelType === "telegram") && !channelRef) {
+        throw new Error("channelRef is required for slack or telegram delivery.");
+      }
+      const schedule = this.deps.store.createTenantSchedule({
+        tenantId: context.tenantId,
+        userRequest: parsedSchedule.data.userRequest || persistedUserText,
+        cron,
+        channelType,
+        channelRef,
+        active: parsedSchedule.data.active ?? true
+      });
+      state.scheduleCreateSucceededThisTurn = true;
+      return {
+        summary: { scheduleId: schedule.id, active: schedule.active, channelType: schedule.channelType },
+        payload: {
+          id: schedule.id,
+          cron: schedule.cron,
+          channelType: schedule.channelType,
+          channelRef: schedule.channelRef,
+          active: schedule.active
+        }
+      };
+    }
+    if (tool === "chartjs.build") {
+      const parsedRequest = chartRequestSchema.safeParse(args);
+      if (!parsedRequest.success) {
+        throw new Error("chartjs.build requires valid chart args.");
+      }
+      if (state.successfulQueries.length === 0) {
+        throw new Error("No successful query result available yet. Run warehouse.query first.");
+      }
+      const baseChartRequest = parsedRequest.data as ChartBuildRequest;
+      let selectedQuery: { sql: string; result: QueryResult; step: number } | undefined;
+      let selectedPreflight: ChartQueryPreflight | undefined;
+      const preflightFailures: string[] = [];
+      for (let idx = state.successfulQueries.length - 1; idx >= 0; idx -= 1) {
+        const candidate = state.successfulQueries[idx];
+        const preflight = preflightChartQuery(candidate.result, baseChartRequest, snapshot.profile.maxRowsPerQuery);
+        if (preflight.ok) {
+          selectedQuery = candidate;
+          selectedPreflight = preflight;
+          break;
+        }
+        preflightFailures.push(`step ${candidate.step}: ${preflight.reason ?? "not chart-compatible"}`);
+      }
+      if (!selectedQuery || !selectedPreflight?.resolvedXKey || !selectedPreflight.resolvedYKey) {
+        const detail = preflightFailures[0] ?? "Run warehouse.query with chart-ready columns first.";
+        throw new Error(`No compatible query result available for chartjs.build (${detail}).`);
+      }
+      const effectiveChartRequest: ChartBuildRequest = {
+        ...baseChartRequest,
+        xKey: selectedPreflight.resolvedXKey,
+        yKey: selectedPreflight.resolvedYKey,
+        ...(selectedPreflight.resolvedSeriesKey ? { seriesKey: selectedPreflight.resolvedSeriesKey } : {})
+      };
+      const chartBuild = this.deps.chartTool.buildFromQueryResult({
+        request: effectiveChartRequest,
+        result: selectedQuery.result,
+        maxPoints: snapshot.profile.maxRowsPerQuery
+      });
+      state.latestChartArtifact = {
+        type: "chartjs_config",
+        format: "json",
+        payload: chartBuild.config,
+        summary: chartBuild.summary
+      };
+      return {
+        summary: chartBuild.summary,
+        payload: chartBuild.summary
+      };
+    }
+    if (tool === "warehouse.query") {
+      const sql = typeof args.sql === "string" ? args.sql : "";
+      if (!sql) {
+        throw new Error("warehouse.query requires args.sql.");
+      }
+      if (state.attemptedSql.has(sql)) {
+        throw new Error("Duplicate SQL attempt in this turn. Generate a different query.");
+      }
+      state.attemptedSql.add(sql);
+      state.finalSql = sql;
+      const queryResult = await recorder.measure("warehouseMs", async () =>
+        snapshot.warehouse.query(sql, { timeoutMs: snapshot.profile.toolTimeoutMs })
+      );
+      state.lastSuccessfulQuery = { sql, result: queryResult };
+      state.successfulQueries.push({ sql, result: queryResult, step });
+      if (state.successfulQueries.length > snapshot.profile.maxPlannerSteps) {
+        state.successfulQueries.shift();
+      }
+      return {
+        summary: { rowCount: queryResult.rowCount, columns: queryResult.columns },
+        payload: {
+          sql,
+          columns: queryResult.columns,
+          rowCount: queryResult.rowCount,
+          rows: queryResult.rows.slice(0, snapshot.profile.maxRowsPerQuery)
+        }
+      };
+    }
+    throw new Error(`Unsupported tool: ${tool}`);
+  }
+}
+
 export type WarehouseResolver = WarehouseAdapter | ((tenantId: string) => WarehouseAdapter);
 
 export interface RuntimeRespondOptions {
@@ -521,55 +1632,7 @@ export class AnalyticsAgentRuntime {
     const startedAt = Date.now();
     const persistedUserText = userText;
     const effectivePromptText = options.promptText?.trim() ? options.promptText : persistedUserText;
-    const timings: Record<string, number> = {};
-    const maxToolSteps = 35;
-    const plannerAttempts: Array<{ step: number; raw?: string; parseError?: string; plan?: Record<string, unknown> }> = [];
-    const attemptedSql = new Set<string>();
-    const toolCalls: Array<{
-      tool: string;
-      input: Record<string, unknown>;
-      status: "ok" | "error";
-      durationMs: number;
-      outputSummary?: Record<string, unknown>;
-      output?: unknown;
-      error?: string;
-    }> = [];
-    const measure = async <T>(label: string, fn: () => Promise<T>): Promise<T> => {
-      const stepStart = Date.now();
-      const result = await fn();
-      timings[label] = Date.now() - stepStart;
-      return result;
-    };
-    const runTool = async <T>(
-      tool: string,
-      input: Record<string, unknown>,
-      fn: () => Promise<T>,
-      summarize?: (value: T) => Record<string, unknown>,
-      fullOutput?: (value: T) => unknown
-    ): Promise<T> => {
-      const start = Date.now();
-      try {
-        const value = await fn();
-        toolCalls.push({
-          tool,
-          input,
-          status: "ok",
-          durationMs: Date.now() - start,
-          outputSummary: summarize ? summarize(value) : undefined,
-          output: fullOutput ? fullOutput(value) : undefined
-        });
-        return value;
-      } catch (error) {
-        toolCalls.push({
-          tool,
-          input,
-          status: "error",
-          durationMs: Date.now() - start,
-          error: (error as Error).message
-        });
-        throw error;
-      }
-    };
+    const traceId = `trace_${Date.now().toString(36)}`;
 
     this.store.createConversation(context);
     if (context.origin) {
@@ -581,310 +1644,71 @@ export class AnalyticsAgentRuntime {
       role: "user",
       content: persistedUserText
     });
+
     const executionTurn = this.store.createExecutionTurn({
       tenantId: context.tenantId,
       conversationId: context.conversationId,
+      traceId,
       source: context.origin?.source ?? "cli",
       rawUserText: persistedUserText,
       promptText: effectivePromptText,
       status: "running"
     });
-
-    const llmCallSnapshots: Array<{
-      callIndex: number;
-      model: string;
-      usage?: LlmUsage;
-      generationId?: string;
-    }> = [];
-    let llmCallSeq = 0;
-    let llmUsagePersisted = false;
-
-    const persistLlmUsageToStore = (): void => {
-      if (llmUsagePersisted) {
-        return;
-      }
-      llmUsagePersisted = true;
-      for (const snap of llmCallSnapshots) {
-        this.store.insertLlmUsageEvent({
-          tenantId: context.tenantId,
-          executionTurnId: executionTurn.id,
-          conversationId: context.conversationId,
-          model: snap.model,
-          generationId: snap.generationId ?? null,
-          promptTokens: snap.usage?.promptTokens ?? 0,
-          completionTokens: snap.usage?.completionTokens ?? 0,
-          totalTokens: snap.usage?.totalTokens ?? 0,
-          cost: snap.usage?.cost ?? null,
-          callIndex: snap.callIndex
-        });
-      }
-    };
-
-    const buildLlmUsageDebug = (): Record<string, unknown> => {
-      const totals = llmCallSnapshots.reduce(
-        (acc, c) => ({
-          promptTokens: acc.promptTokens + (c.usage?.promptTokens ?? 0),
-          completionTokens: acc.completionTokens + (c.usage?.completionTokens ?? 0),
-          totalTokens: acc.totalTokens + (c.usage?.totalTokens ?? 0),
-          totalCost: acc.totalCost + (c.usage?.cost ?? 0)
-        }),
-        { promptTokens: 0, completionTokens: 0, totalTokens: 0, totalCost: 0 }
-      );
-      return {
-        totals,
-        calls: llmCallSnapshots.map((c) => ({
-          callIndex: c.callIndex,
-          model: c.model,
-          promptTokens: c.usage?.promptTokens ?? 0,
-          completionTokens: c.usage?.completionTokens ?? 0,
-          totalTokens: c.usage?.totalTokens ?? 0,
-          cost: c.usage?.cost,
-          generationId: c.generationId
-        }))
-      };
-    };
+    const recorder = new TurnRecorder(this.store, executionTurn, startedAt);
+    const feedbackAssembler = new FeedbackAssembler();
+    recorder.appendEvent("turn.started", "info", "Execution turn started.", {
+      source: executionTurn.source,
+      traceId: recorder.traceId
+    });
 
     try {
-      const profile = this.store.getOrCreateProfile(context.tenantId, context.profileName);
-      timings.profileMs = Date.now() - startedAt;
-      const history = this.store.getMessages(context.conversationId, 12);
-      let tenantMemories = this.store.listTenantMemories(context.tenantId, 500);
-      const tenantRepo = this.store.getTenantRepo(context.tenantId);
-      const tenantWhConfig = this.store.getTenantWarehouseConfig(context.tenantId);
       const warehouse = this.resolveWarehouse(context.tenantId);
-      const whProvider: TenantWarehouseProvider = warehouse.provider ?? tenantWhConfig?.provider ?? "snowflake";
-      const isBigQuery = whProvider === "bigquery";
-
-      const whDatabase = isBigQuery
-        ? (tenantWhConfig?.bigquery?.projectId?.trim() ?? process.env.BIGQUERY_PROJECT_ID?.trim() ?? "")
-        : (tenantWhConfig?.snowflake?.database?.trim() ?? process.env.SNOWFLAKE_DATABASE?.trim() ?? "");
-      const whSchema = isBigQuery
-        ? (tenantWhConfig?.bigquery?.dataset?.trim() ?? process.env.BIGQUERY_DATASET?.trim() ?? "")
-        : (tenantWhConfig?.snowflake?.schema?.trim() ?? process.env.SNOWFLAKE_SCHEMA?.trim() ?? "");
-
-      const tenantLlmOverride = this.store.getTenantLlmSettings(context.tenantId)?.llmModel?.trim();
-      const llmModel =
-        (tenantLlmOverride && tenantLlmOverride.length > 0 ? tenantLlmOverride : "") ||
-        context.llmModel?.trim() ||
-        env.llmModel ||
-        "openai/gpt-4o-mini";
+      const contextManager = new ContextManager(this.store, this.dbtRepo);
+      const snapshot = await recorder.measure("contextMs", async () =>
+        contextManager.build({ context, persistedUserText, effectivePromptText, warehouse })
+      );
+      recorder.appendEvent("context.compiled", "info", "Compiled ranked context for the turn.", {
+        diagnostics: snapshot.contextDiagnostics,
+        executionBudget: snapshot.executionBudget
+      });
 
       const runLlm = async (input: { messages: LlmMessage[]; temperature: number }): Promise<string> => {
-        const callIndex = llmCallSeq++;
         const result = await this.llm.generateText({
-          model: llmModel,
+          model: snapshot.llmModel,
           messages: input.messages,
           temperature: input.temperature
         });
-        llmCallSnapshots.push({
-          callIndex,
-          model: llmModel,
-          usage: result.usage,
-          generationId: result.generationId
-        });
+        recorder.recordLlmCall(snapshot.llmModel, result);
         return result.text;
       };
 
-      const now = new Date();
-      const currentDateIso = now.toISOString();
-      const currentDate = currentDateIso.slice(0, 10);
-      const userAskedToSaveMemory = userExplicitlyAskedToSaveMemory(persistedUserText);
-      const userRequestedSchedule = userExplicitlyRequestedSchedule(persistedUserText);
-      const hasWarehouseDefaults = whDatabase.length > 0 && whSchema.length > 0;
-      const fqPrefix = hasWarehouseDefaults
-        ? isBigQuery
-          ? `\`${whDatabase}.${whSchema}\``
-          : `${quoteSqlIdent(whDatabase)}.${quoteSqlIdent(whSchema)}`
-        : "";
-      const dbtModels = await measure("dbtModelsMs", async () => {
-        try {
-          return await runTool(
-            "dbt.listModels",
-            { tenantId: context.tenantId },
-            async () => this.dbtRepo.listModels(context.tenantId),
-            (models) => ({ modelCount: models.length })
-          );
-        } catch {
-          return [];
-        }
+      const planner = new Planner(runLlm);
+      const toolExecutor = new ToolExecutor({
+        store: this.store,
+        dbtRepo: this.dbtRepo,
+        chartTool: this.chartTool,
+        policyGateway: new PolicyGateway(this.sqlGuard),
+        feedbackAssembler
       });
-      const schemaCandidates = isBigQuery
-        ? Array.from(
-            new Set([
-              whSchema,
-              ...dbtModels.map((m) => inferSchemaHintFromModelPath(m.relativePath, whSchema).toLowerCase())
-            ].filter((v) => v.length > 0))
-          )
-        : Array.from(
-            new Set(
-              [whSchema.toUpperCase(), "INT", "MARTS", "STAGING", "CORE", "PUBLIC"].filter(
-                (value) => value.length > 0
-              )
-            )
-          );
 
-      const historyMessages: LlmMessage[] = history
-        .filter((m) => m.role !== "tool" && m.role !== "system")
-        .map((m): LlmMessage => ({
-          role: m.role === "user" ? "user" : "assistant",
-          content: m.content
-        }));
+      const state: RuntimeLoopState = {
+        loopMessages: [],
+        attemptedSql: new Set<string>(),
+        successfulQueries: [],
+        memorySaveAttemptedThisTurn: false,
+        memorySaveSucceededThisTurn: false,
+        scheduleCreateSucceededThisTurn: false
+      };
 
-      const sqlGuidanceLines = isBigQuery
-        ? [
-            "SQL generation requirements (strict):",
-            "- The warehouse is Google BigQuery. Write Standard SQL (not Legacy SQL).",
-            "- Use fully-qualified BigQuery object names: `project.dataset.table`.",
-            "- Never use unqualified table names like `fct_transactions`.",
-            hasWarehouseDefaults
-              ? `- Start with ${fqPrefix} as a default guess, but verify with warehouse.lookupMetadata if unsure.`
-              : "- BigQuery project/dataset defaults are unavailable, so infer carefully and avoid guessing.",
-            `- Known dataset candidates: ${schemaCandidates.join(", ") || "(none)"}.`,
-            "- Use dbt model path hints and inspected dbt SQL to choose dataset.",
-            "- If table/dataset/column names are uncertain, use warehouse.lookupMetadata.",
-            "- If dbt lineage is uncertain, use dbt.getModelSql.",
-            "- If visualization is requested, call chartjs.build after at least one successful query.",
-            "- When a chart artifact is generated with chartjs.build, do NOT draw an ASCII/Markdown/text chart in the answer.",
-            "- With chart artifacts, keep the narrative concise: key takeaway(s), notable outliers, and caveats only.",
-            "- For chart queries with time on x-axis, ALWAYS return a normalized time label column:",
-            "  - monthly: FORMAT_TIMESTAMP('%Y-%m', TIMESTAMP_TRUNC(<timestamp_col>, MONTH)) AS period_label",
-            "  - daily: FORMAT_TIMESTAMP('%Y-%m-%d', TIMESTAMP_TRUNC(<timestamp_col>, DAY)) AS period_label",
-            "- Always ORDER BY the same normalized period label ascending.",
-            "- Prefer using the normalized label column as xKey for chartjs.build.",
-            "- Do not repeat the exact same failing SQL."
-          ]
-        : [
-            "SQL generation requirements (strict):",
-            "- The warehouse is Snowflake. Write Snowflake SQL.",
-            "- Use fully-qualified Snowflake object names in every query: DATABASE.SCHEMA.OBJECT.",
-            "- Never use unqualified table names like `fct_transactions`.",
-            hasWarehouseDefaults
-              ? `- Start with ${fqPrefix} as a default guess, but do not treat schema as fixed.`
-              : "- SNOWFLAKE_DATABASE/SCHEMA defaults are unavailable, so infer carefully and avoid guessing.",
-            `- Allowed/expected schema candidates to consider: ${schemaCandidates.join(", ")}.`,
-            "- Use dbt model path hints and inspected dbt SQL to choose schema.",
-            "- If table/schema/column names are uncertain, use warehouse.lookupMetadata.",
-            "- If dbt lineage is uncertain, use dbt.getModelSql.",
-            "- If visualization is requested, call chartjs.build after at least one successful query.",
-            "- When a chart artifact is generated with chartjs.build, do NOT draw an ASCII/Markdown/text chart in the answer.",
-            "- With chart artifacts, keep the narrative concise: key takeaway(s), notable outliers, and caveats only.",
-            "- For chart queries with time on x-axis, ALWAYS return a normalized time label column:",
-            "  - monthly: TO_CHAR(DATE_TRUNC('month', <timestamp_col>), 'YYYY-MM') AS period_label",
-            "  - daily: TO_CHAR(DATE_TRUNC('day', <timestamp_col>), 'YYYY-MM-DD') AS period_label",
-            "- Always ORDER BY the same normalized period label (or underlying truncated date) ascending.",
-            "- Prefer using the normalized label column as xKey for chartjs.build.",
-            "- Do not repeat the exact same failing SQL."
-          ];
-
-      const dbLabel = isBigQuery ? "project" : "database";
-      const schemaLabel = isBigQuery ? "dataset" : "schema";
-      const exampleRelation = hasWarehouseDefaults
-        ? isBigQuery
-          ? `- example fully-qualified relation: \`${whDatabase}.${whSchema}.fct_transactions\``
-          : `- example fully-qualified relation: ${fqPrefix}.${quoteSqlIdent("fct_transactions")}`
-        : "- fully-qualified relation prefix could not be derived from env.";
-
-      const baseMessages = (): LlmMessage[] => [
-      {
-        role: "system",
-        content: [
-          "Identity and scope (highest priority):",
-          "- You are Agent Blue.",
-          "- Your owner is Blueprintdata (https://blueprintdata.xyz/).",
-          "- Tenant context may change per request, but your identity and owner never change.",
-          "- You ONLY answer analytical questions related to data, metrics, SQL, BI, dbt models, and business performance analysis.",
-          "- For any non-analytical or unrelated request, do not call tools and return final_answer refusing the request.",
-          '- Refusal text for non-analytical requests: "I can only help with analytical questions about data and business metrics."',
-          "",
-          profile.soulPrompt,
-          "",
-          "You are an analytics assistant with tools. Use tools iteratively and then provide a final answer.",
-          `Current date/time (UTC): ${currentDateIso}`,
-          `Current date (UTC): ${currentDate}`,
-          "",
-          ...sqlGuidanceLines,
-          "",
-          "Tenant memory rules:",
-          "- Tenant memories are shared across this tenant and may be injected into future prompts.",
-          "- If the user explicitly asks in any language to remember/save/store a durable fact or preference, prefer tenantMemory.save before final_answer.",
-          "- Use tenantMemory.save only when the user explicitly asks you to remember/save/store a durable fact or preference for later.",
-          "- Save one concise durable fact or preference, not a transcript or large passage.",
-          "- Never save secrets, credentials, access tokens, or long blobs.",
-          "- If the user did not explicitly ask, do not call tenantMemory.save.",
-          "- Never claim that memory was saved unless you already received a successful Tool result (tenantMemory.save) in this turn.",
-          "- If tenantMemory.save fails or is rejected, explicitly say that the save did not happen.",
-          "",
-          "Schedule rules:",
-          "- Only call schedule.create when the user explicitly asks for a recurring/scheduled/reminder-style action (any language).",
-          "- Default cron to 0 9 * * * (UTC) when the user says 'daily' without a time.",
-          "- Default channelType from origin (slack/telegram/console) and channelRef from the origin channel/user when not provided.",
-          "- Never claim a schedule was created unless you already received a successful Tool result (schedule.create) in this turn.",
-          "- If schedule.create fails or is rejected, explicitly say that scheduling did not happen.",
-          "",
-          "Available tools and args:",
-          "- warehouse.query: { sql: string }",
-          "- dbt.listModels: {}",
-          "- dbt.getModelSql: { modelName: string }",
-          `- warehouse.lookupMetadata: { kind: "schemas"|"tables"|"columns", ${dbLabel}?: string, ${schemaLabel}?: string, table?: string, search?: string }`,
-          "- tenantMemory.save: { content: string }",
-          '- chartjs.build: { type?: "bar"|"line"|"pie"|"doughnut", title?: string, xKey?: string, yKey?: string, seriesKey?: string, horizontal?: boolean, stacked?: boolean, grouped?: boolean, percentStacked?: boolean, sort?: "none"|"asc"|"desc"|"label_asc"|"label_desc", smooth?: boolean, tension?: number, fill?: boolean, step?: boolean, pointRadius?: number, donutCutout?: number, showPercentLabels?: boolean, topN?: number, otherLabel?: string, stackId?: string, maxPoints?: number }',
-          '- schedule.create: { userRequest: string, cron: string, channelType?: "slack"|"telegram"|"console"|"custom", channelRef?: string, active?: boolean }',
-          "",
-          "Return ONLY valid JSON in one of these shapes:",
-          '{ "type": "tool_call", "tool": "warehouse.query|dbt.listModels|dbt.getModelSql|warehouse.lookupMetadata|tenantMemory.save|chartjs.build|schedule.create", "args": { ... }, "reasoning"?: string }',
-          '{ "type": "final_answer", "answer": string, "reasoning"?: string }',
-          "- If the user request is not analytical, ALWAYS return final_answer with the refusal text and do not call tools.",
-          "",
-          `Max query rows per profile: ${profile.maxRowsPerQuery}.`
-        ].join("\n")
-      },
-      {
-        role: "system",
-        content: [
-          "Warehouse context:",
-          `- provider: ${whProvider}`,
-          `- current_date_utc: ${currentDate}`,
-          `- current_datetime_utc: ${currentDateIso}`,
-          `- tenantId: ${context.tenantId}`,
-          `- ${dbLabel}: ${whDatabase || "(not set)"}`,
-          `- ${schemaLabel}: ${whSchema || "(not set)"}`,
-          isBigQuery ? "" : `- schema_candidates: ${schemaCandidates.join(", ")}`,
-          `- dbt subpath: ${tenantRepo?.dbtSubpath ?? "(unknown)"}`,
-          exampleRelation
-        ].filter(Boolean).join("\n")
-      },
-      ...buildTenantMemorySystemMessage(tenantMemories),
-      {
-        role: "system",
-        content: `dbt models currently available (name -> path, suggested relation):\n${dbtModels
-          .slice(0, 300)
-          .map((m) => {
-            if (!hasWarehouseDefaults) {
-              return `${m.name} -> ${m.relativePath}`;
-            }
-            if (isBigQuery) {
-              const hintedDataset = inferSchemaHintFromModelPath(m.relativePath, whSchema).toLowerCase();
-              return `${m.name} -> ${m.relativePath} -> \`${whDatabase}.${hintedDataset}.${m.name}\``;
-            }
-            const hintedSchema = inferSchemaHintFromModelPath(m.relativePath, whSchema.toUpperCase());
-            return `${m.name} -> ${m.relativePath} -> "${whDatabase}"."${hintedSchema}".${quoteSqlIdent(m.name)}`;
-          })
-          .join("\n")}`
-      },
-      ...historyMessages,
-      {
-        role: "user",
-        content: effectivePromptText
-      }
-      ];
-
-      const finalizeSuccess = (
-        text: string,
-        debug: Record<string, unknown>,
-        artifacts?: AgentArtifact[]
-      ): AgentResponse => {
-        persistLlmUsageToStore();
-        const mergedDebug = { ...debug, llmUsage: buildLlmUsageDebug() };
+      const finalizeSuccess = (text: string, finalizedFromLastSuccessfulQuery = false): AgentResponse => {
+        recorder.persistLlmUsage();
+        const debug = feedbackAssembler.finalizeDebug({
+          recorder,
+          snapshot,
+          state,
+          plan: state.finalPlan,
+          finalizedFromLastSuccessfulQuery
+        });
         this.store.addMessage({
           tenantId: context.tenantId,
           conversationId: context.conversationId,
@@ -895,402 +1719,85 @@ export class AnalyticsAgentRuntime {
           turnId: executionTurn.id,
           status: "completed",
           assistantText: text,
-          debug: mergedDebug
+          debug
+        });
+        recorder.appendEvent("turn.finalized", "success", "Execution turn completed.", {
+          finalizedFromLastSuccessfulQuery
         });
         return {
           text,
-          artifacts,
-          debug: mergedDebug
+          artifacts: state.latestChartArtifact ? [state.latestChartArtifact] : undefined,
+          debug
         };
       };
 
-      const loopMessages: LlmMessage[] = [];
-      let finalPlan: z.infer<typeof toolDecisionSchema> | undefined;
-      let finalSql: string | undefined;
-      let lastSuccessfulQuery: { sql: string; result: QueryResult } | undefined;
-      const successfulQueries: Array<{ sql: string; result: QueryResult; step: number }> = [];
-      let latestChartArtifact: AgentArtifact | undefined;
-      let memorySaveAttemptedThisTurn = false;
-      let memorySaveSucceededThisTurn = false;
-      let scheduleCreateSucceededThisTurn = false;
-
-      for (let step = 1; step <= maxToolSteps; step += 1) {
-      const planRaw = await measure(`plannerMs_step${step}`, async () =>
-        runLlm({
-          messages: [...baseMessages(), ...loopMessages],
-          temperature: 0
-        })
-      );
-
-      let plan: z.infer<typeof toolDecisionSchema>;
-      try {
-        plan = toolDecisionSchema.parse(JSON.parse(planRaw));
-        plannerAttempts.push({ step, raw: planRaw, plan: plan as Record<string, unknown> });
-      } catch (error) {
-        plannerAttempts.push({ step, raw: planRaw, parseError: (error as Error).message });
-        loopMessages.push({
-          role: "user",
-          content: `Invalid JSON response. Error: ${(error as Error).message}. Return valid JSON only.`
-        });
-        continue;
-      }
-      finalPlan = plan;
-      loopMessages.push({ role: "assistant", content: planRaw });
-
-      if (plan.type === "final_answer") {
-        const candidateText = plan.answer?.trim() ? plan.answer : "I need more details to answer that.";
-        if (claimsTenantMemoryWasSaved(candidateText) && !memorySaveSucceededThisTurn && step < maxToolSteps) {
-          loopMessages.push({
-            role: "user",
-            content: userAskedToSaveMemory
-              ? "You claimed that tenant memory was saved, but there is no successful Tool result (tenantMemory.save) in this turn. Before claiming success, call tenantMemory.save and wait for its tool result. If you cannot save it, return final_answer explicitly saying the save did not happen."
-            : "You claimed that tenant memory was saved, but there is no successful Tool result (tenantMemory.save) in this turn. Do not claim success. Return a corrected final_answer, or only use tenantMemory.save if the user explicitly asked for memory persistence."
-          });
-          continue;
-        }
-        if (claimsScheduleWasCreated(candidateText) && !scheduleCreateSucceededThisTurn && step < maxToolSteps) {
-          loopMessages.push({
-            role: "user",
-            content:
-              "You claimed that a schedule/reminder was created, but there is no successful Tool result (schedule.create) in this turn. Call schedule.create and wait for its tool result, or explicitly state that scheduling did not happen."
-          });
-          continue;
-        }
-        const text = ensureAccurateTenantMemorySaveText(candidateText, memorySaveSucceededThisTurn);
-        return finalizeSuccess(
-          text,
-          {
-            plan,
-            plannerAttempts,
-            sql: finalSql,
-            toolCalls,
-            mode: "direct_tool_loop",
-            timings: { ...timings, totalMs: Date.now() - startedAt }
-          },
-          latestChartArtifact ? [latestChartArtifact] : undefined
-        );
-      }
-
-      if (plan.type !== "tool_call" || !plan.tool) {
-        loopMessages.push({
-          role: "user",
-          content: "Return either a valid tool_call or final_answer JSON."
-        });
-        continue;
-      }
-
-      const args = (plan.args ?? {}) as Record<string, unknown>;
-      try {
-        if (plan.tool === "dbt.listModels") {
-          const models = await runTool(
-            "dbt.listModels",
-            { tenantId: context.tenantId },
-            async () => this.dbtRepo.listModels(context.tenantId),
-            (value) => ({ modelCount: value.length }),
-            (value) => ({
-              modelCount: value.length,
-              models: value.slice(0, 100).map((m) => ({ name: m.name, relativePath: m.relativePath }))
-            })
-          );
-          loopMessages.push({
-            role: "user",
-            content: `Tool result (dbt.listModels): ${asJsonBlock({
-              modelCount: models.length,
-              models: models.slice(0, 100).map((m) => ({ name: m.name, relativePath: m.relativePath }))
-            })}`
-          });
+      for (let step = 1; step <= snapshot.executionBudget.maxPlannerSteps; step += 1) {
+        const promptMessages = [...snapshot.buildBaseMessages(effectivePromptText), ...state.loopMessages];
+        const decision = await planner.decide({ step, promptMessages, recorder });
+        if (!decision.ok) {
+          state.loopMessages.push(feedbackAssembler.buildObservation(decision.observation));
           continue;
         }
 
-        if (plan.tool === "dbt.getModelSql") {
-          const modelName = typeof args.modelName === "string" ? args.modelName.trim() : "";
-          if (!modelName) {
-            throw new Error("dbt.getModelSql requires args.modelName.");
-          }
-          const modelSql = await measure("getModelSqlMs", async () =>
-            runTool(
-              "dbt.getModelSql",
-              { tenantId: context.tenantId, modelName },
-              async () => this.dbtRepo.getModelSql(context.tenantId, modelName),
-              (sqlText) => ({ found: Boolean(sqlText), modelName }),
-              (sqlText) => ({ modelName, sql: sqlText })
-            )
-          );
-          if (!modelSql) {
-            throw new Error(`Model "${modelName}" was not found in configured dbt repo.`);
-          }
-          loopMessages.push({
-            role: "user",
-            content: `Tool result (dbt.getModelSql): ${asJsonBlock({ modelName, sql: modelSql })}`
-          });
-          continue;
-        }
+        state.finalPlan = decision.plan;
+        state.loopMessages.push({ role: "assistant", content: decision.raw });
 
-        if (plan.tool === "warehouse.lookupMetadata") {
-          const parsedLookup = metadataLookupSchema.safeParse(args);
-          if (!parsedLookup.success) {
-            throw new Error("warehouse.lookupMetadata requires valid lookup args.");
-          }
-          const metadataSql = buildMetadataLookupSql(
-            parsedLookup.data,
-            whDatabase,
-            whSchema,
-            profile.maxRowsPerQuery,
-            whProvider
-          );
-          if (!metadataSql) {
-            throw new Error(`Metadata lookup requires ${isBigQuery ? "project" : "database"} context.`);
-          }
-          const metadataResult = await runTool(
-            "warehouse.lookupMetadata",
-            { ...parsedLookup.data, sql: metadataSql },
-            async () => warehouse.query(metadataSql),
-            (result) => ({ rowCount: result.rowCount, columns: result.columns }),
-            (result) => ({
-              columns: result.columns,
-              rowCount: result.rowCount,
-              rows: result.rows.slice(0, profile.maxRowsPerQuery)
-            })
-          );
-          loopMessages.push({
-            role: "user",
-            content: `Tool result (warehouse.lookupMetadata): ${asJsonBlock({
-              columns: metadataResult.columns,
-              rowCount: metadataResult.rowCount,
-              rows: metadataResult.rows.slice(0, profile.maxRowsPerQuery)
-            })}`
-          });
-          continue;
-        }
-
-        if (plan.tool === "tenantMemory.save") {
-          memorySaveAttemptedThisTurn = true;
-          const parsedMemory = tenantMemorySaveSchema.safeParse(args);
-          if (!parsedMemory.success) {
-            throw new Error("tenantMemory.save requires args.content as a short string.");
-          }
-          if (!userAskedToSaveMemory) {
-            throw new Error("tenantMemory.save can only be used when the user explicitly asks to remember or save something.");
-          }
-          const normalizedContent = normalizeMemoryContent(parsedMemory.data.content);
-          const existingMemory = this.store
-            .listTenantMemories(context.tenantId, 500)
-            .find((memory) => memoryDedupKey(memory.content) === memoryDedupKey(normalizedContent));
-          const savedMemory = existingMemory
-            ? await runTool(
-                "tenantMemory.save",
-                { content: normalizedContent, deduped: true },
-                async () => existingMemory,
-                (memory) => ({ saved: false, deduped: true, memoryId: memory.id }),
-                (memory) => ({ saved: false, deduped: true, memoryId: memory.id, content: memory.content })
+        if (decision.plan.type === "final_answer") {
+          const candidateText = decision.plan.answer?.trim() ? decision.plan.answer : "I need more details to answer that.";
+          if (
+            claimsTenantMemoryWasSaved(candidateText) &&
+            !state.memorySaveSucceededThisTurn &&
+            step < snapshot.executionBudget.maxPlannerSteps
+          ) {
+            state.loopMessages.push(
+              feedbackAssembler.buildObservation(
+                snapshot.userAskedToSaveMemory
+                  ? "You claimed that tenant memory was saved, but there is no successful Tool result (tenantMemory.save) in this turn. Before claiming success, call tenantMemory.save and wait for its tool result. If you cannot save it, return final_answer explicitly saying the save did not happen."
+                  : "You claimed that tenant memory was saved, but there is no successful Tool result (tenantMemory.save) in this turn. Do not claim success. Return a corrected final_answer, or only use tenantMemory.save if the user explicitly asked for memory persistence."
               )
-            : await runTool(
-                "tenantMemory.save",
-                { content: normalizedContent },
-                async () =>
-                  this.store.createTenantMemory({
-                    tenantId: context.tenantId,
-                    content: normalizedContent,
-                    source: "agent"
-                  }),
-                (memory) => ({ saved: true, deduped: false, memoryId: memory.id }),
-                (memory) => ({ saved: true, deduped: false, memoryId: memory.id, content: memory.content })
-              );
-          memorySaveSucceededThisTurn = true;
-          tenantMemories = this.store.listTenantMemories(context.tenantId, 500);
-          loopMessages.push({
-            role: "user",
-            content: `Tool result (tenantMemory.save): ${asJsonBlock({
-              saved: !existingMemory,
-              deduped: Boolean(existingMemory),
-              memoryId: savedMemory.id,
-              content: savedMemory.content
-            })}`
-          });
-          continue;
-        }
-
-        if (plan.tool === "schedule.create") {
-          const parsedSchedule = scheduleCreateSchema.safeParse(args);
-          if (!parsedSchedule.success) {
-            throw new Error("schedule.create requires userRequest, cron, and valid channel fields.");
-          }
-          if (!userRequestedSchedule) {
-            throw new Error(
-              "schedule.create can only be used when the user explicitly requests a recurring schedule or reminder."
             );
+            continue;
           }
-          const requestedCron = parsedSchedule.data.cron?.trim();
-          const cron = requestedCron || (/\bdaily\b/i.test(persistedUserText) ? "0 9 * * *" : "");
-          if (!cron) {
-            throw new Error("cron is required. Use 0 9 * * * for a daily schedule if no time was given.");
+          if (
+            claimsScheduleWasCreated(candidateText) &&
+            !state.scheduleCreateSucceededThisTurn &&
+            step < snapshot.executionBudget.maxPlannerSteps
+          ) {
+            state.loopMessages.push(
+              feedbackAssembler.buildObservation(
+                "You claimed that a schedule/reminder was created, but there is no successful Tool result (schedule.create) in this turn. Call schedule.create and wait for its tool result, or explicitly state that scheduling did not happen."
+              )
+            );
+            continue;
           }
-          try {
-            // eslint-disable-next-line no-new
-            new CronTime(cron);
-          } catch (error) {
-            throw new Error(`Invalid cron expression: ${(error as Error).message}`);
-          }
-          const channelType = parsedSchedule.data.channelType ?? defaultChannelTypeFromOrigin(context.origin);
-          const channelRef = parsedSchedule.data.channelRef ?? defaultChannelRefFromOrigin(context.origin);
-          if ((channelType === "slack" || channelType === "telegram") && !channelRef) {
-            throw new Error("channelRef is required for slack or telegram delivery.");
-          }
-          const schedule = await runTool(
-            "schedule.create",
-            {
-              userRequest: parsedSchedule.data.userRequest,
-              cron,
-              channelType,
-              channelRef,
-              active: parsedSchedule.data.active ?? true
-            },
-            async () =>
-              this.store.createTenantSchedule({
-                tenantId: context.tenantId,
-                userRequest: parsedSchedule.data.userRequest || persistedUserText,
-                cron,
-                channelType,
-                channelRef,
-                active: parsedSchedule.data.active ?? true
-              }),
-            (value) => ({ scheduleId: value.id, active: value.active, channelType: value.channelType })
-          );
-          scheduleCreateSucceededThisTurn = true;
-          loopMessages.push({
-            role: "user",
-            content: `Tool result (schedule.create): ${asJsonBlock({
-              id: schedule.id,
-              cron: schedule.cron,
-              channelType: schedule.channelType,
-              channelRef: schedule.channelRef,
-              active: schedule.active
-            })}`
-          });
+          return finalizeSuccess(ensureAccurateTenantMemorySaveText(candidateText, state.memorySaveSucceededThisTurn));
+        }
+
+        if (decision.plan.type !== "tool_call" || !decision.plan.tool) {
+          state.loopMessages.push(feedbackAssembler.buildObservation("Return either a valid tool_call or final_answer JSON."));
           continue;
         }
 
-        if (plan.tool === "chartjs.build") {
-          const parsedRequest = chartRequestSchema.safeParse(args);
-          if (!parsedRequest.success) {
-            throw new Error("chartjs.build requires valid chart args.");
-          }
-          if (successfulQueries.length === 0) {
-            throw new Error("No successful query result available yet. Run warehouse.query first.");
-          }
-          const baseChartRequest = parsedRequest.data as ChartBuildRequest;
-          let selectedQuery: { sql: string; result: QueryResult; step: number } | undefined;
-          let selectedPreflight: ChartQueryPreflight | undefined;
-          const preflightFailures: string[] = [];
-
-          for (let idx = successfulQueries.length - 1; idx >= 0; idx -= 1) {
-            const candidate = successfulQueries[idx];
-            const preflight = preflightChartQuery(candidate.result, baseChartRequest, profile.maxRowsPerQuery);
-            if (preflight.ok) {
-              selectedQuery = candidate;
-              selectedPreflight = preflight;
-              break;
-            }
-            preflightFailures.push(`step ${candidate.step}: ${preflight.reason ?? "not chart-compatible"}`);
-          }
-
-          if (!selectedQuery || !selectedPreflight?.resolvedXKey || !selectedPreflight.resolvedYKey) {
-            const detail = preflightFailures[0] ?? "Run warehouse.query with chart-ready columns first.";
-            throw new Error(`No compatible query result available for chartjs.build (${detail}).`);
-          }
-
-          const effectiveChartRequest: ChartBuildRequest = {
-            ...baseChartRequest,
-            xKey: selectedPreflight.resolvedXKey,
-            yKey: selectedPreflight.resolvedYKey,
-            ...(selectedPreflight.resolvedSeriesKey ? { seriesKey: selectedPreflight.resolvedSeriesKey } : {})
-          };
-          const chartBuild = await runTool(
-            "chartjs.build",
-            {
-              chartRequest: effectiveChartRequest,
-              sourceSql: selectedQuery.sql,
-              sourceStep: selectedQuery.step,
-              sourceRowCount: selectedQuery.result.rowCount,
-              sourceNumericPoints: selectedPreflight.numericPoints
-            },
-            async () =>
-              this.chartTool.buildFromQueryResult({
-                request: effectiveChartRequest,
-                result: selectedQuery.result,
-                maxPoints: profile.maxRowsPerQuery
-              }),
-            (result) => result.summary,
-            (result) => ({ config: result.config, summary: result.summary })
-          );
-          latestChartArtifact = {
-            type: "chartjs_config",
-            format: "json",
-            payload: chartBuild.config,
-            summary: chartBuild.summary
-          };
-          loopMessages.push({
-            role: "user",
-            content: `Tool result (chartjs.build): ${asJsonBlock(chartBuild.summary)}`
+        try {
+          const observation = await toolExecutor.execute({
+            context,
+            snapshot,
+            plan: decision.plan,
+            step,
+            persistedUserText,
+            state,
+            recorder
           });
-          continue;
+          state.loopMessages.push(observation);
+          recorder.appendEvent("feedback.observation", "info", `Injected tool observation for ${decision.plan.tool}.`, {
+            tool: decision.plan.tool
+          }, step);
+        } catch (error) {
+          state.loopMessages.push(feedbackAssembler.buildToolError(decision.plan.tool, (error as Error).message));
         }
-
-        if (plan.tool === "warehouse.query") {
-          const sql = typeof args.sql === "string" ? args.sql.trim() : "";
-          if (!sql) {
-            throw new Error("warehouse.query requires args.sql.");
-          }
-          const normalizedSql = this.sqlGuard
-            .normalize(sql)
-            .replace(/\blimit\s+\d+\b/i, `LIMIT ${profile.maxRowsPerQuery}`);
-          if (attemptedSql.has(normalizedSql)) {
-            throw new Error("Duplicate SQL attempt in this turn. Generate a different query.");
-          }
-          attemptedSql.add(normalizedSql);
-          finalSql = normalizedSql;
-          const queryResult = await measure("warehouseMs", async () =>
-            runTool(
-              "warehouse.query",
-              { sql: normalizedSql },
-              async () => warehouse.query(normalizedSql),
-              (result) => ({ rowCount: result.rowCount, columns: result.columns }),
-              (result) => ({
-                columns: result.columns,
-                rowCount: result.rowCount,
-                rows: result.rows.slice(0, profile.maxRowsPerQuery)
-              })
-            )
-          );
-          lastSuccessfulQuery = { sql: normalizedSql, result: queryResult };
-          successfulQueries.push({ sql: normalizedSql, result: queryResult, step });
-          if (successfulQueries.length > maxToolSteps) {
-            successfulQueries.shift();
-          }
-          loopMessages.push({
-            role: "user",
-            content: `Tool result (warehouse.query): ${asJsonBlock({
-              sql: normalizedSql,
-              columns: queryResult.columns,
-              rowCount: queryResult.rowCount,
-              rows: queryResult.rows.slice(0, profile.maxRowsPerQuery)
-            })}`
-          });
-          continue;
-        }
-
-        throw new Error(`Unsupported tool: ${plan.tool}`);
-      } catch (error) {
-        loopMessages.push({
-          role: "user",
-          content: plan.tool === "tenantMemory.save"
-            ? `Tool error (tenantMemory.save): ${(error as Error).message}. Do NOT claim that memory was saved. Either issue a corrected tenantMemory.save call or return final_answer explicitly saying the save did not happen.`
-            : `Tool error (${plan.tool}): ${(error as Error).message}. Choose a corrected tool call or final_answer.`
-        });
-      }
       }
 
-      if (lastSuccessfulQuery) {
+      if (state.lastSuccessfulQuery) {
         let text = "";
         try {
           text = await runLlm({
@@ -1306,22 +1813,22 @@ export class AnalyticsAgentRuntime {
                   "- You ONLY answer analytical questions related to data, metrics, SQL, BI, dbt models, and business performance analysis.",
                   '- If the request is non-analytical, answer exactly: "I can only help with analytical questions about data and business metrics."',
                   "",
-                  profile.soulPrompt,
+                  snapshot.profile.soulPrompt,
                   "",
                   "Answer using business language and include caveats when sample size or nulls matter."
                 ].join("\n")
               },
-              ...buildTenantMemorySystemMessage(tenantMemories),
+              ...buildTenantMemorySystemMessage(snapshot.tenantMemories),
               {
                 role: "user",
                 content: [
                   `User question: ${persistedUserText}`,
-                  `Executed SQL:\n${lastSuccessfulQuery.sql}`,
+                  `Executed SQL:\n${state.lastSuccessfulQuery.sql}`,
                   "Result JSON:",
                   asJsonBlock({
-                    columns: lastSuccessfulQuery.result.columns,
-                    rowCount: lastSuccessfulQuery.result.rowCount,
-                    rows: lastSuccessfulQuery.result.rows.slice(0, profile.maxRowsPerQuery)
+                    columns: state.lastSuccessfulQuery.result.columns,
+                    rowCount: state.lastSuccessfulQuery.result.rowCount,
+                    rows: state.lastSuccessfulQuery.result.rows.slice(0, snapshot.profile.maxRowsPerQuery)
                   })
                 ].join("\n\n")
               }
@@ -1330,53 +1837,27 @@ export class AnalyticsAgentRuntime {
         } catch {
           text = `I successfully executed the query but could not fully synthesize the final narrative. Raw result: ${asJsonBlock(
             {
-              columns: lastSuccessfulQuery.result.columns,
-              rowCount: lastSuccessfulQuery.result.rowCount,
-              rows: lastSuccessfulQuery.result.rows.slice(0, profile.maxRowsPerQuery)
+              columns: state.lastSuccessfulQuery.result.columns,
+              rowCount: state.lastSuccessfulQuery.result.rowCount,
+              rows: state.lastSuccessfulQuery.result.rows.slice(0, snapshot.profile.maxRowsPerQuery)
             }
           )}`;
         }
-
-        return finalizeSuccess(
-          text,
-          {
-            plan: finalPlan,
-            plannerAttempts,
-            sql: lastSuccessfulQuery.sql,
-            toolCalls,
-            mode: "direct_tool_loop",
-            timings: { ...timings, totalMs: Date.now() - startedAt },
-            finalizedFromLastSuccessfulQuery: true
-          },
-          latestChartArtifact ? [latestChartArtifact] : undefined
-        );
+        return finalizeSuccess(text, true);
       }
 
-      const fallback = "I could not reach a reliable final answer after multiple tool attempts. Please try rephrasing.";
-      return finalizeSuccess(
-        fallback,
-        {
-          plan: finalPlan,
-          plannerAttempts,
-          sql: finalSql,
-          toolCalls,
-          mode: "direct_tool_loop",
-          timings: { ...timings, totalMs: Date.now() - startedAt }
-        },
-        latestChartArtifact ? [latestChartArtifact] : undefined
-      );
+      return finalizeSuccess("I could not reach a reliable final answer after multiple tool attempts. Please try rephrasing.");
     } catch (error) {
-      persistLlmUsageToStore();
+      recorder.persistLlmUsage();
+      const debug = recorder.buildDebug({});
       this.store.completeExecutionTurn({
         turnId: executionTurn.id,
         status: "failed",
         errorMessage: (error as Error).message,
-        debug: {
-          plannerAttempts,
-          toolCalls,
-          timings: { ...timings, totalMs: Date.now() - startedAt },
-          llmUsage: buildLlmUsageDebug()
-        }
+        debug
+      });
+      recorder.appendEvent("turn.finalized", "error", "Execution turn failed.", {
+        error: (error as Error).message
       });
       throw error;
     }

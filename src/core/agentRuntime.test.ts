@@ -95,6 +95,25 @@ function createRuntime(llm: LlmProvider, store: SqliteConversationStore): Analyt
   );
 }
 
+function createRuntimeWithWarehouse(
+  llm: LlmProvider,
+  store: SqliteConversationStore,
+  customWarehouse: WarehouseAdapter
+): AnalyticsAgentRuntime {
+  return new AnalyticsAgentRuntime(
+    llm,
+    customWarehouse,
+    chartTool,
+    dbtRepo,
+    store,
+    new SqlGuard({
+      enforceReadOnly: true,
+      defaultLimit: 200,
+      maxLimit: 2000
+    })
+  );
+}
+
 describe("AnalyticsAgentRuntime tenant memory", () => {
   it("saves tenant memory when the user explicitly asks to remember it", async () => {
     const store = createStore();
@@ -360,5 +379,108 @@ describe("AnalyticsAgentRuntime LLM model and usage", () => {
     expect(events[0]?.totalTokens).toBe(120);
     expect(events[0]?.cost).toBe(0.0042);
     expect(events[0]?.model).toBe("stub-model");
+  });
+});
+
+describe("AnalyticsAgentRuntime harness instrumentation", () => {
+  it("persists structured execution events and tool execution records", async () => {
+    const store = createStore();
+    seedTenantRepo(store, "acme");
+    const llm = new StubLlmProvider([
+      JSON.stringify({
+        type: "tool_call",
+        tool: "warehouse.query",
+        args: { sql: 'SELECT COUNT(*) AS total_users FROM "DB"."PUBLIC"."USERS"' }
+      }),
+      JSON.stringify({
+        type: "final_answer",
+        answer: "There are 2 users."
+      })
+    ]);
+    const runtime = createRuntimeWithWarehouse(llm, store, {
+      provider: "snowflake",
+      async query() {
+        return { columns: ["TOTAL_USERS"], rowCount: 1, rows: [{ TOTAL_USERS: 2 }] };
+      }
+    });
+
+    const response = await runtime.respond(
+      {
+        tenantId: "acme",
+        profileName: "default",
+        conversationId: "conv_trace",
+        llmModel: "trace-model",
+        origin: { source: "cli" }
+      },
+      "How many users do we have?"
+    );
+
+    expect(response.debug?.traceId).toBeTruthy();
+    const turn = store.listExecutionTurns("conv_trace")[0];
+    expect(turn?.traceId).toBeTruthy();
+    expect(turn?.events?.some((event) => event.type === "context.compiled")).toBe(true);
+    expect(turn?.events?.some((event) => event.type === "tool.completed")).toBe(true);
+    expect(turn?.toolExecutions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          tool: "warehouse.query",
+          status: "ok"
+        })
+      ])
+    );
+  });
+
+  it("blocks warehouse queries against configured blocked tables", async () => {
+    const store = createStore();
+    seedTenantRepo(store, "acme");
+    const profile = store.getOrCreateProfile("acme", "default");
+    store.upsertAgentProfile({
+      tenantId: profile.tenantId,
+      name: profile.name,
+      soulPrompt: profile.soulPrompt,
+      maxRowsPerQuery: profile.maxRowsPerQuery,
+      allowedDbtPathPrefixes: profile.allowedDbtPathPrefixes,
+      allowedTools: profile.allowedTools,
+      blockedSchemaPatterns: [],
+      blockedTablePatterns: ["USERS"],
+      toolTimeoutMs: profile.toolTimeoutMs,
+      maxToolRetries: profile.maxToolRetries,
+      maxPlannerSteps: profile.maxPlannerSteps
+    });
+    const llm = new StubLlmProvider([
+      JSON.stringify({
+        type: "tool_call",
+        tool: "warehouse.query",
+        args: { sql: 'SELECT * FROM "DB"."PUBLIC"."USERS"' }
+      }),
+      JSON.stringify({
+        type: "final_answer",
+        answer: "I could not run that query because the table is blocked by policy."
+      })
+    ]);
+    let warehouseCalls = 0;
+    const runtime = createRuntimeWithWarehouse(llm, store, {
+      provider: "snowflake",
+      async query() {
+        warehouseCalls += 1;
+        return { columns: [], rowCount: 0, rows: [] };
+      }
+    });
+
+    const response = await runtime.respond(
+      {
+        tenantId: "acme",
+        profileName: "default",
+        conversationId: "conv_policy_block",
+        llmModel: "policy-model",
+        origin: { source: "cli" }
+      },
+      "Show every user."
+    );
+
+    expect(response.text).toContain("blocked");
+    expect(warehouseCalls).toBe(0);
+    const turn = store.listExecutionTurns("conv_policy_block")[0];
+    expect(turn?.events?.some((event) => event.type === "policy.denied")).toBe(true);
   });
 });
