@@ -21,6 +21,9 @@
     "admin:web:build": "vite build --config admin-ui/vite.config.ts",
     "admin:web:check": "tsc -p admin-ui/tsconfig.json --noEmit",
     "admin:dev": "concurrently -k -n api,web,tunnel -c green,cyan,magenta \"npm run admin:api\" \"npm run admin:web:dev\" \"npm run tunnel\"",
+    "sandbox:local": "AGENT_BLUE_ENV_FILE=.env SANDBOX_DOMAIN=localhost SANDBOX_HTTP_PORT=8080 SANDBOX_HTTPS_PORT=8443 docker compose --env-file .env -f docker-compose.sandbox.yml up -d --build proxy admin slack",
+    "sandbox:local:down": "AGENT_BLUE_ENV_FILE=.env SANDBOX_DOMAIN=localhost SANDBOX_HTTP_PORT=8080 SANDBOX_HTTPS_PORT=8443 docker compose --env-file .env -f docker-compose.sandbox.yml down",
+    "sandbox:local:ps": "AGENT_BLUE_ENV_FILE=.env SANDBOX_DOMAIN=localhost SANDBOX_HTTP_PORT=8080 SANDBOX_HTTPS_PORT=8443 docker compose --env-file .env -f docker-compose.sandbox.yml ps",
     "deploy": "sh -lc 'ssh -i \"$HOME/.ssh/DO\" root@5.78.178.31 \"cd /root/agent-blue && git pull && docker compose up -d --build && docker image prune -f && docker builder prune -f\"'",
     "test": "vitest run"
   },

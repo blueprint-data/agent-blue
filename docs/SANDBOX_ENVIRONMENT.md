@@ -52,12 +52,12 @@ docker compose --env-file .env.sandbox -f docker-compose.sandbox.yml up -d --bui
 Si ya tenés un `.env` operativo, podés reutilizarlo para una prueba local rápida sin crear `.env.sandbox`:
 
 ```bash
-AGENT_BLUE_ENV_FILE=.env SANDBOX_DOMAIN=localhost SANDBOX_HTTP_PORT=8080 SANDBOX_HTTPS_PORT=8443 \
-docker compose --env-file .env -f docker-compose.sandbox.yml up -d --build proxy admin slack
+npm run sandbox:local
 ```
 
 Luego abrir: `https://localhost:8443/admin/`.
 Si necesitás Telegram en este modo, agregá `telegram` al comando y asegurate de tener `TELEGRAM_BOT_TOKEN`.
+Para bajar el stack local: `npm run sandbox:local:down`.
 
 ## Deploy desde GitHub Actions
 
@@ -76,7 +76,12 @@ Configurar en GitHub:
 - `SANDBOX_APP_DIR` (ej: `/srv/agent-blue-sandbox`)
 - `SANDBOX_SSH_PORT` (opcional, default `22`)
 
-Luego ejecutar la action **Deploy Sandbox** y opcionalmente indicar `ref` (branch/tag/SHA).
+Luego ejecutar la action **Deploy Sandbox** y opcionalmente indicar:
+
+- `ref` (branch/tag/SHA)
+- `services`:
+  - `proxy admin slack` (default)
+  - `proxy admin slack telegram` (si querés incluir Telegram)
 
 ## Aislamiento mínimo recomendado
 

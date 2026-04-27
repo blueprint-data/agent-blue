@@ -33,18 +33,18 @@ docker compose --env-file .env.sandbox -f docker-compose.sandbox.yml up -d --bui
 Atajo local (más rápido) reutilizando `.env`:
 
 ```bash
-AGENT_BLUE_ENV_FILE=.env SANDBOX_DOMAIN=localhost SANDBOX_HTTP_PORT=8080 SANDBOX_HTTPS_PORT=8443 \
-docker compose --env-file .env -f docker-compose.sandbox.yml up -d --build proxy admin slack
+npm run sandbox:local
 ```
 
 Abrir: `https://localhost:8443/admin/`.
 Si querés Telegram en local, agregá el servicio `telegram` y configurá `TELEGRAM_BOT_TOKEN`.
+Para bajar el stack: `npm run sandbox:local:down`.
 
 ## Promoción recomendada
 
 1. Desarrollo en feature branch.
 2. CI de PR (`.github/workflows/ci.yml`).
-3. Deploy manual a sandbox (`.github/workflows/deploy-sandbox.yml`).
+3. Deploy manual a sandbox (`.github/workflows/deploy-sandbox.yml`) con `services=\"proxy admin slack\"` por default (sumar `telegram` si aplica).
 4. QA funcional en sandbox (auth, tenant onboarding, repo refresh, Slack/Telegram).
 5. Recién ahí merge + deploy a producción.
 

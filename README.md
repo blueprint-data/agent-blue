@@ -353,6 +353,8 @@ For a dedicated lower environment, use the sandbox stack files included in this 
 - `.env.sandbox.example`
 - `.github/workflows/deploy-sandbox.yml` (manual deploy)
 
+The GitHub Action deploys `proxy admin slack` by default and supports an optional `services` input (`proxy admin slack telegram`) when you want Telegram in sandbox.
+
 Quick start:
 
 ```bash
@@ -360,11 +362,17 @@ cp .env.sandbox.example .env.sandbox
 docker compose --env-file .env.sandbox -f docker-compose.sandbox.yml up -d --build
 ```
 
-Fast local shortcut (reuse your existing `.env` values):
+Fast local scripts (reuse your existing `.env` values):
 
 ```bash
-AGENT_BLUE_ENV_FILE=.env SANDBOX_DOMAIN=localhost SANDBOX_HTTP_PORT=8080 SANDBOX_HTTPS_PORT=8443 \
-docker compose --env-file .env -f docker-compose.sandbox.yml up -d --build proxy admin slack
+# Start local sandbox (proxy + admin + slack)
+npm run sandbox:local
+
+# Check local sandbox status
+npm run sandbox:local:ps
+
+# Stop local sandbox
+npm run sandbox:local:down
 ```
 
 Then open `https://localhost:8443/admin/`.
