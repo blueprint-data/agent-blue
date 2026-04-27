@@ -1,0 +1,10 @@
+{
+  "id": "e2e-default-v1",
+  "description": "Default local benchmark prompts for harness efficiency and reliability checks.",
+  "questions": [
+    "How many users do we have in total?",
+    "How many were created last month?",
+    "From those, how many made a transaction since?",
+    "Can you provide a bar chart by signup month for the last 6 months and summarize the trend?"
+  ]
+}

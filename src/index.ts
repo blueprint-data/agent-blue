@@ -1,7 +1,9 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
+import path from "node:path";
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
+import { execSync } from "node:child_process";
 import { buildLlmProvider, buildRuntime, buildSnowflakeWarehouse, buildStore } from "./app.js";
 import { initializeTenant } from "./bootstrap/initTenant.js";
 import { GitDbtRepositoryService } from "./adapters/dbt/dbtRepoService.js";
@@ -190,19 +192,258 @@ function printArtifacts(artifacts: unknown): void {
   }
 }
 
-const e2eQuestions = [
-  "How many users do we have in total?",
-  "How many were created last month?",
-  "From those, how many made a transaction since?",
-  "Can you provide a bar chart by signup month for the last 6 months and summarize the trend?"
-];
+const DEFAULT_PROMPTS_ID = "e2e-default-v1";
+const DEFAULT_BENCHMARK_PROMPTS_DIR = path.join("benchmark", "prompts");
+
+interface BenchmarkPromptsFile {
+  id?: unknown;
+  questions?: unknown;
+}
 
 interface E2eTurnMetrics {
   plannerAttempts: number;
   totalMs: number | null;
-  snowflakeOk: number;
-  snowflakeErrors: number;
+  warehouseQueryOk: number;
+  warehouseQueryErrors: number;
   fallback: boolean;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  totalCost: number;
+  llmCalls: number;
+}
+
+interface BenchmarkTurnRecord {
+  runIndex: number;
+  questionIndex: number;
+  question: string;
+  conversationId: string;
+  metrics: E2eTurnMetrics;
+  error?: string;
+}
+
+interface BenchmarkModelSummary {
+  turns: number;
+  fallbackTurns: number;
+  fallbackRate: number;
+  avgPlannerAttempts: number;
+  medianPlannerAttempts: number;
+  avgTotalMs: number;
+  medianTotalMs: number;
+  p95TotalMs: number;
+  warehouseQueryOk: number;
+  warehouseQueryErrors: number;
+  toolErrorRate: number;
+  noWarehouseCalls: boolean;
+  totalPromptTokens: number;
+  totalCompletionTokens: number;
+  totalTokens: number;
+  tokensPerTurn: number;
+  totalCost: number;
+  costPerTurn: number;
+  totalLlmCalls: number;
+}
+
+interface BenchmarkModelResult {
+  model: string;
+  turns: BenchmarkTurnRecord[];
+  summary: BenchmarkModelSummary;
+}
+
+interface BenchmarkRunResult {
+  benchmarkVersion: "v1";
+  promptsId: string;
+  runMeta: {
+    runId: string;
+    branch?: string;
+    commit?: string;
+    tenantId: string;
+    profileName: string;
+    runs: number;
+    executedAt: string;
+  };
+  models: BenchmarkModelResult[];
+}
+
+interface BenchmarkModelSnapshot {
+  model: string;
+  summary: BenchmarkModelSummary;
+}
+
+interface BenchmarkInputSnapshot {
+  sourcePath: string;
+  runId?: string;
+  promptsId?: string;
+  models: BenchmarkModelSnapshot[];
+}
+
+type ComparisonTrend = "better" | "similar" | "worse";
+
+interface ComparisonMetricResult {
+  label: string;
+  baselineDisplay: string;
+  candidateDisplay: string;
+  deltaDisplay: string;
+  trend: ComparisonTrend;
+}
+
+function asFiniteNumber(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function average(values: number[]): number {
+  if (values.length === 0) {
+    return 0;
+  }
+  return values.reduce((acc, value) => acc + value, 0) / values.length;
+}
+
+function percentile(values: number[], p: number): number {
+  if (values.length === 0) {
+    return 0;
+  }
+  const sorted = [...values].sort((a, b) => a - b);
+  const rank = Math.min(Math.max(p, 0), 1) * (sorted.length - 1);
+  const lower = Math.floor(rank);
+  const upper = Math.ceil(rank);
+  if (lower === upper) {
+    return sorted[lower];
+  }
+  const weight = rank - lower;
+  return sorted[lower] + (sorted[upper] - sorted[lower]) * weight;
+}
+
+function safeGitRef(command: string): string | undefined {
+  try {
+    const value = execSync(command, { stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+    return value.length > 0 ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function shellQuote(value: string): string {
+  return JSON.stringify(value);
+}
+
+function runShellCommand(parts: string[]): void {
+  const command = parts.map((part) => shellQuote(part)).join(" ");
+  execSync(command, { stdio: "inherit" });
+}
+
+function toFiniteOrDefault(value: string | boolean | undefined, fallback: number): number {
+  if (typeof value !== "string") {
+    return fallback;
+  }
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function classifyDeltaPct(deltaPct: number, tolerancePct: number): ComparisonTrend {
+  if (deltaPct <= -Math.abs(tolerancePct)) {
+    return "better";
+  }
+  if (deltaPct >= Math.abs(tolerancePct)) {
+    return "worse";
+  }
+  return "similar";
+}
+
+function classifyDeltaPp(deltaPp: number, tolerancePp: number): ComparisonTrend {
+  if (deltaPp <= -Math.abs(tolerancePp)) {
+    return "better";
+  }
+  if (deltaPp >= Math.abs(tolerancePp)) {
+    return "worse";
+  }
+  return "similar";
+}
+
+function formatTrend(trend: ComparisonTrend): string {
+  if (trend === "better") {
+    return successText("better");
+  }
+  if (trend === "worse") {
+    return errorText("worse");
+  }
+  return warnText("similar");
+}
+
+function formatNumber(value: number, digits = 2): string {
+  return Number.isFinite(value) ? value.toFixed(digits) : "n/a";
+}
+
+function formatSigned(value: number, digits = 2): string {
+  const normalized = Number.isFinite(value) ? value : 0;
+  const sign = normalized >= 0 ? "+" : "";
+  return `${sign}${normalized.toFixed(digits)}`;
+}
+
+function parseBenchmarkSnapshot(filePathArg: string): BenchmarkInputSnapshot {
+  const resolvedPath = path.isAbsolute(filePathArg) ? filePathArg : path.join(process.cwd(), filePathArg);
+  if (!fs.existsSync(resolvedPath)) {
+    throw new Error(`Benchmark file not found: ${resolvedPath}`);
+  }
+
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(fs.readFileSync(resolvedPath, "utf-8")) as Record<string, unknown>;
+  } catch (error) {
+    throw new Error(`Invalid benchmark JSON at ${resolvedPath}: ${(error as Error).message}`);
+  }
+
+  const rawModels = Array.isArray(parsed.models) ? parsed.models : [];
+  const models: BenchmarkModelSnapshot[] = [];
+  for (const rawModel of rawModels) {
+    const modelEntry = rawModel as Record<string, unknown>;
+    const model = typeof modelEntry.model === "string" ? modelEntry.model.trim() : "";
+    if (!model) {
+      continue;
+    }
+    const summaryRaw = modelEntry.summary as Record<string, unknown> | undefined;
+    const summary: BenchmarkModelSummary = {
+      turns: asFiniteNumber(summaryRaw?.turns),
+      fallbackTurns: asFiniteNumber(summaryRaw?.fallbackTurns),
+      fallbackRate: asFiniteNumber(summaryRaw?.fallbackRate),
+      avgPlannerAttempts: asFiniteNumber(summaryRaw?.avgPlannerAttempts),
+      medianPlannerAttempts: asFiniteNumber(summaryRaw?.medianPlannerAttempts),
+      avgTotalMs: asFiniteNumber(summaryRaw?.avgTotalMs),
+      medianTotalMs: asFiniteNumber(summaryRaw?.medianTotalMs),
+      p95TotalMs: asFiniteNumber(summaryRaw?.p95TotalMs),
+      warehouseQueryOk: asFiniteNumber(summaryRaw?.warehouseQueryOk),
+      warehouseQueryErrors: asFiniteNumber(summaryRaw?.warehouseQueryErrors),
+      toolErrorRate: asFiniteNumber(summaryRaw?.toolErrorRate),
+      noWarehouseCalls: Boolean(summaryRaw?.noWarehouseCalls),
+      totalPromptTokens: asFiniteNumber(summaryRaw?.totalPromptTokens),
+      totalCompletionTokens: asFiniteNumber(summaryRaw?.totalCompletionTokens),
+      totalTokens: asFiniteNumber(summaryRaw?.totalTokens),
+      tokensPerTurn: asFiniteNumber(summaryRaw?.tokensPerTurn),
+      totalCost: asFiniteNumber(summaryRaw?.totalCost),
+      costPerTurn: asFiniteNumber(summaryRaw?.costPerTurn),
+      totalLlmCalls: asFiniteNumber(summaryRaw?.totalLlmCalls)
+    };
+    models.push({ model, summary });
+  }
+
+  if (models.length === 0) {
+    throw new Error(`Benchmark file ${resolvedPath} has no model summaries.`);
+  }
+
+  const runMeta = parsed.runMeta as Record<string, unknown> | undefined;
+  const runId = typeof runMeta?.runId === "string" ? runMeta.runId : undefined;
+  const promptsId =
+    typeof parsed.promptsId === "string"
+      ? parsed.promptsId
+      : typeof parsed.promptSetId === "string"
+        ? parsed.promptSetId
+        : undefined;
+
+  return {
+    sourcePath: resolvedPath,
+    runId,
+    promptsId,
+    models
+  };
 }
 
 function parseE2eTurnMetrics(text: string, debug: Record<string, unknown> | undefined): E2eTurnMetrics {
@@ -215,26 +456,38 @@ function parseE2eTurnMetrics(text: string, debug: Record<string, unknown> | unde
 
   const toolCallsRaw = debug?.toolCalls;
   const toolCalls = Array.isArray(toolCallsRaw) ? toolCallsRaw : [];
-  let snowflakeOk = 0;
-  let snowflakeErrors = 0;
+  let warehouseQueryOk = 0;
+  let warehouseQueryErrors = 0;
   for (const call of toolCalls) {
     const entry = call as { tool?: unknown; status?: unknown };
-    if (entry.tool !== "snowflake.query") {
+    const tool = typeof entry.tool === "string" ? entry.tool : "";
+    // Keep legacy compatibility in case older debug payloads still use snowflake.query.
+    if (tool !== "warehouse.query" && tool !== "snowflake.query") {
       continue;
     }
     if (entry.status === "ok") {
-      snowflakeOk += 1;
+      warehouseQueryOk += 1;
     } else if (entry.status === "error") {
-      snowflakeErrors += 1;
+      warehouseQueryErrors += 1;
     }
   }
+
+  const llmUsageRaw = debug?.llmUsage as { totals?: unknown; calls?: unknown } | undefined;
+  const llmTotals = llmUsageRaw?.totals as Record<string, unknown> | undefined;
+  const llmCallsRaw = llmUsageRaw?.calls;
+  const llmCalls = Array.isArray(llmCallsRaw) ? llmCallsRaw.length : 0;
 
   return {
     plannerAttempts,
     totalMs,
-    snowflakeOk,
-    snowflakeErrors,
-    fallback: text.includes("I could not reach a reliable final answer")
+    warehouseQueryOk,
+    warehouseQueryErrors,
+    fallback: text.includes("I could not reach a reliable final answer"),
+    promptTokens: asFiniteNumber(llmTotals?.promptTokens),
+    completionTokens: asFiniteNumber(llmTotals?.completionTokens),
+    totalTokens: asFiniteNumber(llmTotals?.totalTokens),
+    totalCost: asFiniteNumber(llmTotals?.totalCost),
+    llmCalls
   };
 }
 
@@ -248,12 +501,70 @@ function parseCsvArg(value: string | boolean | undefined): string[] {
     .filter((item) => item.length > 0);
 }
 
+function loadBenchmarkPrompts(
+  args: Record<string, string | boolean>
+
+): { promptsId: string; questions: string[]; sourcePath: string } {
+  const promptsArg =
+    typeof args.prompts === "string"
+      ? args.prompts.trim()
+      : typeof args["prompt-set"] === "string"
+        ? args["prompt-set"].trim()
+        : "";
+  const promptsPathArg =
+    typeof args["prompts-path"] === "string"
+      ? args["prompts-path"].trim()
+      : typeof args["prompt-set-path"] === "string"
+        ? args["prompt-set-path"].trim()
+        : "";
+
+  const requestedPromptsId = promptsArg.length > 0 ? promptsArg : DEFAULT_PROMPTS_ID;
+  const defaultPromptsPath = path.join(DEFAULT_BENCHMARK_PROMPTS_DIR, `${requestedPromptsId}.json`);
+  const selectedPath = promptsPathArg.length > 0 ? promptsPathArg : defaultPromptsPath;
+  const resolvedPath = path.isAbsolute(selectedPath) ? selectedPath : path.join(process.cwd(), selectedPath);
+
+  if (!fs.existsSync(resolvedPath)) {
+    throw new Error(`Prompts file not found: ${resolvedPath}. Create it or pass --prompts-path <file>.`);
+  }
+
+  let parsed: BenchmarkPromptsFile;
+  try {
+    parsed = JSON.parse(fs.readFileSync(resolvedPath, "utf-8")) as BenchmarkPromptsFile;
+  } catch (error) {
+    throw new Error(`Invalid prompts JSON at ${resolvedPath}: ${(error as Error).message}`);
+  }
+
+  const questionsRaw = Array.isArray(parsed.questions) ? parsed.questions : [];
+  const questions = questionsRaw
+    .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+    .filter((entry) => entry.length > 0);
+
+  if (questions.length === 0) {
+    throw new Error(`Prompts file ${resolvedPath} has no valid questions.`);
+  }
+
+  const promptsIdFromFile = typeof parsed.id === "string" ? parsed.id.trim() : "";
+  const promptsId =
+    promptsIdFromFile.length > 0
+      ? promptsIdFromFile
+      : path.basename(resolvedPath, path.extname(resolvedPath));
+
+  return {
+    promptsId,
+    questions,
+    sourcePath: resolvedPath
+  };
+}
+
 function usage(): string {
   return [
     "Usage:",
     "  npm run dev -- init --tenant <id> --repo-url <git@...> [--dbt-subpath models] [--force]",
     "  npm run dev -- sync-dbt --tenant <id>",
-    "  npm run dev -- e2e-loop --tenant <id> [--profile default] [--model <provider/model>] [--models <m1,m2>] [--runs 1] [--verbose]",
+    "  npm run dev -- e2e-loop --tenant <id> [--profile default] [--model <provider/model>] [--models <m1,m2>] [--prompts e2e-default-v1] [--prompts-path benchmark/prompts/e2e-default-v1.json] [--runs 1] [--output benchmark/results/run.json] [--verbose]",
+    "  npm run dev -- benchmark-local --tenant <id> [--profile default] [--model <provider/model>] [--models <m1,m2>] [--prompts e2e-default-v1] [--prompts-path benchmark/prompts/e2e-default-v1.json] [--runs 5] [--output benchmark/results/run.json] [--verbose]",
+    "  npm run dev -- benchmark-compare --baseline benchmark/results/base.json --candidate benchmark/results/candidate.json [--report benchmark/results/compare.md] [--tolerance-pct 5] [--tolerance-pp 1] [--fail-on-worse]",
+    "  npm run dev -- benchmark-one-shot --tenant <id> --baseline benchmark/results/base.json [--candidate-output benchmark/results/candidate.json] [--report benchmark/results/compare.md] [--model <provider/model>|--models <m1,m2>] [--prompts e2e-default-v1] [--runs 2] [--tolerance-pct 5] [--tolerance-pp 1] [--fail-on-worse] [--verbose]",
     "  npm run dev -- prod-smoke --tenant <id> [--model <provider/model>]",
     "  npm run dev -- chat --tenant <id> [--profile default] [--conversation <id>] [--message \"...\"] [--verbose] [--model <provider/model>]",
     "  npm run dev -- slack [--tenant <id>] [--profile default] [--port 3000] [--model <provider/model>]",
@@ -438,8 +749,9 @@ async function run(): Promise<void> {
     return;
   }
 
-  if (command === "e2e-loop") {
+  if (command === "e2e-loop" || command === "benchmark-local") {
     const runtime = buildRuntime(store);
+    const benchmarkLocal = command === "benchmark-local";
     const tenantId = getStringArg(args, "tenant");
     const profileName = getStringArg(args, "profile", "default");
     const verbose = args.verbose === true || env.verboseMode;
@@ -451,22 +763,55 @@ async function run(): Promise<void> {
         : singleModel.length > 0
           ? [singleModel]
           : [env.llmModel];
-    const runsRaw = typeof args.runs === "string" ? Number.parseInt(args.runs, 10) : 1;
-    const runs = Number.isFinite(runsRaw) && runsRaw > 0 ? runsRaw : 1;
+
+    const defaultRuns = benchmarkLocal ? 5 : 1;
+    const runsRaw = typeof args.runs === "string" ? Number.parseInt(args.runs, 10) : defaultRuns;
+    const runs = Number.isFinite(runsRaw) && runsRaw > 0 ? runsRaw : defaultRuns;
+    const prompts = loadBenchmarkPrompts(args);
+    const outputArg = typeof args.output === "string" ? args.output.trim() : "";
+    const executedAt = new Date().toISOString();
+    const runId = `bench_${executedAt.replace(/[:.]/g, "-")}`;
+    const outputPath =
+      outputArg.length > 0
+        ? outputArg
+        : benchmarkLocal
+          ? path.join("benchmark", "results", `${runId}.json`)
+          : "";
+
+    const benchmarkResult: BenchmarkRunResult = {
+      benchmarkVersion: "v1",
+      promptsId: prompts.promptsId,
+      runMeta: {
+        runId,
+        branch: safeGitRef("git rev-parse --abbrev-ref HEAD"),
+        commit: safeGitRef("git rev-parse --short HEAD"),
+        tenantId,
+        profileName,
+        runs,
+        executedAt
+      },
+      models: []
+    };
 
     output.write(
-      `${infoLabel("E2E loop started.")} tenant=${tenantId} profile=${profileName} runs=${runs} models=${models.join(", ")}\n`
+      `${infoLabel("E2E loop started.")} tenant=${tenantId} profile=${profileName} runs=${runs} models=${models.join(", ")} prompts=${prompts.promptsId}\n`
     );
+    output.write(`${infoLabel("Prompts source")} ${prompts.sourcePath}\n`);
+    if (outputPath) {
+      output.write(`${infoLabel("Benchmark output path")} ${outputPath}\n`);
+    }
 
     for (const llmModel of models) {
       output.write(`\n${paint(`=== Model: ${llmModel} ===`, 35)}\n`);
       const modelMetrics: E2eTurnMetrics[] = [];
+      const turnRecords: BenchmarkTurnRecord[] = [];
+
       for (let runIndex = 1; runIndex <= runs; runIndex += 1) {
         const conversationId = createId("e2e");
         output.write(`${infoLabel(`[run ${runIndex}/${runs}]`)} conversation=${conversationId}\n`);
 
-        for (let questionIndex = 0; questionIndex < e2eQuestions.length; questionIndex += 1) {
-          const question = e2eQuestions[questionIndex];
+        for (let questionIndex = 0; questionIndex < prompts.questions.length; questionIndex += 1) {
+          const question = prompts.questions[questionIndex];
           output.write(`${warnText(`Q${questionIndex + 1}:`)} ${question}\n`);
           try {
             const response = await runtime.respond(
@@ -475,26 +820,48 @@ async function run(): Promise<void> {
             );
             const metrics = parseE2eTurnMetrics(response.text, response.debug);
             modelMetrics.push(metrics);
+            turnRecords.push({
+              runIndex,
+              questionIndex: questionIndex + 1,
+              question,
+              conversationId,
+              metrics
+            });
 
             output.write(`${successText("A:")} ${response.text}\n`);
             printArtifacts(response.artifacts);
             output.write(
               `${infoLabel("[metrics]")} attempts=${metrics.plannerAttempts} totalMs=${
                 metrics.totalMs ?? "n/a"
-              } snowflake.ok=${metrics.snowflakeOk} snowflake.error=${metrics.snowflakeErrors} fallback=${metrics.fallback}\n`
+              } warehouse.ok=${metrics.warehouseQueryOk} warehouse.error=${metrics.warehouseQueryErrors} tokens=${metrics.totalTokens} cost=${metrics.totalCost.toFixed(6)} llmCalls=${metrics.llmCalls} fallback=${metrics.fallback}\n`
             );
             if (verbose) {
               printVerboseDebug(response.debug);
             }
             output.write("\n");
           } catch (error) {
-            output.write(`${errorText(`Error: ${(error as Error).message}`)}\n\n`);
-            modelMetrics.push({
+            const errorMessage = (error as Error).message;
+            output.write(`${errorText(`Error: ${errorMessage}`)}\n\n`);
+            const failedMetrics: E2eTurnMetrics = {
               plannerAttempts: 0,
               totalMs: null,
-              snowflakeOk: 0,
-              snowflakeErrors: 0,
-              fallback: true
+              warehouseQueryOk: 0,
+              warehouseQueryErrors: 0,
+              fallback: true,
+              promptTokens: 0,
+              completionTokens: 0,
+              totalTokens: 0,
+              totalCost: 0,
+              llmCalls: 0
+            };
+            modelMetrics.push(failedMetrics);
+            turnRecords.push({
+              runIndex,
+              questionIndex: questionIndex + 1,
+              question,
+              conversationId,
+              metrics: failedMetrics,
+              error: errorMessage
             });
           }
         }
@@ -502,25 +869,347 @@ async function run(): Promise<void> {
 
       const totalTurns = modelMetrics.length;
       const fallbackTurns = modelMetrics.filter((metric) => metric.fallback).length;
-      const avgAttempts =
-        totalTurns === 0
-          ? 0
-          : modelMetrics.reduce((acc, metric) => acc + metric.plannerAttempts, 0) / totalTurns;
-      const avgTotalMs =
-        totalTurns === 0
-          ? 0
-          : modelMetrics.reduce((acc, metric) => acc + (metric.totalMs ?? 0), 0) / totalTurns;
-      const totalSnowflakeOk = modelMetrics.reduce((acc, metric) => acc + metric.snowflakeOk, 0);
-      const totalSnowflakeErrors = modelMetrics.reduce((acc, metric) => acc + metric.snowflakeErrors, 0);
+      const plannerAttemptsValues = modelMetrics.map((metric) => metric.plannerAttempts);
+      const timedMsValues = modelMetrics
+        .map((metric) => metric.totalMs)
+        .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+
+      const totalWarehouseQueryOk = modelMetrics.reduce((acc, metric) => acc + metric.warehouseQueryOk, 0);
+      const totalWarehouseQueryErrors = modelMetrics.reduce((acc, metric) => acc + metric.warehouseQueryErrors, 0);
+      const warehouseCallCount = totalWarehouseQueryOk + totalWarehouseQueryErrors;
+
+      const totalPromptTokens = modelMetrics.reduce((acc, metric) => acc + metric.promptTokens, 0);
+      const totalCompletionTokens = modelMetrics.reduce((acc, metric) => acc + metric.completionTokens, 0);
+      const totalTokens = modelMetrics.reduce((acc, metric) => acc + metric.totalTokens, 0);
+      const totalCost = modelMetrics.reduce((acc, metric) => acc + metric.totalCost, 0);
+      const totalLlmCalls = modelMetrics.reduce((acc, metric) => acc + metric.llmCalls, 0);
+
+      const summary: BenchmarkModelSummary = {
+        turns: totalTurns,
+        fallbackTurns,
+        fallbackRate: totalTurns === 0 ? 0 : fallbackTurns / totalTurns,
+        avgPlannerAttempts: average(plannerAttemptsValues),
+        medianPlannerAttempts: percentile(plannerAttemptsValues, 0.5),
+        avgTotalMs: average(timedMsValues),
+        medianTotalMs: percentile(timedMsValues, 0.5),
+        p95TotalMs: percentile(timedMsValues, 0.95),
+        warehouseQueryOk: totalWarehouseQueryOk,
+        warehouseQueryErrors: totalWarehouseQueryErrors,
+        toolErrorRate: warehouseCallCount === 0 ? 0 : totalWarehouseQueryErrors / warehouseCallCount,
+        noWarehouseCalls: warehouseCallCount === 0,
+        totalPromptTokens,
+        totalCompletionTokens,
+        totalTokens,
+        tokensPerTurn: totalTurns === 0 ? 0 : totalTokens / totalTurns,
+        totalCost,
+        costPerTurn: totalTurns === 0 ? 0 : totalCost / totalTurns,
+        totalLlmCalls
+      };
 
       output.write(`${paint("Model summary", 36)}\n`);
-      output.write(`  - turns=${totalTurns}\n`);
-      output.write(`  - fallbackTurns=${fallbackTurns}\n`);
-      output.write(`  - avgPlannerAttempts=${avgAttempts.toFixed(2)}\n`);
-      output.write(`  - avgTotalMs=${Math.round(avgTotalMs)}\n`);
-      output.write(`  - snowflakeOk=${totalSnowflakeOk}\n`);
-      output.write(`  - snowflakeErrors=${totalSnowflakeErrors}\n`);
+      output.write(`  - turns=${summary.turns}\n`);
+      output.write(`  - fallbackTurns=${summary.fallbackTurns}\n`);
+      output.write(`  - fallbackRate=${summary.fallbackRate.toFixed(4)}\n`);
+      output.write(`  - avgPlannerAttempts=${summary.avgPlannerAttempts.toFixed(2)}\n`);
+      output.write(`  - medianPlannerAttempts=${summary.medianPlannerAttempts.toFixed(2)}\n`);
+      output.write(`  - avgTotalMs=${Math.round(summary.avgTotalMs)}\n`);
+      output.write(`  - medianTotalMs=${Math.round(summary.medianTotalMs)}\n`);
+      output.write(`  - p95TotalMs=${Math.round(summary.p95TotalMs)}\n`);
+      output.write(`  - warehouseQueryOk=${summary.warehouseQueryOk}\n`);
+      output.write(`  - warehouseQueryErrors=${summary.warehouseQueryErrors}\n`);
+      output.write(`  - toolErrorRate=${summary.toolErrorRate.toFixed(4)}\n`);
+      output.write(`  - totalPromptTokens=${summary.totalPromptTokens}\n`);
+      output.write(`  - totalCompletionTokens=${summary.totalCompletionTokens}\n`);
+      output.write(`  - totalTokens=${summary.totalTokens}\n`);
+      output.write(`  - tokensPerTurn=${summary.tokensPerTurn.toFixed(2)}\n`);
+      output.write(`  - totalCost=${summary.totalCost.toFixed(6)}\n`);
+      output.write(`  - costPerTurn=${summary.costPerTurn.toFixed(6)}\n`);
+      output.write(`  - totalLlmCalls=${summary.totalLlmCalls}\n`);
+
+      benchmarkResult.models.push({
+        model: llmModel,
+        turns: turnRecords,
+        summary
+      });
     }
+
+    if (outputPath) {
+      const resolvedOutputPath = path.isAbsolute(outputPath) ? outputPath : path.join(process.cwd(), outputPath);
+      fs.mkdirSync(path.dirname(resolvedOutputPath), { recursive: true });
+      fs.writeFileSync(resolvedOutputPath, `${JSON.stringify(benchmarkResult, null, 2)}\n`, "utf-8");
+      output.write(`${successText("Benchmark JSON saved.")} ${resolvedOutputPath}\n`);
+    }
+    return;
+  }
+
+  if (command === "benchmark-compare") {
+    const baselinePath = getStringArg(args, "baseline");
+    const candidatePath = getStringArg(args, "candidate");
+    const reportArg = typeof args.report === "string" ? args.report.trim() : "";
+    const tolerancePct = Math.max(0, toFiniteOrDefault(args["tolerance-pct"], 5));
+    const tolerancePp = Math.max(0, toFiniteOrDefault(args["tolerance-pp"], 1));
+    const failOnWorse = args["fail-on-worse"] === true;
+
+    const baseline = parseBenchmarkSnapshot(baselinePath);
+    const candidate = parseBenchmarkSnapshot(candidatePath);
+
+    const baselineByModel = new Map(baseline.models.map((entry) => [entry.model, entry]));
+    const candidateByModel = new Map(candidate.models.map((entry) => [entry.model, entry]));
+
+    const commonModels = candidate.models
+      .map((entry) => entry.model)
+      .filter((modelName) => baselineByModel.has(modelName));
+
+    if (commonModels.length === 0) {
+      throw new Error(
+        `No overlapping models between baseline (${baseline.sourcePath}) and candidate (${candidate.sourcePath}).`
+      );
+    }
+
+    const missingInBaseline = candidate.models
+      .map((entry) => entry.model)
+      .filter((modelName) => !baselineByModel.has(modelName));
+    const missingInCandidate = baseline.models
+      .map((entry) => entry.model)
+      .filter((modelName) => !candidateByModel.has(modelName));
+
+    output.write(`${paint("Benchmark comparison", 36)}\n`);
+    output.write(`  baseline:  ${baseline.sourcePath}\n`);
+    output.write(`  candidate: ${candidate.sourcePath}\n`);
+    output.write(`  tolerance: pct=±${tolerancePct.toFixed(2)} pp=±${tolerancePp.toFixed(2)}\n`);
+    if (baseline.promptsId || candidate.promptsId) {
+      output.write(`  prompts: baseline=${baseline.promptsId ?? "n/a"} candidate=${candidate.promptsId ?? "n/a"}\n`);
+    }
+    if (missingInBaseline.length > 0) {
+      output.write(`${warnText("  skipped (missing in baseline):")} ${missingInBaseline.join(", ")}\n`);
+    }
+    if (missingInCandidate.length > 0) {
+      output.write(`${warnText("  skipped (missing in candidate):")} ${missingInCandidate.join(", ")}\n`);
+    }
+
+    const reportLines: string[] = [];
+    reportLines.push("# Benchmark comparison");
+    reportLines.push("");
+    reportLines.push(`- Baseline: \`${baseline.sourcePath}\``);
+    reportLines.push(`- Candidate: \`${candidate.sourcePath}\``);
+    reportLines.push(`- Tolerance: pct=±${tolerancePct.toFixed(2)} / pp=±${tolerancePp.toFixed(2)}`);
+    if (baseline.promptsId || candidate.promptsId) {
+      reportLines.push(`- Prompts: baseline=\`${baseline.promptsId ?? "n/a"}\`, candidate=\`${candidate.promptsId ?? "n/a"}\``);
+    }
+    reportLines.push("");
+
+    let betterCount = 0;
+    let similarCount = 0;
+    let worseCount = 0;
+
+    const buildRelativeMetric = (
+      label: string,
+      baselineValue: number,
+      candidateValue: number,
+      format: (value: number) => string
+    ): ComparisonMetricResult => {
+      const deltaPct = baselineValue === 0 ? (candidateValue === 0 ? 0 : 100) : ((candidateValue - baselineValue) / baselineValue) * 100;
+      const trend = classifyDeltaPct(deltaPct, tolerancePct);
+      return {
+        label,
+        baselineDisplay: format(baselineValue),
+        candidateDisplay: format(candidateValue),
+        deltaDisplay: `${formatSigned(deltaPct, 2)}%`,
+        trend
+      };
+    };
+
+    const buildPpMetric = (
+      label: string,
+      baselinePercentPoints: number,
+      candidatePercentPoints: number
+    ): ComparisonMetricResult => {
+      const deltaPp = candidatePercentPoints - baselinePercentPoints;
+      const trend = classifyDeltaPp(deltaPp, tolerancePp);
+      return {
+        label,
+        baselineDisplay: `${formatNumber(baselinePercentPoints, 2)}%`,
+        candidateDisplay: `${formatNumber(candidatePercentPoints, 2)}%`,
+        deltaDisplay: `${formatSigned(deltaPp, 2)} pp`,
+        trend
+      };
+    };
+
+    for (const modelName of commonModels) {
+      const baselineModel = baselineByModel.get(modelName);
+      const candidateModel = candidateByModel.get(modelName);
+      if (!baselineModel || !candidateModel) {
+        continue;
+      }
+
+      const rows: ComparisonMetricResult[] = [
+        buildRelativeMetric(
+          "medianTotalMs",
+          baselineModel.summary.medianTotalMs,
+          candidateModel.summary.medianTotalMs,
+          (value) => `${Math.round(value)} ms`
+        ),
+        buildRelativeMetric(
+          "avgLoops",
+          baselineModel.summary.avgPlannerAttempts,
+          candidateModel.summary.avgPlannerAttempts,
+          (value) => formatNumber(value, 2)
+        ),
+        buildRelativeMetric(
+          "totalTokens",
+          baselineModel.summary.totalTokens,
+          candidateModel.summary.totalTokens,
+          (value) => `${Math.round(value)}`
+        ),
+        buildRelativeMetric(
+          "totalCost",
+          baselineModel.summary.totalCost,
+          candidateModel.summary.totalCost,
+          (value) => `$${formatNumber(value, 6)}`
+        ),
+        buildPpMetric(
+          "fallbackRate",
+          baselineModel.summary.fallbackRate * 100,
+          candidateModel.summary.fallbackRate * 100
+        ),
+        buildPpMetric(
+          "toolErrorRate",
+          baselineModel.summary.toolErrorRate * 100,
+          candidateModel.summary.toolErrorRate * 100
+        )
+      ];
+
+      output.write(`\n${paint(`=== Compare model: ${modelName} ===`, 35)}\n`);
+      output.write(
+        `  turns: baseline=${baselineModel.summary.turns} candidate=${candidateModel.summary.turns}\n`
+      );
+
+      reportLines.push(`## Model: ${modelName}`);
+      reportLines.push("");
+      reportLines.push(
+        `- Turns: baseline=${baselineModel.summary.turns}, candidate=${candidateModel.summary.turns}`
+      );
+      reportLines.push("");
+      reportLines.push("| Metric | Baseline | Candidate | Delta | Trend |");
+      reportLines.push("|---|---:|---:|---:|---|");
+
+      for (const row of rows) {
+        if (row.trend === "better") {
+          betterCount += 1;
+        } else if (row.trend === "worse") {
+          worseCount += 1;
+        } else {
+          similarCount += 1;
+        }
+
+        output.write(
+          `  - ${row.label}: base=${row.baselineDisplay} cand=${row.candidateDisplay} delta=${row.deltaDisplay} -> ${formatTrend(row.trend)}\n`
+        );
+        reportLines.push(
+          `| ${row.label} | ${row.baselineDisplay} | ${row.candidateDisplay} | ${row.deltaDisplay} | ${row.trend} |`
+        );
+      }
+      reportLines.push("");
+    }
+
+    output.write(`\n${paint("Comparison summary", 36)}\n`);
+    output.write(`  better=${betterCount} similar=${similarCount} worse=${worseCount}\n`);
+    reportLines.push("## Summary");
+    reportLines.push("");
+    reportLines.push(`- better: ${betterCount}`);
+    reportLines.push(`- similar: ${similarCount}`);
+    reportLines.push(`- worse: ${worseCount}`);
+    reportLines.push("");
+
+    if (reportArg.length > 0) {
+      const resolvedReportPath = path.isAbsolute(reportArg) ? reportArg : path.join(process.cwd(), reportArg);
+      fs.mkdirSync(path.dirname(resolvedReportPath), { recursive: true });
+      fs.writeFileSync(resolvedReportPath, `${reportLines.join("\n")}\n`, "utf-8");
+      output.write(`${successText("Comparison report saved.")} ${resolvedReportPath}\n`);
+    }
+
+    if (failOnWorse && worseCount > 0) {
+      output.write(`${errorText("Comparison failed: worse metrics detected.")}\n`);
+      process.exitCode = 2;
+    }
+    return;
+  }
+
+  if (command === "benchmark-one-shot") {
+    const tenantId = getStringArg(args, "tenant");
+    const baselinePath = getStringArg(args, "baseline");
+    const candidateOutputArg = typeof args["candidate-output"] === "string" ? args["candidate-output"].trim() : "";
+    const reportArg = typeof args.report === "string" ? args.report.trim() : "";
+    const generatedStamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const candidateOutputPath =
+      candidateOutputArg.length > 0
+        ? candidateOutputArg
+        : path.join("benchmark", "results", `candidate-${generatedStamp}.json`);
+
+    const benchmarkParts: string[] = ["npm", "run", "dev", "--", "benchmark-local", "--tenant", tenantId, "--output", candidateOutputPath];
+
+    const profileArg = typeof args.profile === "string" ? args.profile.trim() : "";
+    if (profileArg.length > 0) {
+      benchmarkParts.push("--profile", profileArg);
+    }
+    const modelArg = typeof args.model === "string" ? args.model.trim() : "";
+    if (modelArg.length > 0) {
+      benchmarkParts.push("--model", modelArg);
+    }
+    const modelsArg = typeof args.models === "string" ? args.models.trim() : "";
+    if (modelsArg.length > 0) {
+      benchmarkParts.push("--models", modelsArg);
+    }
+    const promptsArg = typeof args.prompts === "string" ? args.prompts.trim() : "";
+    if (promptsArg.length > 0) {
+      benchmarkParts.push("--prompts", promptsArg);
+    }
+    const promptsPathArg = typeof args["prompts-path"] === "string" ? args["prompts-path"].trim() : "";
+    if (promptsPathArg.length > 0) {
+      benchmarkParts.push("--prompts-path", promptsPathArg);
+    }
+    const runsArg = typeof args.runs === "string" ? args.runs.trim() : "";
+    if (runsArg.length > 0) {
+      benchmarkParts.push("--runs", runsArg);
+    }
+    if (args.verbose === true) {
+      benchmarkParts.push("--verbose");
+    }
+
+    output.write(`${paint("One-shot benchmark", 36)}\n`);
+    output.write(`  baseline: ${baselinePath}\n`);
+    output.write(`  candidate output: ${candidateOutputPath}\n`);
+
+    runShellCommand(benchmarkParts);
+
+    const compareParts: string[] = [
+      "npm",
+      "run",
+      "dev",
+      "--",
+      "benchmark-compare",
+      "--baseline",
+      baselinePath,
+      "--candidate",
+      candidateOutputPath
+    ];
+
+    if (reportArg.length > 0) {
+      compareParts.push("--report", reportArg);
+    }
+    const tolerancePctArg = typeof args["tolerance-pct"] === "string" ? args["tolerance-pct"].trim() : "";
+    if (tolerancePctArg.length > 0) {
+      compareParts.push("--tolerance-pct", tolerancePctArg);
+    }
+    const tolerancePpArg = typeof args["tolerance-pp"] === "string" ? args["tolerance-pp"].trim() : "";
+    if (tolerancePpArg.length > 0) {
+      compareParts.push("--tolerance-pp", tolerancePpArg);
+    }
+    if (args["fail-on-worse"] === true) {
+      compareParts.push("--fail-on-worse");
+    }
+
+    runShellCommand(compareParts);
     return;
   }
 
