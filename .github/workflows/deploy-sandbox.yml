@@ -1,0 +1,101 @@
+name: Deploy Sandbox
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to deploy (branch, tag, or SHA)
+        required: false
+        default: main
+      services:
+        description: Services to deploy ("proxy admin slack" or "proxy admin slack telegram")
+        required: false
+        default: proxy admin slack
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-sandbox
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to sandbox host
+    runs-on: ubuntu-latest
+    environment: sandbox
+    steps:
+      - name: Validate required secrets and vars
+        env:
+          SANDBOX_SSH_HOST: ${{ secrets.SANDBOX_SSH_HOST }}
+          SANDBOX_SSH_USER: ${{ secrets.SANDBOX_SSH_USER }}
+          SANDBOX_SSH_KEY: ${{ secrets.SANDBOX_SSH_KEY }}
+          SANDBOX_APP_DIR: ${{ vars.SANDBOX_APP_DIR }}
+        run: |
+          set -euo pipefail
+          [ -n "$SANDBOX_SSH_HOST" ] || { echo "Missing secret SANDBOX_SSH_HOST"; exit 1; }
+          [ -n "$SANDBOX_SSH_USER" ] || { echo "Missing secret SANDBOX_SSH_USER"; exit 1; }
+          [ -n "$SANDBOX_SSH_KEY" ] || { echo "Missing secret SANDBOX_SSH_KEY"; exit 1; }
+          [ -n "$SANDBOX_APP_DIR" ] || { echo "Missing variable SANDBOX_APP_DIR"; exit 1; }
+
+      - name: Configure SSH key
+        env:
+          SANDBOX_SSH_KEY: ${{ secrets.SANDBOX_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SANDBOX_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+
+      - name: Add sandbox host to known_hosts
+        env:
+          SANDBOX_SSH_HOST: ${{ secrets.SANDBOX_SSH_HOST }}
+          SANDBOX_SSH_PORT: ${{ vars.SANDBOX_SSH_PORT }}
+        run: |
+          set -euo pipefail
+          PORT="${SANDBOX_SSH_PORT:-22}"
+          ssh-keyscan -p "$PORT" -H "$SANDBOX_SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy compose stack
+        env:
+          SANDBOX_SSH_HOST: ${{ secrets.SANDBOX_SSH_HOST }}
+          SANDBOX_SSH_USER: ${{ secrets.SANDBOX_SSH_USER }}
+          SANDBOX_SSH_PORT: ${{ vars.SANDBOX_SSH_PORT }}
+          SANDBOX_APP_DIR: ${{ vars.SANDBOX_APP_DIR }}
+          DEPLOY_REF: ${{ github.event.inputs.ref }}
+          DEPLOY_SERVICES: ${{ github.event.inputs.services }}
+          REPO_SLUG: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          PORT="${SANDBOX_SSH_PORT:-22}"
+          REF="${DEPLOY_REF:-main}"
+          SERVICES="${DEPLOY_SERVICES:-proxy admin slack}"
+          ssh -p "$PORT" "$SANDBOX_SSH_USER@$SANDBOX_SSH_HOST" "SANDBOX_APP_DIR='$SANDBOX_APP_DIR' DEPLOY_REF='$REF' DEPLOY_SERVICES='$SERVICES' REPO_SLUG='$REPO_SLUG' bash -s" <<'EOF'
+          set -euo pipefail
+          mkdir -p "$SANDBOX_APP_DIR"
+          cd "$SANDBOX_APP_DIR"
+
+          SERVICES="${DEPLOY_SERVICES:-proxy admin slack}"
+          case "$SERVICES" in
+            "proxy admin slack"|"proxy admin slack telegram") ;;
+            *)
+              echo "Invalid DEPLOY_SERVICES: $SERVICES"
+              echo "Allowed values: 'proxy admin slack' or 'proxy admin slack telegram'"
+              exit 1
+              ;;
+          esac
+
+          if [ ! -d .git ]; then
+            git clone "https://github.com/$REPO_SLUG.git" .
+          fi
+
+          git fetch --all --prune
+          git checkout "$DEPLOY_REF"
+
+          if git show-ref --verify --quiet "refs/remotes/origin/$DEPLOY_REF"; then
+            git reset --hard "origin/$DEPLOY_REF"
+          fi
+
+          docker compose --env-file .env.sandbox -f docker-compose.sandbox.yml up -d --build $SERVICES
+          docker image prune -f
+          EOF
