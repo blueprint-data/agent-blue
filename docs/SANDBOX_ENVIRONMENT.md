@@ -47,6 +47,18 @@ cp .env.sandbox.example .env.sandbox
 docker compose --env-file .env.sandbox -f docker-compose.sandbox.yml up -d --build
 ```
 
+## Atajo local (más rápido)
+
+Si ya tenés un `.env` operativo, podés reutilizarlo para una prueba local rápida sin crear `.env.sandbox`:
+
+```bash
+AGENT_BLUE_ENV_FILE=.env SANDBOX_DOMAIN=localhost SANDBOX_HTTP_PORT=8080 SANDBOX_HTTPS_PORT=8443 \
+docker compose --env-file .env -f docker-compose.sandbox.yml up -d --build proxy admin slack
+```
+
+Luego abrir: `https://localhost:8443/admin/`.
+Si necesitás Telegram en este modo, agregá `telegram` al comando y asegurate de tener `TELEGRAM_BOT_TOKEN`.
+
 ## Deploy desde GitHub Actions
 
 Workflow: `.github/workflows/deploy-sandbox.yml` (manual con `workflow_dispatch`).

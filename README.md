@@ -360,6 +360,16 @@ cp .env.sandbox.example .env.sandbox
 docker compose --env-file .env.sandbox -f docker-compose.sandbox.yml up -d --build
 ```
 
+Fast local shortcut (reuse your existing `.env` values):
+
+```bash
+AGENT_BLUE_ENV_FILE=.env SANDBOX_DOMAIN=localhost SANDBOX_HTTP_PORT=8080 SANDBOX_HTTPS_PORT=8443 \
+docker compose --env-file .env -f docker-compose.sandbox.yml up -d --build proxy admin slack
+```
+
+Then open `https://localhost:8443/admin/`.
+Add `telegram` to the service list only if `TELEGRAM_BOT_TOKEN` is configured.
+
 Recommended: run sandbox on a separate VPS with a dedicated subdomain (for example `sandbox.agent.blueprintdata.xyz`).
 If you must share host with production, set `SANDBOX_HTTP_PORT` / `SANDBOX_HTTPS_PORT` to non-conflicting ports and front it with an upstream proxy.
 
