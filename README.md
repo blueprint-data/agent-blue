@@ -134,11 +134,14 @@ AGENT_VERBOSE=true
 
 7. Run E2E loop scenario (for agent-loop debugging + model comparison)
 
-Runs these 3 prompts in sequence in the same conversation:
+Prompts live under `benchmark/prompts/` (default: `benchmark/prompts/e2e-default-v1.json`).
+
+Runs these 4 prompts in sequence in the same conversation:
 
 1) "How many users do we have in total?"  
 2) "How many were created last month?"  
-3) "From those, how many made a transaction since?"
+3) "From those, how many made a transaction since?"  
+4) "Can you provide a bar chart by signup month for the last 6 months and summarize the trend?"
 
 ```bash
 npm run dev -- e2e-loop --tenant acme
@@ -149,6 +152,74 @@ Run against multiple models in one go:
 ```bash
 npm run dev -- e2e-loop --tenant acme --models "openai/gpt-4o-mini,openai/gpt-4.1-mini" --runs 2
 ```
+
+Run with a specific prompts file by id:
+
+```bash
+npm run dev -- e2e-loop --tenant acme --prompts e2e-default-v1 --runs 2
+```
+
+Run with a custom prompts file path:
+
+```bash
+npm run dev -- e2e-loop --tenant acme --prompts-path benchmark/prompts/my-experiment.json --runs 2
+```
+
+Run local benchmark mode (same harness, structured JSON output by default):
+
+```bash
+npm run dev -- benchmark-local --tenant acme --runs 10
+```
+
+Custom output path:
+
+```bash
+npm run dev -- benchmark-local --tenant acme --runs 10 --output benchmark/results/acme-gpt4o.json
+```
+
+Compare two benchmark outputs locally:
+
+```bash
+npm run benchmark:compare -- --baseline benchmark/results/base.json --candidate benchmark/results/candidate.json
+```
+
+Save markdown report:
+
+```bash
+npm run benchmark:compare -- --baseline benchmark/results/base.json --candidate benchmark/results/candidate.json --report benchmark/results/compare.md
+```
+
+One-shot (run candidate benchmark + compare vs baseline in one command):
+
+```bash
+npm run benchmark:oneshot -- --tenant acme --baseline benchmark/results/base.json --runs 1 --report benchmark/results/oneshot-compare.md
+```
+
+### Example: Validating changes with Local Sandbox vs Prod
+
+To verify that your local changes (new prompts, better planning logic, or model updates) actually improve the agent before pushing to production, you can run a benchmark against your local sandbox and compare it to a production baseline.
+
+1. **Capture Production Baseline**: Run the benchmark on the `main` branch or current production environment.
+   ```bash
+   npm run dev -- benchmark-local --tenant acme --runs 5 --output benchmark/results/prod-baseline.json
+   ```
+
+2. **Start Local Sandbox**: Spin up your local environment with your new changes.
+   ```bash
+   npm run sandbox:local
+   ```
+
+3. **Run One-Shot Validation**: Execute the candidate benchmark on your local setup and compare it directly against the production baseline to generate a delta report.
+   ```bash
+   npm run benchmark:oneshot -- \
+     --tenant acme \
+     --baseline benchmark/results/prod-baseline.json \
+     --report benchmark/results/sandbox-vs-prod.md \
+     --runs 5 \
+     --fail-on-worse
+   ```
+
+4. **Check the Report**: Review `benchmark/results/sandbox-vs-prod.md`. If it looks good (or if `--fail-on-worse` didn't trigger an exit), your changes are safe to push!
 
 8. Run Slack server (Events API)
 
@@ -177,8 +248,26 @@ Then point your Slack app Event Subscriptions URL to:
   - `--profile <name>` (default: `default`)
   - `--model <provider/model>` (optional; single model override)
   - `--models <m1,m2,...>` (optional; run the scenario for multiple models)
+  - `--prompts <id>` (optional; loads `benchmark/prompts/<id>.json`, default `e2e-default-v1`)
+  - `--prompts-path <file>` (optional; overrides prompts file path)
   - `--runs <n>` (optional; default `1`)
+  - `--output <path>` (optional; writes structured benchmark JSON to disk)
   - `--verbose` (optional; also prints full debug payload per turn)
+- `benchmark-local`
+  - same args as `e2e-loop`
+  - default `--runs 5`
+  - auto-writes JSON to `benchmark/results/<run-id>.json` unless `--output` is provided
+- `benchmark-compare`
+  - `--baseline <file>` (required)
+  - `--candidate <file>` (required)
+  - `--report <file>` (optional; writes markdown report)
+  - `--tolerance-pct <n>` (optional; default `5`)
+  - `--tolerance-pp <n>` (optional; default `1`)
+  - `--fail-on-worse` (optional; exits non-zero when any metric is `worse`)
+- `benchmark-one-shot`
+  - required: `--tenant <id>`, `--baseline <file>`
+  - runs `benchmark-local` (candidate) and then `benchmark-compare` automatically
+  - optional: `--candidate-output <file>`, `--report <file>`, `--runs <n>`, `--model`/`--models`, `--prompts`/`--prompts-path`, tolerances, `--fail-on-worse`, `--verbose`
 - `chat`
   - `--tenant <id>`
   - `--profile <name>` (default: `default`)
