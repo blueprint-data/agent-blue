@@ -49,6 +49,37 @@ export async function apiRequest<T>(path: string, init: ApiRequestInit = {}): Pr
   return (await response.json()) as T;
 }
 
+export interface AgentProfile {
+  id: string;
+  tenantId: string;
+  name: string;
+  soulPrompt: string;
+  maxRowsPerQuery: number;
+  allowedDbtPathPrefixes: string[];
+  createdAt: string;
+}
+
+export interface ProfileUpdateInput {
+  soulPrompt: string;
+  maxRowsPerQuery: number;
+  allowedDbtPathPrefixes: string[];
+}
+
+export async function listProfiles(tenantId: string): Promise<AgentProfile[]> {
+  return apiRequest<AgentProfile[]>(`/api/admin/tenants/${encodeURIComponent(tenantId)}/profiles`);
+}
+
+export async function getProfile(tenantId: string, name: string): Promise<AgentProfile> {
+  return apiRequest<AgentProfile>(`/api/admin/tenants/${encodeURIComponent(tenantId)}/profiles/${encodeURIComponent(name)}`);
+}
+
+export async function updateProfile(tenantId: string, name: string, body: ProfileUpdateInput): Promise<AgentProfile> {
+  return apiRequest<AgentProfile>(`/api/admin/tenants/${encodeURIComponent(tenantId)}/profiles/${encodeURIComponent(name)}`, {
+    method: "PUT",
+    body
+  });
+}
+
 export async function uploadRequest<T>(path: string, formData: FormData): Promise<T> {
   const response = await fetch(path, {
     method: "POST",

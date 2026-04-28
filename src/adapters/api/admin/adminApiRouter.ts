@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { CronTime } from "cron";
+import { z } from "zod";
 import { NextFunction, Request, Response, Router } from "express";
 import multer from "multer";
 import type { ConversationStore } from "../../../core/interfaces.js";
@@ -182,6 +183,61 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
         defaultLlmModel: env.llmModel,
         updatedAt: updated.updatedAt
       });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.get("/tenants/:tenantId/profiles", (req: Request, res: Response) => {
+    try {
+      const tenantId = param(req, "tenantId");
+      if (denyUnlessTenantAccess(req, res, tenantId)) {
+        return;
+      }
+      res.json(store.listProfiles(tenantId));
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.get("/tenants/:tenantId/profiles/:profileName", (req: Request, res: Response) => {
+    try {
+      const tenantId = param(req, "tenantId");
+      if (denyUnlessTenantAccess(req, res, tenantId)) {
+        return;
+      }
+      const profileName = param(req, "profileName");
+      res.json(store.getOrCreateProfile(tenantId, profileName));
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.put("/tenants/:tenantId/profiles/:profileName", (req: Request, res: Response) => {
+    try {
+      const tenantId = param(req, "tenantId");
+      if (denyUnlessTenantAccess(req, res, tenantId)) {
+        return;
+      }
+      const profileName = param(req, "profileName");
+      const bodySchema = z.object({
+        soulPrompt: z.string().min(1).max(8000),
+        maxRowsPerQuery: z.number().int().min(1).max(5000),
+        allowedDbtPathPrefixes: z.array(z.string()).min(1)
+      });
+      const parsed = bodySchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: "Invalid profile body", details: parsed.error.issues });
+        return;
+      }
+      const updated = store.upsertProfile({
+        tenantId,
+        name: profileName,
+        soulPrompt: parsed.data.soulPrompt,
+        maxRowsPerQuery: parsed.data.maxRowsPerQuery,
+        allowedDbtPathPrefixes: parsed.data.allowedDbtPathPrefixes
+      });
+      res.json(updated);
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }

@@ -1,7 +1,7 @@
 import type { ReactElement, ReactNode } from "react";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, Navigate, Route, Routes } from "react-router-dom";
-import { ApiError, apiRequest, uploadRequest } from "./api";
+import { AgentProfile, ApiError, apiRequest, uploadRequest } from "./api";
 import { AppSidebar } from "./components/app-sidebar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -1135,6 +1135,9 @@ function TenantsPage({
   const [llmSettings, setLlmSettings] = useState<TenantLlmSettingsResponse | null>(null);
   const [llmModelDraft, setLlmModelDraft] = useState("");
   const [savingLlm, setSavingLlm] = useState(false);
+  const [profiles, setProfiles] = useState<AgentProfile[]>([]);
+  const [profileDrafts, setProfileDrafts] = useState<Record<string, { soulPrompt: string; maxRowsPerQuery: string; allowedDbtPathPrefixes: string }>>({});
+  const [savingProfile, setSavingProfile] = useState<string | null>(null);
   const [usageFrom, setUsageFrom] = useState("");
   const [usageTo, setUsageTo] = useState("");
   const [usageCustomSummary, setUsageCustomSummary] = useState<TenantLlmUsageSummaryUi | null>(null);
@@ -1260,13 +1263,14 @@ function TenantsPage({
     }
     void (async () => {
       try {
-        const [nextCredentials, nextWizardState, nextWarehouse, nextMemories, nextIntegrationTokens, nextLlm] = await Promise.all([
+        const [nextCredentials, nextWizardState, nextWarehouse, nextMemories, nextIntegrationTokens, nextLlm, nextProfiles] = await Promise.all([
           apiRequest<CredentialReference>(`/api/admin/credentials-ref/${selectedTenantId}`),
           apiRequest<WizardStateResponse>(`/api/admin/wizard/tenant/${selectedTenantId}/state`),
           apiRequest<WarehouseConfigResponse>(`/api/admin/tenants/${selectedTenantId}/warehouse`),
           apiRequest<TenantMemory[]>(`/api/admin/tenants/${selectedTenantId}/memories?limit=100`),
           apiRequest<TenantIntegrationTokenRecord[]>(`/api/admin/tenants/${selectedTenantId}/integration-tokens`),
-          apiRequest<TenantLlmSettingsResponse>(`/api/admin/tenants/${selectedTenantId}/llm`)
+          apiRequest<TenantLlmSettingsResponse>(`/api/admin/tenants/${selectedTenantId}/llm`),
+          apiRequest<AgentProfile[]>(`/api/admin/tenants/${selectedTenantId}/profiles`)
         ]);
         setCredentials(nextCredentials);
         setWizardState(nextWizardState);
@@ -1275,6 +1279,8 @@ function TenantsPage({
         setIntegrationTokens(nextIntegrationTokens);
         setLlmSettings(nextLlm);
         setLlmModelDraft(nextLlm.llmModel ?? "");
+        setProfiles(nextProfiles);
+        setProfileDrafts(Object.fromEntries(nextProfiles.map((p) => [p.name, { soulPrompt: p.soulPrompt, maxRowsPerQuery: String(p.maxRowsPerQuery), allowedDbtPathPrefixes: p.allowedDbtPathPrefixes.join(", ") }])));
         setUsageCustomSummary(null);
         setUsageFrom("");
         setUsageTo("");
@@ -1541,6 +1547,40 @@ function TenantsPage({
       notify({ type: "error", text: sectionError(caught) });
     } finally {
       setSavingLlm(false);
+    }
+  }
+
+  async function loadDefaultProfile() {
+    if (!selectedTenant) return;
+    try {
+      const profile = await apiRequest<AgentProfile>(`/api/admin/tenants/${selectedTenant.tenantId}/profiles/default`);
+      setProfiles([profile]);
+      setProfileDrafts({ [profile.name]: { soulPrompt: profile.soulPrompt, maxRowsPerQuery: String(profile.maxRowsPerQuery), allowedDbtPathPrefixes: profile.allowedDbtPathPrefixes.join(", ") } });
+    } catch (caught) {
+      notify({ type: "error", text: sectionError(caught) });
+    }
+  }
+
+  async function saveProfile(profileName: string) {
+    if (!selectedTenant) return;
+    const draft = profileDrafts[profileName];
+    if (!draft) return;
+    setSavingProfile(profileName);
+    try {
+      const prefixes = draft.allowedDbtPathPrefixes
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+      const updated = await apiRequest<AgentProfile>(
+        `/api/admin/tenants/${selectedTenant.tenantId}/profiles/${encodeURIComponent(profileName)}`,
+        { method: "PUT", body: { soulPrompt: draft.soulPrompt, maxRowsPerQuery: Number(draft.maxRowsPerQuery), allowedDbtPathPrefixes: prefixes.length > 0 ? prefixes : ["models"] } }
+      );
+      setProfiles((prev) => prev.map((p) => (p.name === profileName ? updated : p)));
+      notify({ type: "success", text: `Profile "${profileName}" saved.` });
+    } catch (caught) {
+      notify({ type: "error", text: sectionError(caught) });
+    } finally {
+      setSavingProfile(null);
     }
   }
 
@@ -2073,6 +2113,78 @@ function TenantsPage({
                   <DetailItem label="Reported cost (credits)" value={formatLlmCost(usageCustomSummary.totalCost)} />
                 </div>
               ) : null}
+            </AppShellCard>
+          ) : null}
+
+          {selectedTenant ? (
+            <AppShellCard
+              title="Agent profiles (base context)"
+              subtitle="Edit the system prompt and limits applied per profile. Changes take effect on the next conversation turn."
+              action={
+                profiles.length === 0 ? (
+                  <Button type="button" onClick={() => void loadDefaultProfile()}>
+                    Initialize default profile
+                  </Button>
+                ) : undefined
+              }
+            >
+              {profiles.length === 0 ? (
+                <p className="muted">No profiles found. Click "Initialize default profile" to create the default one.</p>
+              ) : (
+                profiles.map((profile) => {
+                  const draft = profileDrafts[profile.name] ?? { soulPrompt: profile.soulPrompt, maxRowsPerQuery: String(profile.maxRowsPerQuery), allowedDbtPathPrefixes: profile.allowedDbtPathPrefixes.join(", ") };
+                  const isSaving = savingProfile === profile.name;
+                  return (
+                    <div key={profile.name} style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+                      <div className="subsection-title">Profile: {profile.name}</div>
+                      <label>
+                        System prompt (soul)
+                        <Textarea
+                          rows={10}
+                          value={draft.soulPrompt}
+                          onChange={(event) => setProfileDrafts((prev) => ({ ...prev, [profile.name]: { ...draft, soulPrompt: event.target.value } }))}
+                          placeholder="Describe the agent's role, tone, and behavior for this tenant."
+                          style={{ fontFamily: "monospace", fontSize: "0.85em" }}
+                        />
+                      </label>
+                      <div className="form-grid" style={{ gridTemplateColumns: "1fr 1fr" }}>
+                        <label>
+                          Max rows per query
+                          <input
+                            type="number"
+                            min={1}
+                            max={5000}
+                            value={draft.maxRowsPerQuery}
+                            onChange={(event) => setProfileDrafts((prev) => ({ ...prev, [profile.name]: { ...draft, maxRowsPerQuery: event.target.value } }))}
+                          />
+                        </label>
+                        <label>
+                          Allowed dbt path prefixes
+                          <input
+                            value={draft.allowedDbtPathPrefixes}
+                            onChange={(event) => setProfileDrafts((prev) => ({ ...prev, [profile.name]: { ...draft, allowedDbtPathPrefixes: event.target.value } }))}
+                            placeholder="models, models/marts"
+                          />
+                          <span className="muted" style={{ fontSize: "0.78em" }}>Comma-separated path prefixes</span>
+                        </label>
+                      </div>
+                      <div className="button-row" style={{ justifyContent: "flex-end" }}>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          disabled={isSaving}
+                          onClick={() => setProfileDrafts((prev) => ({ ...prev, [profile.name]: { soulPrompt: profile.soulPrompt, maxRowsPerQuery: String(profile.maxRowsPerQuery), allowedDbtPathPrefixes: profile.allowedDbtPathPrefixes.join(", ") } }))}
+                        >
+                          Reset
+                        </Button>
+                        <Button type="button" disabled={isSaving} onClick={() => void saveProfile(profile.name)}>
+                          {isSaving ? "Saving…" : "Save profile"}
+                        </Button>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
             </AppShellCard>
           ) : null}
 

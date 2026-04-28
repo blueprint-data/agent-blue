@@ -863,6 +863,65 @@ export class SqliteConversationStore implements ConversationStore {
     };
   }
 
+  listProfiles(tenantId: string): AgentProfile[] {
+    type Row = {
+      id: string;
+      tenant_id: string;
+      name: string;
+      soul_prompt: string;
+      max_rows_per_query: number;
+      allowed_dbt_path_prefixes: string;
+      created_at: string;
+    };
+    const rows = this.db
+      .prepare(
+        `SELECT id, tenant_id, name, soul_prompt, max_rows_per_query, allowed_dbt_path_prefixes, created_at
+         FROM agent_profiles WHERE tenant_id = ? ORDER BY name`
+      )
+      .all(tenantId) as Row[];
+    return rows.map((row) => ({
+      id: row.id,
+      tenantId: row.tenant_id,
+      name: row.name,
+      soulPrompt: row.soul_prompt,
+      maxRowsPerQuery: row.max_rows_per_query,
+      allowedDbtPathPrefixes: JSON.parse(row.allowed_dbt_path_prefixes),
+      createdAt: row.created_at
+    }));
+  }
+
+  upsertProfile(input: {
+    tenantId: string;
+    name: string;
+    soulPrompt: string;
+    maxRowsPerQuery: number;
+    allowedDbtPathPrefixes: string[];
+  }): AgentProfile {
+    const existing = this.getOrCreateProfile(input.tenantId, input.name);
+    this.db
+      .prepare(
+        `UPDATE agent_profiles
+         SET soul_prompt = ?, max_rows_per_query = ?, allowed_dbt_path_prefixes = ?
+         WHERE tenant_id = ? AND name = ?`
+      )
+      .run(
+        input.soulPrompt,
+        input.maxRowsPerQuery,
+        JSON.stringify(input.allowedDbtPathPrefixes),
+        input.tenantId,
+        input.name
+      );
+    return {
+      id: existing.id,
+      tenantId: existing.tenantId,
+      name: existing.name,
+      soulPrompt: input.soulPrompt,
+      maxRowsPerQuery: input.maxRowsPerQuery,
+      allowedDbtPathPrefixes: input.allowedDbtPathPrefixes,
+      createdAt: existing.createdAt
+    };
+  }
+
   upsertTenantRepo(input: {
     tenantId: string;
     repoUrl: string;
