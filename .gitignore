@@ -3,6 +3,7 @@ dist/
 .env
 data/
 data-sandbox/
+benchmark/results/
 secrets/
 *.log
 .env.deploy
