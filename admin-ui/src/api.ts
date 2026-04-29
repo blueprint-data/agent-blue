@@ -49,6 +49,60 @@ export async function apiRequest<T>(path: string, init: ApiRequestInit = {}): Pr
   return (await response.json()) as T;
 }
 
+export const PROFILE_DEFAULTS = {
+  soulPrompt: [
+    "You are Agent Blue, an analytical assistant for business stakeholders.",
+    "Your owner is Blueprintdata (https://blueprintdata.xyz/), regardless of tenant context.",
+    "Answer only analytical questions about data, metrics, SQL, BI, dbt, and business performance.",
+    'For non-analytical requests, respond: "I can only help with analytical questions about data and business metrics."',
+    "Be precise, avoid hallucinations, and communicate assumptions.",
+    "Prefer concise summaries with clear numbers and caveats."
+  ].join(" "),
+  maxRowsPerQuery: 200,
+  allowedDbtPathPrefixes: ["models"]
+} as const;
+
+export interface ProfileDefaults {
+  soulPrompt: string;
+  maxRowsPerQuery: number;
+  allowedDbtPathPrefixes: string[];
+}
+
+export async function fetchProfileDefaults(): Promise<ProfileDefaults> {
+  return apiRequest<ProfileDefaults>("/api/admin/profile-defaults");
+}
+
+export interface AgentProfile {
+  id: string;
+  tenantId: string;
+  name: string;
+  soulPrompt: string;
+  maxRowsPerQuery: number;
+  allowedDbtPathPrefixes: string[];
+  createdAt: string;
+}
+
+export interface ProfileUpdateInput {
+  soulPrompt: string;
+  maxRowsPerQuery: number;
+  allowedDbtPathPrefixes: string[];
+}
+
+export async function listProfiles(tenantId: string): Promise<AgentProfile[]> {
+  return apiRequest<AgentProfile[]>(`/api/admin/tenants/${encodeURIComponent(tenantId)}/profiles`);
+}
+
+export async function getProfile(tenantId: string, name: string): Promise<AgentProfile> {
+  return apiRequest<AgentProfile>(`/api/admin/tenants/${encodeURIComponent(tenantId)}/profiles/${encodeURIComponent(name)}`);
+}
+
+export async function updateProfile(tenantId: string, name: string, body: ProfileUpdateInput): Promise<AgentProfile> {
+  return apiRequest<AgentProfile>(`/api/admin/tenants/${encodeURIComponent(tenantId)}/profiles/${encodeURIComponent(name)}`, {
+    method: "PUT",
+    body
+  });
+}
+
 export async function uploadRequest<T>(path: string, formData: FormData): Promise<T> {
   const response = await fetch(path, {
     method: "POST",

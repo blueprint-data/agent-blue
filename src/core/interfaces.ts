@@ -164,6 +164,14 @@ export interface ConversationStore {
   createTenantMemory(input: { tenantId: string; content: string; source: TenantMemorySource }): TenantMemory;
   deleteTenantMemory(memoryId: string): void;
   getOrCreateProfile(tenantId: string, profileName: string): AgentProfile;
+  listProfiles(tenantId: string): AgentProfile[];
+  upsertProfile(input: {
+    tenantId: string;
+    name: string;
+    soulPrompt: string;
+    maxRowsPerQuery: number;
+    allowedDbtPathPrefixes: string[];
+  }): AgentProfile;
   upsertTenantRepo(input: {
     tenantId: string;
     repoUrl: string;
