@@ -1,7 +1,7 @@
 import type { ReactElement, ReactNode } from "react";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, Navigate, Route, Routes } from "react-router-dom";
-import { AgentProfile, ApiError, apiRequest, uploadRequest } from "./api";
+import { AgentProfile, ApiError, PROFILE_DEFAULTS, apiRequest, uploadRequest } from "./api";
 import { AppSidebar } from "./components/app-sidebar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -2173,7 +2173,7 @@ function TenantsPage({
                           type="button"
                           variant="outline"
                           disabled={isSaving}
-                          onClick={() => setProfileDrafts((prev) => ({ ...prev, [profile.name]: { soulPrompt: profile.soulPrompt, maxRowsPerQuery: String(profile.maxRowsPerQuery), allowedDbtPathPrefixes: profile.allowedDbtPathPrefixes.join(", ") } }))}
+                          onClick={() => setProfileDrafts((prev) => ({ ...prev, [profile.name]: { soulPrompt: PROFILE_DEFAULTS.soulPrompt, maxRowsPerQuery: String(PROFILE_DEFAULTS.maxRowsPerQuery), allowedDbtPathPrefixes: PROFILE_DEFAULTS.allowedDbtPathPrefixes.join(", ") } }))}
                         >
                           Reset
                         </Button>

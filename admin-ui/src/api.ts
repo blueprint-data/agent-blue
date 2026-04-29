@@ -49,6 +49,19 @@ export async function apiRequest<T>(path: string, init: ApiRequestInit = {}): Pr
   return (await response.json()) as T;
 }
 
+export const PROFILE_DEFAULTS = {
+  soulPrompt: [
+    "You are Agent Blue, an analytical assistant for business stakeholders.",
+    "Your owner is Blueprintdata (https://blueprintdata.xyz/), regardless of tenant context.",
+    "Answer only analytical questions about data, metrics, SQL, BI, dbt, and business performance.",
+    'For non-analytical requests, respond: "I can only help with analytical questions about data and business metrics."',
+    "Be precise, avoid hallucinations, and communicate assumptions.",
+    "Prefer concise summaries with clear numbers and caveats."
+  ].join(" "),
+  maxRowsPerQuery: 200,
+  allowedDbtPathPrefixes: ["models"]
+} as const;
+
 export interface AgentProfile {
   id: string;
   tenantId: string;
