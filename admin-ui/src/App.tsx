@@ -1,7 +1,7 @@
 import type { ReactElement, ReactNode } from "react";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, Navigate, Route, Routes } from "react-router-dom";
-import { AgentProfile, ApiError, PROFILE_DEFAULTS, apiRequest, uploadRequest } from "./api";
+import { AgentProfile, ApiError, PROFILE_DEFAULTS, ProfileDefaults, fetchProfileDefaults, apiRequest, uploadRequest } from "./api";
 import { AppSidebar } from "./components/app-sidebar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -1138,6 +1138,7 @@ function TenantsPage({
   const [profiles, setProfiles] = useState<AgentProfile[]>([]);
   const [profileDrafts, setProfileDrafts] = useState<Record<string, { soulPrompt: string; maxRowsPerQuery: string; allowedDbtPathPrefixes: string }>>({});
   const [savingProfile, setSavingProfile] = useState<string | null>(null);
+  const [profileDefaults, setProfileDefaults] = useState<ProfileDefaults>({ ...PROFILE_DEFAULTS, allowedDbtPathPrefixes: [...PROFILE_DEFAULTS.allowedDbtPathPrefixes] });
   const [usageFrom, setUsageFrom] = useState("");
   const [usageTo, setUsageTo] = useState("");
   const [usageCustomSummary, setUsageCustomSummary] = useState<TenantLlmUsageSummaryUi | null>(null);
@@ -1263,14 +1264,15 @@ function TenantsPage({
     }
     void (async () => {
       try {
-        const [nextCredentials, nextWizardState, nextWarehouse, nextMemories, nextIntegrationTokens, nextLlm, nextProfiles] = await Promise.all([
+        const [nextCredentials, nextWizardState, nextWarehouse, nextMemories, nextIntegrationTokens, nextLlm, nextProfiles, nextDefaults] = await Promise.all([
           apiRequest<CredentialReference>(`/api/admin/credentials-ref/${selectedTenantId}`),
           apiRequest<WizardStateResponse>(`/api/admin/wizard/tenant/${selectedTenantId}/state`),
           apiRequest<WarehouseConfigResponse>(`/api/admin/tenants/${selectedTenantId}/warehouse`),
           apiRequest<TenantMemory[]>(`/api/admin/tenants/${selectedTenantId}/memories?limit=100`),
           apiRequest<TenantIntegrationTokenRecord[]>(`/api/admin/tenants/${selectedTenantId}/integration-tokens`),
           apiRequest<TenantLlmSettingsResponse>(`/api/admin/tenants/${selectedTenantId}/llm`),
-          apiRequest<AgentProfile[]>(`/api/admin/tenants/${selectedTenantId}/profiles`)
+          apiRequest<AgentProfile[]>(`/api/admin/tenants/${selectedTenantId}/profiles`),
+          fetchProfileDefaults().catch(() => ({ ...PROFILE_DEFAULTS, allowedDbtPathPrefixes: [...PROFILE_DEFAULTS.allowedDbtPathPrefixes] }))
         ]);
         setCredentials(nextCredentials);
         setWizardState(nextWizardState);
@@ -1281,6 +1283,7 @@ function TenantsPage({
         setLlmModelDraft(nextLlm.llmModel ?? "");
         setProfiles(nextProfiles);
         setProfileDrafts(Object.fromEntries(nextProfiles.map((p) => [p.name, { soulPrompt: p.soulPrompt, maxRowsPerQuery: String(p.maxRowsPerQuery), allowedDbtPathPrefixes: p.allowedDbtPathPrefixes.join(", ") }])));
+        setProfileDefaults(nextDefaults);
         setUsageCustomSummary(null);
         setUsageFrom("");
         setUsageTo("");
@@ -2173,7 +2176,7 @@ function TenantsPage({
                           type="button"
                           variant="outline"
                           disabled={isSaving}
-                          onClick={() => setProfileDrafts((prev) => ({ ...prev, [profile.name]: { soulPrompt: PROFILE_DEFAULTS.soulPrompt, maxRowsPerQuery: String(PROFILE_DEFAULTS.maxRowsPerQuery), allowedDbtPathPrefixes: PROFILE_DEFAULTS.allowedDbtPathPrefixes.join(", ") } }))}
+                          onClick={() => setProfileDrafts((prev) => ({ ...prev, [profile.name]: { soulPrompt: profileDefaults.soulPrompt, maxRowsPerQuery: String(profileDefaults.maxRowsPerQuery), allowedDbtPathPrefixes: profileDefaults.allowedDbtPathPrefixes.join(", ") } }))}
                         >
                           Reset
                         </Button>

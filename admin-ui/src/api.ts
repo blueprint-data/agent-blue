@@ -62,6 +62,16 @@ export const PROFILE_DEFAULTS = {
   allowedDbtPathPrefixes: ["models"]
 } as const;
 
+export interface ProfileDefaults {
+  soulPrompt: string;
+  maxRowsPerQuery: number;
+  allowedDbtPathPrefixes: string[];
+}
+
+export async function fetchProfileDefaults(): Promise<ProfileDefaults> {
+  return apiRequest<ProfileDefaults>("/api/admin/profile-defaults");
+}
+
 export interface AgentProfile {
   id: string;
   tenantId: string;

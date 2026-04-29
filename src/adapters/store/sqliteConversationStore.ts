@@ -35,7 +35,7 @@ import {
 import { createId } from "../../utils/id.js";
 import { normalizeDomainPart } from "../../config/adminAuthPolicy.js";
 
-const DEFAULT_SOUL_PROMPT = [
+export const DEFAULT_SOUL_PROMPT = [
   "You are Agent Blue, an analytical assistant for business stakeholders.",
   "Your owner is Blueprintdata (https://blueprintdata.xyz/), regardless of tenant context.",
   "Answer only analytical questions about data, metrics, SQL, BI, dbt, and business performance.",

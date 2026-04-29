@@ -22,6 +22,7 @@ import { GitDbtRepositoryService } from "../../dbt/dbtRepoService.js";
 import { env } from "../../../config/env.js";
 import type { AdminRequestAuth } from "./adminAccess.js";
 import { adminAuthFromRequest, denyUnlessSuperadmin, denyUnlessTenantAccess } from "./adminApiAuth.js";
+import { DEFAULT_SOUL_PROMPT } from "../../store/sqliteConversationStore.js";
 import { generateRepoRefreshIntegrationToken } from "./integrationTokenAuth.js";
 import { runTenantRepoRefresh, TenantRepoRefreshInProgressError } from "./repoRefresh.js";
 
@@ -84,6 +85,14 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
     }
     return null;
   }
+
+  router.get("/profile-defaults", (_req: Request, res: Response) => {
+    res.json({
+      soulPrompt: DEFAULT_SOUL_PROMPT,
+      maxRowsPerQuery: 200,
+      allowedDbtPathPrefixes: ["models"]
+    });
+  });
 
   router.get("/tenants", (req: Request, res: Response) => {
     try {
