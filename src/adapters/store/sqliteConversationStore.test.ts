@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
-import { SqliteConversationStore } from "./sqliteConversationStore.js";
+import { SqliteConversationStore, DEFAULT_SOUL_PROMPT } from "./sqliteConversationStore.js";
 
 const tempPaths: string[] = [];
 
@@ -440,6 +440,78 @@ describe("SqliteConversationStore integration token auth lookups", () => {
         revokedAt: expect.any(String)
       })
     );
+  });
+});
+
+describe("SqliteConversationStore agent profiles", () => {
+  it("creates a profile with defaults on first access", () => {
+    const store = createStore();
+    const profile = store.getOrCreateProfile("acme", "default");
+
+    expect(profile.tenantId).toBe("acme");
+    expect(profile.name).toBe("default");
+    expect(profile.soulPrompt).toBe(DEFAULT_SOUL_PROMPT);
+    expect(profile.maxRowsPerQuery).toBe(200);
+    expect(profile.allowedDbtPathPrefixes).toEqual(["models"]);
+    expect(profile.id).toBeTruthy();
+    expect(profile.createdAt).toBeTruthy();
+  });
+
+  it("returns the same profile on repeated access without creating duplicates", () => {
+    const store = createStore();
+    const first = store.getOrCreateProfile("acme", "default");
+    const second = store.getOrCreateProfile("acme", "default");
+
+    expect(second.id).toBe(first.id);
+    expect(store.listProfiles("acme")).toHaveLength(1);
+  });
+
+  it("lists only profiles belonging to the requested tenant", () => {
+    const store = createStore();
+    store.getOrCreateProfile("acme", "default");
+    store.getOrCreateProfile("other", "default");
+
+    expect(store.listProfiles("acme")).toHaveLength(1);
+    expect(store.listProfiles("acme")[0]?.tenantId).toBe("acme");
+    expect(store.listProfiles("other")).toHaveLength(1);
+  });
+
+  it("upserts soul prompt, maxRowsPerQuery and allowedDbtPathPrefixes", () => {
+    const store = createStore();
+    store.getOrCreateProfile("acme", "default");
+
+    const updated = store.upsertProfile({
+      tenantId: "acme",
+      name: "default",
+      soulPrompt: "Custom prompt.",
+      maxRowsPerQuery: 50,
+      allowedDbtPathPrefixes: ["models/marts", "models/staging"]
+    });
+
+    expect(updated.soulPrompt).toBe("Custom prompt.");
+    expect(updated.maxRowsPerQuery).toBe(50);
+    expect(updated.allowedDbtPathPrefixes).toEqual(["models/marts", "models/staging"]);
+
+    const reloaded = store.getOrCreateProfile("acme", "default");
+    expect(reloaded.soulPrompt).toBe("Custom prompt.");
+    expect(reloaded.maxRowsPerQuery).toBe(50);
+  });
+
+  it("does not affect other tenants when upserting a profile", () => {
+    const store = createStore();
+    store.getOrCreateProfile("acme", "default");
+    store.getOrCreateProfile("other", "default");
+
+    store.upsertProfile({
+      tenantId: "acme",
+      name: "default",
+      soulPrompt: "Acme-only prompt.",
+      maxRowsPerQuery: 10,
+      allowedDbtPathPrefixes: ["models"]
+    });
+
+    const otherProfile = store.getOrCreateProfile("other", "default");
+    expect(otherProfile.soulPrompt).toBe(DEFAULT_SOUL_PROMPT);
   });
 });
 
