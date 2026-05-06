@@ -25,7 +25,7 @@ services:
       APP_DATA_DIR: /app/data
       ADMIN_PORT: "3100"
     volumes:
-      - ./data:/app/data
+      - /root/agent-blue/data:/app/data
 
   slack:
     image: agent-blue:local
@@ -37,7 +37,7 @@ services:
       APP_DATA_DIR: /app/data
       SLACK_PORT: "3000"
     volumes:
-      - ./data:/app/data
+      - /root/agent-blue/data:/app/data
 
   telegram:
     image: agent-blue:local
@@ -48,7 +48,7 @@ services:
     environment:
       APP_DATA_DIR: /app/data
     volumes:
-      - ./data:/app/data
+      - /root/agent-blue/data:/app/data
 
   # ── Continuous SQLite backup via Litestream ──────────────────────────
   litestream:
@@ -58,7 +58,7 @@ services:
     env_file:
       - ${AGENT_BLUE_ENV_FILE:-.env.deploy}
     volumes:
-      - ./data:/app/data
+      - /root/agent-blue/data:/app/data
       - ./litestream.yml:/etc/litestream.yml:ro
       - ./entrypoint-litestream.sh:/app/entrypoint-litestream.sh:ro
 
