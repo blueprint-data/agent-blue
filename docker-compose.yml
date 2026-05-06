@@ -50,6 +50,18 @@ services:
     volumes:
       - ./data:/app/data
 
+  # ── Continuous SQLite backup via Litestream ──────────────────────────
+  litestream:
+    image: litestream/litestream:latest
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/app/entrypoint-litestream.sh"]
+    env_file:
+      - ${AGENT_BLUE_ENV_FILE:-.env.deploy}
+    volumes:
+      - ./data:/app/data
+      - ./litestream.yml:/etc/litestream.yml:ro
+      - ./entrypoint-litestream.sh:/app/entrypoint-litestream.sh:ro
+
 volumes:
   caddy_data:
   caddy_config:

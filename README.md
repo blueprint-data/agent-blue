@@ -433,6 +433,17 @@ Post-deploy verification checklist:
 4. Confirm the VPS `data/` directory now contains `agent.db`, tenant keys, and repo clones as you use the app.
 5. Trigger a Slack event and confirm the request reaches `/slack/events`, the response shows up in Slack, and the conversation appears in the Admin UI.
 
+### Backup & Restore (Litestream → R2/S3)
+
+The SQLite database (`data/agent.db`) is continuously replicated to an S3-compatible bucket (e.g. Cloudflare R2) using [Litestream](https://litestream.io/).
+
+**Setup:**
+
+1. Create an R2 bucket and generate API credentials.
+2. Add credentials to your env file:
+   `LITESTREAM_ACCESS_KEY_ID`, `LITESTREAM_SECRET_ACCESS_KEY`, `LITESTREAM_REPLICA_BUCKET`, `LITESTREAM_REPLICA_ENDPOINT`.
+3. Start the stack: `docker compose up -d`.
+
 ### Sandbox / lower environment
 
 For a dedicated lower environment, use the sandbox stack files included in this repo:
