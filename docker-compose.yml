@@ -20,35 +20,35 @@ services:
     restart: unless-stopped
     command: ["npm", "run", "start:admin"]
     env_file:
-      - ${AGENT_BLUE_ENV_FILE:-.env.deploy}
+      - ${AGENT_BLUE_ENV_FILE:-.env}
     environment:
       APP_DATA_DIR: /app/data
       ADMIN_PORT: "3100"
     volumes:
-      - /root/agent-blue/data:/app/data
+      - ./data:/app/data
 
   slack:
     image: agent-blue:local
     restart: unless-stopped
     command: ["npm", "run", "start:slack"]
     env_file:
-      - ${AGENT_BLUE_ENV_FILE:-.env.deploy}
+      - ${AGENT_BLUE_ENV_FILE:-.env}
     environment:
       APP_DATA_DIR: /app/data
       SLACK_PORT: "3000"
     volumes:
-      - /root/agent-blue/data:/app/data
+      - ./data:/app/data
 
   telegram:
     image: agent-blue:local
     restart: unless-stopped
     command: ["npm", "run", "start:telegram"]
     env_file:
-      - ${AGENT_BLUE_ENV_FILE:-.env.deploy}
+      - ${AGENT_BLUE_ENV_FILE:-.env}
     environment:
       APP_DATA_DIR: /app/data
     volumes:
-      - /root/agent-blue/data:/app/data
+      - ./data:/app/data
 
   # ── Continuous SQLite backup via Litestream ──────────────────────────
   litestream:
@@ -56,9 +56,9 @@ services:
     restart: unless-stopped
     entrypoint: ["/bin/sh", "/app/entrypoint-litestream.sh"]
     env_file:
-      - ${AGENT_BLUE_ENV_FILE:-.env.deploy}
+      - ${AGENT_BLUE_ENV_FILE:-.env}
     volumes:
-      - /root/agent-blue/data:/app/data
+      - ./data:/app/data
       - ./litestream.yml:/etc/litestream.yml:ro
       - ./entrypoint-litestream.sh:/app/entrypoint-litestream.sh:ro
 
