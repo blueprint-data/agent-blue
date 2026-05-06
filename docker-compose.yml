@@ -20,7 +20,7 @@ services:
     restart: unless-stopped
     command: ["npm", "run", "start:admin"]
     env_file:
-      - ${AGENT_BLUE_ENV_FILE:-.env}
+      - ${AGENT_BLUE_ENV_FILE:-.env.deploy}
     environment:
       APP_DATA_DIR: /app/data
       ADMIN_PORT: "3100"
@@ -32,7 +32,7 @@ services:
     restart: unless-stopped
     command: ["npm", "run", "start:slack"]
     env_file:
-      - ${AGENT_BLUE_ENV_FILE:-.env}
+      - ${AGENT_BLUE_ENV_FILE:-.env.deploy}
     environment:
       APP_DATA_DIR: /app/data
       SLACK_PORT: "3000"
@@ -44,7 +44,7 @@ services:
     restart: unless-stopped
     command: ["npm", "run", "start:telegram"]
     env_file:
-      - ${AGENT_BLUE_ENV_FILE:-.env}
+      - ${AGENT_BLUE_ENV_FILE:-.env.deploy}
     environment:
       APP_DATA_DIR: /app/data
     volumes:
@@ -54,9 +54,9 @@ services:
   litestream:
     image: litestream/litestream:latest
     restart: unless-stopped
-    entrypoint: ["/bin/sh", "/app/entrypoint-litestream.sh"]
+    command: replicate -config /etc/litestream.yml
     env_file:
-      - ${AGENT_BLUE_ENV_FILE:-.env}
+      - ${AGENT_BLUE_ENV_FILE:-.env.deploy}
     volumes:
       - ./data:/app/data
       - ./litestream.yml:/etc/litestream.yml:ro
