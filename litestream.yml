@@ -1,12 +1,12 @@
 # Litestream configuration for continuous SQLite replication to S3-compatible storage.
 dbs:
   - path: /app/data/agent.db
-    replicas:
-      - type: s3
-        bucket: ${LITESTREAM_REPLICA_BUCKET}
-        path: agent-blue/agent.db
-        endpoint: ${LITESTREAM_REPLICA_ENDPOINT}
-        region: auto
-        sync-interval: 1s
-        retention: 720h          # 30 days
-        retention-check-interval: 1h
+    replica:
+      type: s3
+      bucket: ${LITESTREAM_REPLICA_BUCKET}
+      path: agent-blue/agent.db
+      endpoint: ${LITESTREAM_REPLICA_ENDPOINT}
+      region: auto
+      sync-interval: 1s
+      retention: 720h          # 30 days
+      retention-check-interval: 1h
