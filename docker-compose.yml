@@ -18,7 +18,15 @@ services:
       context: .
     image: agent-blue:local
     restart: unless-stopped
-    command: ["npm", "run", "start:admin"]
+    command:
+      - /bin/sh
+      - -c
+      - >
+        while [ ! -f /app/data/.litestream-ready ]; do
+          echo "[startup] waiting for Litestream restore gate...";
+          sleep 1;
+        done;
+        npm run start:admin
     env_file:
       - ${AGENT_BLUE_ENV_FILE:-.env.deploy}
     environment:
@@ -26,11 +34,22 @@ services:
       ADMIN_PORT: "3100"
     volumes:
       - ./data:/app/data
+    depends_on:
+      litestream:
+        condition: service_started
 
   slack:
     image: agent-blue:local
     restart: unless-stopped
-    command: ["npm", "run", "start:slack"]
+    command:
+      - /bin/sh
+      - -c
+      - >
+        while [ ! -f /app/data/.litestream-ready ]; do
+          echo "[startup] waiting for Litestream restore gate...";
+          sleep 1;
+        done;
+        npm run start:slack
     env_file:
       - ${AGENT_BLUE_ENV_FILE:-.env.deploy}
     environment:
@@ -38,17 +57,43 @@ services:
       SLACK_PORT: "3000"
     volumes:
       - ./data:/app/data
+    depends_on:
+      litestream:
+        condition: service_started
 
   telegram:
     image: agent-blue:local
     restart: unless-stopped
-    command: ["npm", "run", "start:telegram"]
+    command:
+      - /bin/sh
+      - -c
+      - >
+        while [ ! -f /app/data/.litestream-ready ]; do
+          echo "[startup] waiting for Litestream restore gate...";
+          sleep 1;
+        done;
+        npm run start:telegram
     env_file:
       - ${AGENT_BLUE_ENV_FILE:-.env.deploy}
     environment:
       APP_DATA_DIR: /app/data
     volumes:
       - ./data:/app/data
+    depends_on:
+      litestream:
+        condition: service_started
+
+  # ── Continuous SQLite backup via Litestream ──────────────────────────
+  litestream:
+    image: litestream/litestream:0.5.9
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/app/entrypoint-litestream.sh"]
+    env_file:
+      - ${AGENT_BLUE_ENV_FILE:-.env.deploy}
+    volumes:
+      - ./data:/app/data
+      - ./litestream.yml:/etc/litestream.yml:ro
+      - ./entrypoint-litestream.sh:/app/entrypoint-litestream.sh:ro
 
 volumes:
   caddy_data:

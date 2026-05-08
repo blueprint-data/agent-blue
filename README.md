@@ -394,6 +394,12 @@ docker compose build
 docker compose up -d
 ```
 
+If you manage this VPS from your local machine, prefer the automated script:
+
+```bash
+npm run deploy
+```
+
 Open the home page at:
 
 `https://agent.blueprintdata.xyz/`
@@ -432,6 +438,49 @@ Post-deploy verification checklist:
 3. Create or load a tenant, then verify repo refresh and warehouse test succeed.
 4. Confirm the VPS `data/` directory now contains `agent.db`, tenant keys, and repo clones as you use the app.
 5. Trigger a Slack event and confirm the request reaches `/slack/events`, the response shows up in Slack, and the conversation appears in the Admin UI.
+
+### Backup & Restore (Litestream → R2/S3)
+
+The SQLite database (`data/agent.db`) is continuously replicated to an S3-compatible bucket (e.g. Cloudflare R2) using [Litestream](https://litestream.io/).
+
+**Setup:**
+
+1. Create an R2 bucket and generate API credentials.
+2. Add credentials to your production env file (`.env.deploy` on the VPS):
+   `LITESTREAM_ACCESS_KEY_ID`, `LITESTREAM_SECRET_ACCESS_KEY`, `LITESTREAM_REPLICA_BUCKET`, `LITESTREAM_REPLICA_ENDPOINT`.
+3. Deploy using the project deploy script (recommended): `npm run deploy`.
+   - This script SSHs to the Hetzner VPS, runs `git pull`, and executes `docker compose up -d --build`.
+4. Verify Litestream is healthy on the VPS:
+
+```bash
+ssh -i ~/.ssh/DO root@5.78.178.31
+cd /root/agent-blue
+docker compose logs --tail 80 litestream
+```
+
+**Operational behavior:**
+
+- On startup, the Litestream container runs a restore step **before** replication.
+- App containers (`admin`, `slack`, `telegram`) wait for a Litestream ready gate file (`/app/data/.litestream-ready`) before launching.
+- If `data/agent.db` already exists, restore is skipped and replication starts immediately.
+- If `data/agent.db` does not exist, Litestream attempts restore with `-if-replica-exists`.
+- On first boot with no backups yet, startup still continues safely and replication begins.
+- Once running, Litestream continuously ships new SQLite changes to the configured S3/R2 replica.
+
+**Minimal restore drill (operator):**
+
+Use this to restore into a separate file for verification without touching the live DB:
+
+```bash
+docker compose --env-file .env.deploy run --rm --entrypoint litestream litestream \
+  restore -config /etc/litestream.yml \
+  -o /app/data/agent.restore-drill-$(date +%Y%m%d-%H%M%S).db \
+  /app/data/agent.db
+```
+
+Using a timestamped output file avoids `cannot restore, output path already exists` errors.
+
+Note: `/app/data` is the **container path**. In production on Hetzner, it maps to the host bind mount `./data` (for example `/root/agent-blue/data` if the repo lives at `/root/agent-blue`).
 
 ### Sandbox / lower environment
 

@@ -53,6 +53,7 @@ export class SqliteConversationStore implements ConversationStore {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     this.db = new Database(dbPath);
     this.db.pragma("journal_mode = WAL");
+    this.db.pragma("busy_timeout = 5000");
   }
 
   init(): void {
