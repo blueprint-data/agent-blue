@@ -10,6 +10,7 @@ import {
   ConversationOrigin,
   ConversationSource,
   DbtModelInfo,
+  MessageFeedback,
   QueryResult,
   ScheduleChannelType,
   TenantMemory,
@@ -344,6 +345,15 @@ export interface ConversationStore {
     tenantId: string,
     opts?: { limit?: number; fromIso?: string; toIso?: string }
   ): LlmUsageEventRow[];
+
+  saveMessageFeedback(input: {
+    tenantId: string;
+    conversationId: string;
+    channel: string;
+    messageTs: string;
+    userId: string | null;
+    reaction: "thumbsup" | "thumbsdown";
+  }): MessageFeedback;
 }
 
 export interface AdminGuardrails {

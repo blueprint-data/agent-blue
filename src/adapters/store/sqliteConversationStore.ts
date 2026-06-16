@@ -27,6 +27,7 @@ import {
   ConversationMessage,
   ConversationOrigin,
   ConversationSource,
+  MessageFeedback,
   ScheduleChannelType,
   TenantMemory,
   TenantMemorySource,
@@ -313,6 +314,17 @@ export class SqliteConversationStore implements ConversationStore {
         call_index INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_llm_usage_tenant_created ON llm_usage_events(tenant_id, created_at);
+
+      CREATE TABLE IF NOT EXISTS message_feedback (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        channel TEXT NOT NULL,
+        message_ts TEXT NOT NULL,
+        user_id TEXT,
+        reaction TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
     `);
     this.migrateAdminSessionsColumns();
     this.migrateTenantMemoriesTable();
@@ -2345,5 +2357,33 @@ export class SqliteConversationStore implements ConversationStore {
   deleteExpiredAdminSessions(nowIso = new Date().toISOString()): number {
     const result = this.db.prepare("DELETE FROM admin_sessions WHERE expires_at <= ?").run(nowIso);
     return result.changes;
+  }
+
+  saveMessageFeedback(input: {
+    tenantId: string;
+    conversationId: string;
+    channel: string;
+    messageTs: string;
+    userId: string | null;
+    reaction: "thumbsup" | "thumbsdown";
+  }): MessageFeedback {
+    const id = createId("feedback");
+    const createdAt = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO message_feedback (id, tenant_id, conversation_id, channel, message_ts, user_id, reaction, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(id, input.tenantId, input.conversationId, input.channel, input.messageTs, input.userId, input.reaction, createdAt);
+    return {
+      id,
+      tenantId: input.tenantId,
+      conversationId: input.conversationId,
+      channel: input.channel,
+      messageTs: input.messageTs,
+      userId: input.userId,
+      reaction: input.reaction,
+      createdAt
+    };
   }
 }
