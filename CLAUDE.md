@@ -99,13 +99,51 @@ https://<ngrok-url>/slack/events
 
 Use the **global endpoint** (`/slack/events`) for local testing — the per-tenant endpoint (`/slack/events/tenants/:tenantId`) requires Slack credentials to be seeded in the local SQLite DB, which is not set up locally.
 
-### Slack app scopes required
+### Slack app configuration
 
-| Scope | Purpose |
+Managed at **https://api.slack.com/apps** → select the app → configure the sections below.
+
+#### OAuth & Permissions — Bot Token Scopes
+
+| Scope | Required? | Purpose |
+|-------|-----------|---------|
+| `app_mentions:read` | Yes | Receive @mention events |
+| `chat:write` | Yes | Post messages |
+| `reactions:write` | Yes | Bot seeds 👍👎 on its own messages |
+| `reactions:read` | Yes | Receive `reaction_added` events |
+| `channels:history` | Recommended | Read public channel thread context |
+| `groups:history` | Recommended | Read private channel thread context |
+| `im:history` | Recommended | Read DM thread context |
+
+After adding or removing scopes, Slack requires **reinstalling the app** to the workspace. The button appears at the top of the OAuth & Permissions page.
+
+#### Event Subscriptions
+
+Enable **Event Subscriptions** and set the Request URL:
+
+| Environment | Request URL |
+|-------------|-------------|
+| Production | `https://agent.blueprintdata.xyz/slack/events` |
+| Local (ngrok) | `https://<ngrok-url>/slack/events` |
+
+Always use the **global endpoint** (`/slack/events`). The per-tenant endpoint (`/slack/events/tenants/:tenantId`) requires Slack credentials seeded in the local SQLite DB.
+
+Under **Subscribe to bot events**, add:
+
+| Event | Purpose |
 |-------|---------|
-| `reactions:write` | Bot seeds 👍👎 on its own messages |
-| `reactions:read` + `reaction_added` event | Capture user feedback |
-| `channels:history` / `groups:history` | Read thread context (optional — bot degrades gracefully without it) |
+| `app_mention` | Trigger agent on @mention |
+| `reaction_added` | Capture 👍👎 user feedback |
+
+After changing events, save and verify the URL — Slack sends a `challenge` request to validate.
+
+#### What breaks without each scope
+
+| Missing | Effect |
+|---------|--------|
+| `reactions:write` | Bot can't seed 👍👎 — warning logged, no crash, feedback capture impossible |
+| `reactions:read` / `reaction_added` event | Events never arrive — `message_feedback` table stays empty silently |
+| `channels:history` | Bot can't read thread context — still responds but without conversation history |
 
 ### Verifying message_feedback
 
