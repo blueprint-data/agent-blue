@@ -262,6 +262,139 @@ async function buildChartPngBuffer(config: Record<string, unknown>): Promise<Buf
   return renderer.renderToBuffer(config as unknown as ChartConfiguration);
 }
 
+// ─── Feedback Link Map ────────────────────────────────────────────────────────
+//
+// Deploy notes — required Slack app scopes for reaction feedback:
+//   Bot Token Scopes: reactions:write  (add 👍/👎 reactions to bot messages)
+//                     reactions:read   (receive reaction_added events)
+//   Event Subscriptions: reaction_added  (subscribe in the app manifest)
+//
+// Without reactions:write: seed attempts are caught and logged as warnings — no crash.
+// Without reactions:read or reaction_added subscription: no events arrive, zero feedback rows — graceful degradation.
+//
+
+const FEEDBACK_LINK_MAP_MAX = 1000;
+
+/** Module-level bounded FIFO map: "${channelId}:${messageTs}" -> { tenantId, conversationId } */
+export const feedbackLinkMap = new Map<string, { tenantId: string; conversationId: string }>();
+
+/** Record that the bot posted a message and associate it with a tenant conversation for later feedback. */
+export function rememberAnswerTurn(
+  channelId: string,
+  messageTs: string,
+  tenantId: string,
+  conversationId: string
+): void {
+  const key = `${channelId}:${messageTs}`;
+  if (feedbackLinkMap.size >= FEEDBACK_LINK_MAP_MAX) {
+    const oldest = feedbackLinkMap.keys().next().value;
+    if (oldest !== undefined) {
+      feedbackLinkMap.delete(oldest);
+    }
+  }
+  feedbackLinkMap.set(key, { tenantId, conversationId });
+}
+
+/** Per-tenant cache for bot user IDs resolved via auth.test(). null = resolved but no user_id returned. */
+const perTenantBotUserIdCache = new Map<string, string | null>();
+
+/** Resolve bot user ID lazily per tenant, cached after first lookup (including null results). */
+async function getBotUserId(tenantId: string, client: WebClient): Promise<string | null> {
+  if (perTenantBotUserIdCache.has(tenantId)) {
+    return perTenantBotUserIdCache.get(tenantId) ?? null;
+  }
+  try {
+    const result = await client.auth.test();
+    const userId = typeof result.user_id === "string" ? result.user_id : null;
+    perTenantBotUserIdCache.set(tenantId, userId);
+    return userId;
+  } catch (error) {
+    process.stderr.write(`Warning: could not resolve bot user ID for tenant ${tenantId}: ${(error as Error).message}\n`);
+    return null;
+  }
+}
+
+type SaveMessageFeedbackFn = (input: {
+  tenantId: string;
+  conversationId: string;
+  channel: string;
+  messageTs: string;
+  userId: string | null;
+  reaction: "thumbsup" | "thumbsdown";
+}) => unknown;
+
+/**
+ * Shared reaction_added event handler for both the global Bolt app and the per-tenant Express path.
+ * @param event The Slack reaction_added event payload
+ * @param client The Slack WebClient
+ * @param forcedTenantId Optional tenant ID override (per-tenant Express path)
+ * @param knownBotUserId Bot's own user ID for self-filtering (pass undefined to resolve lazily)
+ * @param saveFeedback Injected save function (defaults to options.store.saveMessageFeedback)
+ */
+export async function handleReactionAdded(
+  event: Record<string, unknown>,
+  client: WebClient,
+  forcedTenantId?: string,
+  knownBotUserId?: string,
+  saveFeedback?: SaveMessageFeedbackFn
+): Promise<void> {
+  const rawReaction = event["reaction"];
+  const reaction =
+    rawReaction === "+1" ? "thumbsup" : rawReaction === "-1" ? "thumbsdown" : rawReaction;
+  if (reaction !== "thumbsup" && reaction !== "thumbsdown") {
+    return;
+  }
+
+  const item = event["item"] as Record<string, unknown> | undefined;
+  if (!item || item["type"] !== "message") {
+    return;
+  }
+
+  const channel = item["channel"];
+  const ts = item["ts"];
+  if (typeof channel !== "string" || typeof ts !== "string") {
+    return;
+  }
+
+  const key = `${channel}:${ts}`;
+  const link = feedbackLinkMap.get(key);
+  if (!link) {
+    // Unknown message_ts — silently ignore
+    return;
+  }
+
+  const tenantId = forcedTenantId ?? link.tenantId;
+
+  // Resolve bot user ID for self-filtering
+  let botUserId = knownBotUserId;
+  if (!botUserId) {
+    botUserId = (await getBotUserId(tenantId, client)) ?? undefined;
+  }
+
+  // Self-filter: ignore the bot's own reactions
+  const eventUser = typeof event["user"] === "string" ? event["user"] : null;
+  if (eventUser && botUserId && eventUser === botUserId) {
+    return;
+  }
+
+  if (!saveFeedback) {
+    return;
+  }
+
+  try {
+    saveFeedback({
+      tenantId,
+      conversationId: link.conversationId,
+      channel,
+      messageTs: ts,
+      userId: eventUser,
+      reaction: reaction as "thumbsup" | "thumbsdown"
+    });
+  } catch (error) {
+    process.stderr.write(`Warning: failed to save message feedback: ${(error as Error).message}\n`);
+  }
+}
+
 export function parseSlackTeamTenantMap(raw: string): Record<string, string> {
   if (!raw.trim()) {
     return {};
@@ -534,7 +667,7 @@ export async function startSlackAgentServer(options: SlackAgentServerOptions): P
         }
       );
 
-      await input.client.chat.postMessage({
+      const posted = await input.client.chat.postMessage({
         channel: input.channel,
         thread_ts: input.threadTs,
         text: response.text
@@ -545,6 +678,27 @@ export async function startSlackAgentServer(options: SlackAgentServerOptions): P
         conversationId,
         hasArtifacts: Array.isArray(response.artifacts) && response.artifacts.length > 0
       });
+
+      // Seed 👍/👎 reactions on the posted message for feedback capture
+      const postedTs = typeof posted.ts === "string" ? posted.ts : null;
+      if (postedTs) {
+        rememberAnswerTurn(input.channel, postedTs, tenantId, conversationId);
+        const seedResults = await Promise.allSettled([
+          input.client.reactions.add({ channel: input.channel, timestamp: postedTs, name: "thumbsup" }),
+          input.client.reactions.add({ channel: input.channel, timestamp: postedTs, name: "thumbsdown" })
+        ]);
+        for (const [index, result] of seedResults.entries()) {
+          if (result.status === "rejected") {
+            const reactionName = index === 0 ? "thumbsup" : "thumbsdown";
+            await emitEvent("message.feedback_seed_failed", "warn", `Failed to seed ${reactionName} reaction.`, {
+              tenantId,
+              channelId: input.channel,
+              error: (result.reason as Error).message
+            });
+            process.stderr.write(`Warning: failed to seed ${reactionName} reaction: ${(result.reason as Error).message}\n`);
+          }
+        }
+      }
 
       const chartConfig = getChartConfigFromArtifacts(response.artifacts);
       if (chartConfig) {
@@ -689,6 +843,18 @@ export async function startSlackAgentServer(options: SlackAgentServerOptions): P
         client,
         forcedTenantId
       });
+      return;
+    }
+
+    if (eventType === "reaction_added") {
+      void handleReactionAdded(
+        slackEvent,
+        client,
+        forcedTenantId,
+        undefined,
+        (input) => options.store.saveMessageFeedback(input)
+      );
+      return;
     }
   };
 
@@ -780,6 +946,25 @@ export async function startSlackAgentServer(options: SlackAgentServerOptions): P
 
     boltApp.message(async ({ body, client }) => {
       dispatchFromBody(body, client as WebClient);
+    });
+
+    // Cache global bot user ID for self-filtering reaction_added events
+    let globalBotUserId: string | undefined;
+    try {
+      const authResult = await boltApp.client.auth.test();
+      globalBotUserId = typeof authResult.user_id === "string" ? authResult.user_id : undefined;
+    } catch (error) {
+      process.stderr.write(`Warning: could not resolve global bot user ID: ${(error as Error).message}\n`);
+    }
+
+    boltApp.event("reaction_added", async ({ event, client }) => {
+      void handleReactionAdded(
+        event as unknown as Record<string, unknown>,
+        client as WebClient,
+        undefined,
+        globalBotUserId,
+        (input) => options.store.saveMessageFeedback(input)
+      );
     });
 
     await boltApp.start(options.port);

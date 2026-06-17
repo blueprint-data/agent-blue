@@ -139,6 +139,17 @@ export interface AdminBotEvent {
 
 export type ScheduleChannelType = "slack" | "telegram" | "console" | "custom";
 
+export interface MessageFeedback {
+  id: string;
+  tenantId: string;
+  conversationId: string;
+  channel: string;
+  messageTs: string;
+  userId: string | null;
+  reaction: "thumbsup" | "thumbsdown";
+  createdAt: string;
+}
+
 export interface TenantSchedule {
   id: string;
   tenantId: string;

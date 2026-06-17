@@ -590,3 +590,65 @@ describe("SqliteConversationStore LLM settings and usage", () => {
     expect(store.getTenantLlmSettings("gone")).toBeNull();
   });
 });
+
+describe("SqliteConversationStore message_feedback", () => {
+  it("init creates the message_feedback table idempotently", () => {
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-blue-feedback-test-"));
+    const dbPath = path.join(rootDir, "agent.db");
+    tempPaths.push(dbPath);
+
+    // Call init twice — should not throw (IF NOT EXISTS)
+    const store = new SqliteConversationStore(dbPath);
+    store.init();
+    store.init();
+
+    // Verify the table exists by opening the raw DB and checking sqlite_master
+    const raw = new Database(dbPath);
+    const row = raw.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='message_feedback'"
+    ).get() as { name: string } | undefined;
+    raw.close();
+
+    expect(row?.name).toBe("message_feedback");
+  });
+
+  it("saveMessageFeedback inserts a row and returns a MessageFeedback with id and createdAt", () => {
+    const store = createStore();
+
+    const result = store.saveMessageFeedback({
+      tenantId: "acme",
+      conversationId: "conv_feedback_1",
+      channel: "C12345",
+      messageTs: "1717600000.000100",
+      userId: "U98765",
+      reaction: "thumbsup"
+    });
+
+    expect(result.id).toMatch(/^feedback_/);
+    expect(result.tenantId).toBe("acme");
+    expect(result.conversationId).toBe("conv_feedback_1");
+    expect(result.channel).toBe("C12345");
+    expect(result.messageTs).toBe("1717600000.000100");
+    expect(result.userId).toBe("U98765");
+    expect(result.reaction).toBe("thumbsup");
+    expect(typeof result.createdAt).toBe("string");
+    expect(result.createdAt).toBeTruthy();
+  });
+
+  it("saveMessageFeedback inserts a thumbsdown row with null userId", () => {
+    const store = createStore();
+
+    const result = store.saveMessageFeedback({
+      tenantId: "tenant-b",
+      conversationId: "conv_feedback_2",
+      channel: "C99999",
+      messageTs: "1717600001.000200",
+      userId: null,
+      reaction: "thumbsdown"
+    });
+
+    expect(result.id).toMatch(/^feedback_/);
+    expect(result.reaction).toBe("thumbsdown");
+    expect(result.userId).toBeNull();
+  });
+});

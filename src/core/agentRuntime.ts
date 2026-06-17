@@ -56,7 +56,7 @@ const tenantMemorySaveSchema = z.object({
 });
 
 const toolDecisionSchema = z.object({
-  type: z.enum(["tool_call", "final_answer"]),
+  type: z.enum(["tool_call", "final_answer", "cannot_answer"]),
   tool: z
     .enum([
       "warehouse.query",
@@ -70,6 +70,7 @@ const toolDecisionSchema = z.object({
     .optional(),
   args: z.record(z.string(), z.unknown()).optional(),
   answer: z.string().optional(),
+  reason: z.string().optional(),
   reasoning: z.string().optional()
 });
 
@@ -833,7 +834,19 @@ export class AnalyticsAgentRuntime {
           "Return ONLY valid JSON in one of these shapes:",
           '{ "type": "tool_call", "tool": "warehouse.query|dbt.listModels|dbt.getModelSql|warehouse.lookupMetadata|tenantMemory.save|chartjs.build|schedule.create", "args": { ... }, "reasoning"?: string }',
           '{ "type": "final_answer", "answer": string, "reasoning"?: string }',
+          '{ "type": "cannot_answer", "reason": string, "reasoning"?: string }',
           "- If the user request is not analytical, ALWAYS return final_answer with the refusal text and do not call tools.",
+          "",
+          "Cannot-answer rules (honest exit):",
+          "- Prefer answering. Only return cannot_answer when you have genuinely exhausted reasonable options.",
+          "- Return cannot_answer (with a concise, specific reason) when ANY of:",
+          "  - You have made 3+ consecutive warehouse.query attempts that all failed with schema/SQL errors and you have no new approach.",
+          "  - All warehouse.lookupMetadata calls (schemas/tables/columns) returned empty AND no dbt model maps to the request.",
+          "  - The required table/column does not exist in metadata and there is no viable substitute.",
+          "  - The question requires pre-modeled data structures (cohort tables, funnel tables, retention models) that don't exist in the warehouse or dbt models.",
+          "- Do NOT use cannot_answer for non-analytical requests — use the final_answer refusal text for those.",
+          "- Do NOT use cannot_answer just because the answer is small, zero-row, or unexpected — an empty result IS a valid final_answer.",
+          "- The reason MUST be specific (e.g. \"no table matching 'revenue' exists in metadata; closest is fct_transactions which lacks an amount column\"), not generic.",
           "",
           `Max query rows per profile: ${profile.maxRowsPerQuery}.`
         ].join("\n")
@@ -971,10 +984,30 @@ export class AnalyticsAgentRuntime {
         );
       }
 
+      if (plan.type === "cannot_answer") {
+        const reason = plan.reason?.trim();
+        const text = reason
+          ? `I could not answer this reliably. Reason: ${reason}`
+          : "I could not answer this reliably with the available data and tools.";
+        return finalizeSuccess(
+          text,
+          {
+            plan,
+            plannerAttempts,
+            sql: finalSql,
+            toolCalls,
+            mode: "direct_tool_loop",
+            outcome: "cannot_answer",
+            timings: { ...timings, totalMs: Date.now() - startedAt }
+          },
+          undefined
+        );
+      }
+
       if (plan.type !== "tool_call" || !plan.tool) {
         loopMessages.push({
           role: "user",
-          content: "Return either a valid tool_call or final_answer JSON."
+          content: "Return either a valid tool_call, final_answer, or cannot_answer JSON."
         });
         continue;
       }
