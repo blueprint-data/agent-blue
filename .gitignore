@@ -9,5 +9,4 @@ data-sandbox
 .env.deploy
 .env.sandbox
 .atl/
-skills/
 benchmark/results/
