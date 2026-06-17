@@ -295,21 +295,18 @@ export function rememberAnswerTurn(
   feedbackLinkMap.set(key, { tenantId, conversationId });
 }
 
-/** Per-tenant cache for bot user IDs resolved via auth.test(). */
-const perTenantBotUserIdCache = new Map<string, string>();
+/** Per-tenant cache for bot user IDs resolved via auth.test(). null = resolved but no user_id returned. */
+const perTenantBotUserIdCache = new Map<string, string | null>();
 
-/** Resolve bot user ID lazily per tenant, cached after first lookup. */
+/** Resolve bot user ID lazily per tenant, cached after first lookup (including null results). */
 async function getBotUserId(tenantId: string, client: WebClient): Promise<string | null> {
-  const cached = perTenantBotUserIdCache.get(tenantId);
-  if (cached) {
-    return cached;
+  if (perTenantBotUserIdCache.has(tenantId)) {
+    return perTenantBotUserIdCache.get(tenantId) ?? null;
   }
   try {
     const result = await client.auth.test();
     const userId = typeof result.user_id === "string" ? result.user_id : null;
-    if (userId) {
-      perTenantBotUserIdCache.set(tenantId, userId);
-    }
+    perTenantBotUserIdCache.set(tenantId, userId);
     return userId;
   } catch (error) {
     process.stderr.write(`Warning: could not resolve bot user ID for tenant ${tenantId}: ${(error as Error).message}\n`);
@@ -686,16 +683,19 @@ export async function startSlackAgentServer(options: SlackAgentServerOptions): P
       const postedTs = typeof posted.ts === "string" ? posted.ts : null;
       if (postedTs) {
         rememberAnswerTurn(input.channel, postedTs, tenantId, conversationId);
-        for (const reactionName of ["thumbsup", "thumbsdown"] as const) {
-          try {
-            await input.client.reactions.add({ channel: input.channel, timestamp: postedTs, name: reactionName });
-          } catch (error) {
+        const seedResults = await Promise.allSettled([
+          input.client.reactions.add({ channel: input.channel, timestamp: postedTs, name: "thumbsup" }),
+          input.client.reactions.add({ channel: input.channel, timestamp: postedTs, name: "thumbsdown" })
+        ]);
+        for (const [index, result] of seedResults.entries()) {
+          if (result.status === "rejected") {
+            const reactionName = index === 0 ? "thumbsup" : "thumbsdown";
             await emitEvent("message.feedback_seed_failed", "warn", `Failed to seed ${reactionName} reaction.`, {
               tenantId,
               channelId: input.channel,
-              error: (error as Error).message
+              error: (result.reason as Error).message
             });
-            process.stderr.write(`Warning: failed to seed ${reactionName} reaction: ${(error as Error).message}\n`);
+            process.stderr.write(`Warning: failed to seed ${reactionName} reaction: ${(result.reason as Error).message}\n`);
           }
         }
       }

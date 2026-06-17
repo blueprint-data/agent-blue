@@ -323,7 +323,8 @@ export class SqliteConversationStore implements ConversationStore {
         message_ts TEXT NOT NULL,
         user_id TEXT,
         reaction TEXT NOT NULL,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        UNIQUE (channel, message_ts, user_id, reaction)
       );
     `);
     this.migrateAdminSessionsColumns();
@@ -2371,7 +2372,7 @@ export class SqliteConversationStore implements ConversationStore {
     const createdAt = new Date().toISOString();
     this.db
       .prepare(
-        `INSERT INTO message_feedback (id, tenant_id, conversation_id, channel, message_ts, user_id, reaction, created_at)
+        `INSERT OR IGNORE INTO message_feedback (id, tenant_id, conversation_id, channel, message_ts, user_id, reaction, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(id, input.tenantId, input.conversationId, input.channel, input.messageTs, input.userId, input.reaction, createdAt);
