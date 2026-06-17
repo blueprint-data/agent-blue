@@ -341,7 +341,9 @@ export async function handleReactionAdded(
   knownBotUserId?: string,
   saveFeedback?: SaveMessageFeedbackFn
 ): Promise<void> {
-  const reaction = event["reaction"];
+  const rawReaction = event["reaction"];
+  const reaction =
+    rawReaction === "+1" ? "thumbsup" : rawReaction === "-1" ? "thumbsdown" : rawReaction;
   if (reaction !== "thumbsup" && reaction !== "thumbsdown") {
     return;
   }
@@ -384,7 +386,7 @@ export async function handleReactionAdded(
 
   try {
     saveFeedback({
-      tenantId: link.tenantId,
+      tenantId,
       conversationId: link.conversationId,
       channel,
       messageTs: ts,

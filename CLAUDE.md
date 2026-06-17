@@ -64,6 +64,68 @@ Before writing any implementation:
 
 Do NOT write implementation first and "add tests later". Push back if the user asks for it.
 
+## Local Testing — Slack Channel
+
+### Node version
+
+The project requires **Node 22**. CI and Docker both use `node:22`. The `.nvmrc` is pinned to `22`.
+
+If `better-sqlite3` fails with a NODE_MODULE_VERSION mismatch, the user must switch Node versions:
+
+```bash
+nvm use 22        # switch to Node 22
+npm rebuild better-sqlite3   # recompile native binary
+```
+
+Do NOT suggest upgrading Node or changing `.nvmrc` — the project is pinned to 22 intentionally.
+
+### Running the Slack server locally
+
+The SQLite DB lives at `data/agent.db` (not `data/agent-blue.db`). It is created automatically on first run.
+
+```bash
+# Terminal 1 — Slack server (tenant depends on the .env and channel mapping)
+npm run dev -- slack --tenant <tenantId>
+
+# Terminal 2 — public tunnel via ngrok (cloudflared needs credentials not always available locally)
+ngrok http 3000
+```
+
+The ngrok URL changes on every restart. Update the Slack app's **Event Subscriptions → Request URL** each time:
+
+```
+https://<ngrok-url>/slack/events
+```
+
+Use the **global endpoint** (`/slack/events`) for local testing — the per-tenant endpoint (`/slack/events/tenants/:tenantId`) requires Slack credentials to be seeded in the local SQLite DB, which is not set up locally.
+
+### Slack app scopes required
+
+| Scope | Purpose |
+|-------|---------|
+| `reactions:write` | Bot seeds 👍👎 on its own messages |
+| `reactions:read` + `reaction_added` event | Capture user feedback |
+| `channels:history` / `groups:history` | Read thread context (optional — bot degrades gracefully without it) |
+
+### Verifying message_feedback
+
+```bash
+# Must run with Node 22 active (nvm use 22)
+node -e "const db = require('better-sqlite3')('data/agent.db'); console.log(JSON.stringify(db.prepare('SELECT * FROM message_feedback LIMIT 10').all(), null, 2));"
+```
+
+### Tenant context in local testing
+
+The local DB starts empty. The global Bolt app (`/slack/events`) resolves the tenant via `SLACK_TEAM_TENANT_MAP` env var or the `--tenant` flag. The warehouse is NOT connected locally — queries will fail with connection errors, which correctly triggers `cannot_answer`.
+
+### Testing cannot_answer
+
+Ask the bot something analytical that requires pre-modeled data not available locally:
+
+> "Dame un análisis de cohorts de los últimos 3 meses"
+
+Expected: bot responds with `cannot_answer` + clear reason. It must NOT burn all 35 tool steps.
+
 ## Restrictions — NEVER Without Explicit Approval
 
 - **Schema changes**: Do not modify SQLite schema (migrations, column additions, index changes) without explicit user confirmation

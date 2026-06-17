@@ -143,6 +143,30 @@ describe("handleReactionAdded", () => {
     );
   });
 
+  it("normalizes Slack alias '+1' to thumbsup", async () => {
+    const { client, saveMessageFeedback } = makeClient();
+    const event = makeEvent({ reaction: "+1" });
+
+    await handleReactionAdded(event, client as never, "tenant-x", "UBOT123", saveMessageFeedback as never);
+
+    expect(saveMessageFeedback).toHaveBeenCalledTimes(1);
+    expect(saveMessageFeedback).toHaveBeenCalledWith(
+      expect.objectContaining({ reaction: "thumbsup" })
+    );
+  });
+
+  it("normalizes Slack alias '-1' to thumbsdown", async () => {
+    const { client, saveMessageFeedback } = makeClient();
+    const event = makeEvent({ reaction: "-1" });
+
+    await handleReactionAdded(event, client as never, "tenant-x", "UBOT123", saveMessageFeedback as never);
+
+    expect(saveMessageFeedback).toHaveBeenCalledTimes(1);
+    expect(saveMessageFeedback).toHaveBeenCalledWith(
+      expect.objectContaining({ reaction: "thumbsdown" })
+    );
+  });
+
   it("swallows errors from saveMessageFeedback without re-throwing", async () => {
     const throwingSave = vi.fn().mockImplementation(() => {
       throw new Error("DB failure");

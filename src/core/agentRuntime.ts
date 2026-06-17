@@ -794,8 +794,9 @@ export class AnalyticsAgentRuntime {
           "- Your owner is Blueprintdata (https://blueprintdata.xyz/).",
           "- Tenant context may change per request, but your identity and owner never change.",
           "- You ONLY answer analytical questions related to data, metrics, SQL, BI, dbt models, and business performance analysis.",
-          "- For any non-analytical or unrelated request, do not call tools and return final_answer refusing the request.",
-          '- Refusal text for non-analytical requests: "I can only help with analytical questions about data and business metrics."',
+          "- Non-analytical means off-topic: general knowledge, weather, coding help, creative writing, or anything unrelated to data/business analysis. Return final_answer with refusal text ONLY for these.",
+          "- Cohort analysis, funnel analysis, retention, and other analytics topics ARE analytical — even if the required data is unavailable. Use cannot_answer for those, NOT the refusal text.",
+          '- Refusal text for genuinely non-analytical requests: "I can only help with analytical questions about data and business metrics."',
           "",
           profile.soulPrompt,
           "",
@@ -835,7 +836,7 @@ export class AnalyticsAgentRuntime {
           '{ "type": "tool_call", "tool": "warehouse.query|dbt.listModels|dbt.getModelSql|warehouse.lookupMetadata|tenantMemory.save|chartjs.build|schedule.create", "args": { ... }, "reasoning"?: string }',
           '{ "type": "final_answer", "answer": string, "reasoning"?: string }',
           '{ "type": "cannot_answer", "reason": string, "reasoning"?: string }',
-          "- If the user request is not analytical, ALWAYS return final_answer with the refusal text and do not call tools.",
+          "- If the user request is genuinely off-topic (not data/business analysis), ALWAYS return final_answer with the refusal text and do not call tools. Analytical questions about data that lack required pre-modeled structures must use cannot_answer, NOT the refusal text.",
           "",
           "Cannot-answer rules (honest exit):",
           "- Prefer answering. Only return cannot_answer when you have genuinely exhausted reasonable options.",
@@ -1000,14 +1001,14 @@ export class AnalyticsAgentRuntime {
             outcome: "cannot_answer",
             timings: { ...timings, totalMs: Date.now() - startedAt }
           },
-          latestChartArtifact ? [latestChartArtifact] : undefined
+          undefined
         );
       }
 
       if (plan.type !== "tool_call" || !plan.tool) {
         loopMessages.push({
           role: "user",
-          content: "Return either a valid tool_call or final_answer JSON."
+          content: "Return either a valid tool_call, final_answer, or cannot_answer JSON."
         });
         continue;
       }
