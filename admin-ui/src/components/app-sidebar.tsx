@@ -65,6 +65,9 @@ export function AppSidebar({ username, method, isSuperadmin = true, onLogout }: 
             <NavItem to="/conversations">Conversations</NavItem>
           </SidebarMenuItem>
           <SidebarMenuItem>
+            <NavItem to="/feedback">Feedback</NavItem>
+          </SidebarMenuItem>
+          <SidebarMenuItem>
             <NavItem to="/schedules">Schedules</NavItem>
           </SidebarMenuItem>
           <SidebarMenuItem>
