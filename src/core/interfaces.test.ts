@@ -10,6 +10,7 @@ describe("ConversationStore saveMessageFeedback port", () => {
       id: "feedback_001",
       tenantId: "tenant-a",
       conversationId: "conv_abc",
+      executionTurnId: null,
       channel: "C111",
       messageTs: "1717600000.000100",
       userId: "U999",
@@ -29,6 +30,7 @@ describe("ConversationStore saveMessageFeedback port", () => {
     const result = store.saveMessageFeedback({
       tenantId: "tenant-a",
       conversationId: "conv_abc",
+      executionTurnId: null,
       channel: "C111",
       messageTs: "1717600000.000100",
       userId: "U999",
@@ -56,6 +58,7 @@ describe("ConversationStore saveMessageFeedback port", () => {
     const result = store.saveMessageFeedback({
       tenantId: "tenant-b",
       conversationId: "conv_xyz",
+      executionTurnId: null,
       channel: "C222",
       messageTs: "1717600001.000200",
       userId: null,

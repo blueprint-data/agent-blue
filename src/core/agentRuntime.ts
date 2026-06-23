@@ -912,6 +912,7 @@ export class AnalyticsAgentRuntime {
         });
         return {
           text,
+          executionTurnId: executionTurn.id,
           artifacts,
           debug: mergedDebug
         };

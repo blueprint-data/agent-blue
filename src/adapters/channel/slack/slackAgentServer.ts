@@ -275,15 +275,16 @@ async function buildChartPngBuffer(config: Record<string, unknown>): Promise<Buf
 
 const FEEDBACK_LINK_MAP_MAX = 1000;
 
-/** Module-level bounded FIFO map: "${channelId}:${messageTs}" -> { tenantId, conversationId } */
-export const feedbackLinkMap = new Map<string, { tenantId: string; conversationId: string }>();
+/** Module-level bounded FIFO map: "${channelId}:${messageTs}" -> { tenantId, conversationId, executionTurnId } */
+export const feedbackLinkMap = new Map<string, { tenantId: string; conversationId: string; executionTurnId: string | null }>();
 
 /** Record that the bot posted a message and associate it with a tenant conversation for later feedback. */
 export function rememberAnswerTurn(
   channelId: string,
   messageTs: string,
   tenantId: string,
-  conversationId: string
+  conversationId: string,
+  executionTurnId: string | null
 ): void {
   const key = `${channelId}:${messageTs}`;
   if (feedbackLinkMap.size >= FEEDBACK_LINK_MAP_MAX) {
@@ -292,7 +293,7 @@ export function rememberAnswerTurn(
       feedbackLinkMap.delete(oldest);
     }
   }
-  feedbackLinkMap.set(key, { tenantId, conversationId });
+  feedbackLinkMap.set(key, { tenantId, conversationId, executionTurnId });
 }
 
 /** Per-tenant cache for bot user IDs resolved via auth.test(). null = resolved but no user_id returned. */
@@ -317,6 +318,7 @@ async function getBotUserId(tenantId: string, client: WebClient): Promise<string
 type SaveMessageFeedbackFn = (input: {
   tenantId: string;
   conversationId: string;
+  executionTurnId: string | null;
   channel: string;
   messageTs: string;
   userId: string | null;
@@ -385,6 +387,7 @@ export async function handleReactionAdded(
     saveFeedback({
       tenantId,
       conversationId: link.conversationId,
+      executionTurnId: link.executionTurnId,
       channel,
       messageTs: ts,
       userId: eventUser,
@@ -682,7 +685,7 @@ export async function startSlackAgentServer(options: SlackAgentServerOptions): P
       // Seed 👍/👎 reactions on the posted message for feedback capture
       const postedTs = typeof posted.ts === "string" ? posted.ts : null;
       if (postedTs) {
-        rememberAnswerTurn(input.channel, postedTs, tenantId, conversationId);
+        rememberAnswerTurn(input.channel, postedTs, tenantId, conversationId, response.executionTurnId ?? null);
         const seedResults = await Promise.allSettled([
           input.client.reactions.add({ channel: input.channel, timestamp: postedTs, name: "thumbsup" }),
           input.client.reactions.add({ channel: input.channel, timestamp: postedTs, name: "thumbsdown" })

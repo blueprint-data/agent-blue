@@ -18,7 +18,7 @@ describe("feedbackLinkMap FIFO eviction", () => {
 
     // Insert 1000 entries
     for (let index = 1; index <= 1000; index += 1) {
-      rememberAnswerTurn(`C${index}`, `ts_${index}`, "tenant-a", `conv_${index}`);
+      rememberAnswerTurn(`C${index}`, `ts_${index}`, "tenant-a", `conv_${index}`, null);
     }
 
     expect(feedbackLinkMap.size).toBe(1000);
@@ -28,7 +28,7 @@ describe("feedbackLinkMap FIFO eviction", () => {
     expect(feedbackLinkMap.has(firstKey)).toBe(true);
 
     // Insert entry 1001 — should evict C1:ts_1
-    rememberAnswerTurn("C1001", "ts_1001", "tenant-a", "conv_1001");
+    rememberAnswerTurn("C1001", "ts_1001", "tenant-a", "conv_1001", null);
 
     expect(feedbackLinkMap.size).toBe(1000);
     expect(feedbackLinkMap.has(firstKey)).toBe(false);
@@ -38,11 +38,21 @@ describe("feedbackLinkMap FIFO eviction", () => {
   it("rememberAnswerTurn stores the correct tenantId and conversationId", () => {
     feedbackLinkMap.clear();
 
-    rememberAnswerTurn("CCHAN", "1234567890.001", "my-tenant", "my-conv");
+    rememberAnswerTurn("CCHAN", "1234567890.001", "my-tenant", "my-conv", null);
 
     const entry = feedbackLinkMap.get("CCHAN:1234567890.001");
     expect(entry?.tenantId).toBe("my-tenant");
     expect(entry?.conversationId).toBe("my-conv");
+    expect(entry?.executionTurnId).toBeNull();
+  });
+
+  it("rememberAnswerTurn stores executionTurnId when provided", () => {
+    feedbackLinkMap.clear();
+
+    rememberAnswerTurn("CCHAN", "1234567890.002", "my-tenant", "my-conv", "turn_xyz");
+
+    const entry = feedbackLinkMap.get("CCHAN:1234567890.002");
+    expect(entry?.executionTurnId).toBe("turn_xyz");
   });
 });
 
@@ -75,7 +85,7 @@ describe("handleReactionAdded", () => {
 
   beforeEach(() => {
     feedbackLinkMap.clear();
-    rememberAnswerTurn("CCHAN", "1234567890.001", "tenant-x", "conv-x");
+    rememberAnswerTurn("CCHAN", "1234567890.001", "tenant-x", "conv-x", "turn-x");
   });
 
   it("ignores unknown message_ts — no saveMessageFeedback call", async () => {
@@ -124,6 +134,7 @@ describe("handleReactionAdded", () => {
     expect(saveMessageFeedback).toHaveBeenCalledWith({
       tenantId: "tenant-x",
       conversationId: "conv-x",
+      executionTurnId: "turn-x",
       channel: "CCHAN",
       messageTs: "1234567890.001",
       userId: "UUSER001",

@@ -58,6 +58,7 @@ export interface AgentArtifact {
 
 export interface AgentResponse {
   text: string;
+  executionTurnId?: string;
   artifacts?: AgentArtifact[];
   debug?: Record<string, unknown>;
 }
@@ -143,6 +144,7 @@ export interface MessageFeedback {
   id: string;
   tenantId: string;
   conversationId: string;
+  executionTurnId: string | null;
   channel: string;
   messageTs: string;
   userId: string | null;
