@@ -319,6 +319,7 @@ export class SqliteConversationStore implements ConversationStore {
         id TEXT PRIMARY KEY,
         tenant_id TEXT NOT NULL,
         conversation_id TEXT NOT NULL,
+        execution_turn_id TEXT,
         channel TEXT NOT NULL,
         message_ts TEXT NOT NULL,
         user_id TEXT,
@@ -330,6 +331,7 @@ export class SqliteConversationStore implements ConversationStore {
     this.migrateAdminSessionsColumns();
     this.migrateTenantMemoriesTable();
     this.migrateMessagesTable();
+    this.migrateMessageFeedbackColumns();
   }
 
   private migrateAdminSessionsColumns(): void {
@@ -485,6 +487,14 @@ export class SqliteConversationStore implements ConversationStore {
       return;
     }
     this.db.exec(`ALTER TABLE messages ADD COLUMN content TEXT NOT NULL DEFAULT ''`);
+  }
+
+  private migrateMessageFeedbackColumns(): void {
+    const rows = this.db.prepare("PRAGMA table_info(message_feedback)").all() as Array<{ name: string }>;
+    const names = new Set(rows.map((r) => r.name));
+    if (!names.has("execution_turn_id")) {
+      this.db.exec(`ALTER TABLE message_feedback ADD COLUMN execution_turn_id TEXT`);
+    }
   }
 
   createConversation(context: AgentContext): void {
@@ -2363,6 +2373,7 @@ export class SqliteConversationStore implements ConversationStore {
   saveMessageFeedback(input: {
     tenantId: string;
     conversationId: string;
+    executionTurnId: string | null;
     channel: string;
     messageTs: string;
     userId: string | null;
@@ -2372,14 +2383,15 @@ export class SqliteConversationStore implements ConversationStore {
     const createdAt = new Date().toISOString();
     this.db
       .prepare(
-        `INSERT OR IGNORE INTO message_feedback (id, tenant_id, conversation_id, channel, message_ts, user_id, reaction, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT OR IGNORE INTO message_feedback (id, tenant_id, conversation_id, execution_turn_id, channel, message_ts, user_id, reaction, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
-      .run(id, input.tenantId, input.conversationId, input.channel, input.messageTs, input.userId, input.reaction, createdAt);
+      .run(id, input.tenantId, input.conversationId, input.executionTurnId, input.channel, input.messageTs, input.userId, input.reaction, createdAt);
     return {
       id,
       tenantId: input.tenantId,
       conversationId: input.conversationId,
+      executionTurnId: input.executionTurnId,
       channel: input.channel,
       messageTs: input.messageTs,
       userId: input.userId,

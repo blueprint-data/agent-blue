@@ -618,6 +618,7 @@ describe("SqliteConversationStore message_feedback", () => {
     const result = store.saveMessageFeedback({
       tenantId: "acme",
       conversationId: "conv_feedback_1",
+      executionTurnId: null,
       channel: "C12345",
       messageTs: "1717600000.000100",
       userId: "U98765",
@@ -627,6 +628,7 @@ describe("SqliteConversationStore message_feedback", () => {
     expect(result.id).toMatch(/^feedback_/);
     expect(result.tenantId).toBe("acme");
     expect(result.conversationId).toBe("conv_feedback_1");
+    expect(result.executionTurnId).toBeNull();
     expect(result.channel).toBe("C12345");
     expect(result.messageTs).toBe("1717600000.000100");
     expect(result.userId).toBe("U98765");
@@ -641,6 +643,7 @@ describe("SqliteConversationStore message_feedback", () => {
     const result = store.saveMessageFeedback({
       tenantId: "tenant-b",
       conversationId: "conv_feedback_2",
+      executionTurnId: null,
       channel: "C99999",
       messageTs: "1717600001.000200",
       userId: null,
@@ -650,5 +653,55 @@ describe("SqliteConversationStore message_feedback", () => {
     expect(result.id).toMatch(/^feedback_/);
     expect(result.reaction).toBe("thumbsdown");
     expect(result.userId).toBeNull();
+  });
+
+  it("saveMessageFeedback stores and returns executionTurnId when provided", () => {
+    const store = createStore();
+
+    const result = store.saveMessageFeedback({
+      tenantId: "tenant-c",
+      conversationId: "conv_feedback_3",
+      executionTurnId: "turn_abc123",
+      channel: "CCHAN",
+      messageTs: "1717600002.000300",
+      userId: "U11111",
+      reaction: "thumbsup"
+    });
+
+    expect(result.executionTurnId).toBe("turn_abc123");
+  });
+
+  it("migrateMessageFeedbackColumns adds execution_turn_id to existing DBs without the column", () => {
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-blue-feedback-migrate-test-"));
+    const dbPath = path.join(rootDir, "agent.db");
+    tempPaths.push(dbPath);
+
+    // Simulate a legacy DB: create table without execution_turn_id
+    const raw = new Database(dbPath);
+    raw.exec(`
+      CREATE TABLE message_feedback (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        channel TEXT NOT NULL,
+        message_ts TEXT NOT NULL,
+        user_id TEXT,
+        reaction TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (channel, message_ts, user_id, reaction)
+      )
+    `);
+    raw.close();
+
+    // Running init on the existing DB should add the column without error
+    const store = new SqliteConversationStore(dbPath);
+    store.init();
+
+    const raw2 = new Database(dbPath);
+    const columns = raw2.prepare("PRAGMA table_info(message_feedback)").all() as Array<{ name: string }>;
+    raw2.close();
+
+    const names = columns.map((c) => c.name);
+    expect(names).toContain("execution_turn_id");
   });
 });

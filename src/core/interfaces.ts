@@ -349,6 +349,7 @@ export interface ConversationStore {
   saveMessageFeedback(input: {
     tenantId: string;
     conversationId: string;
+    executionTurnId: string | null;
     channel: string;
     messageTs: string;
     userId: string | null;
