@@ -28,6 +28,7 @@ import {
   ConversationOrigin,
   ConversationSource,
   MessageFeedback,
+  MessageFeedbackRow,
   ScheduleChannelType,
   TenantMemory,
   TenantMemorySource,
@@ -2368,6 +2369,61 @@ export class SqliteConversationStore implements ConversationStore {
   deleteExpiredAdminSessions(nowIso = new Date().toISOString()): number {
     const result = this.db.prepare("DELETE FROM admin_sessions WHERE expires_at <= ?").run(nowIso);
     return result.changes;
+  }
+
+  listMessageFeedback(
+    tenantId: string,
+    opts?: { limit?: number; fromIso?: string; toIso?: string; reaction?: "thumbsup" | "thumbsdown" }
+  ): MessageFeedbackRow[] {
+    const limit = Math.min(Math.max(opts?.limit ?? 100, 1), 500);
+    let sql = `
+      SELECT f.id, f.tenant_id, f.conversation_id, f.execution_turn_id, f.channel,
+             f.message_ts, f.user_id, f.reaction, f.created_at,
+             t.raw_user_text, t.assistant_text
+      FROM message_feedback f
+      LEFT JOIN agent_execution_turns t ON t.id = f.execution_turn_id
+      WHERE f.tenant_id = ?`;
+    const params: unknown[] = [tenantId];
+    if (opts?.reaction) {
+      sql += " AND f.reaction = ?";
+      params.push(opts.reaction);
+    }
+    if (opts?.fromIso) {
+      sql += " AND f.created_at >= ?";
+      params.push(opts.fromIso);
+    }
+    if (opts?.toIso) {
+      sql += " AND f.created_at <= ?";
+      params.push(opts.toIso);
+    }
+    sql += " ORDER BY f.created_at DESC LIMIT ?";
+    params.push(limit);
+    const rows = this.db.prepare(sql).all(...params) as Array<{
+      id: string;
+      tenant_id: string;
+      conversation_id: string;
+      execution_turn_id: string | null;
+      channel: string;
+      message_ts: string;
+      user_id: string | null;
+      reaction: "thumbsup" | "thumbsdown";
+      created_at: string;
+      raw_user_text: string | null;
+      assistant_text: string | null;
+    }>;
+    return rows.map((r) => ({
+      id: r.id,
+      tenantId: r.tenant_id,
+      conversationId: r.conversation_id,
+      executionTurnId: r.execution_turn_id,
+      channel: r.channel,
+      messageTs: r.message_ts,
+      userId: r.user_id,
+      reaction: r.reaction,
+      createdAt: r.created_at,
+      rawUserText: r.raw_user_text ?? null,
+      assistantText: r.assistant_text ?? null
+    }));
   }
 
   saveMessageFeedback(input: {

@@ -11,6 +11,7 @@ import {
   ConversationSource,
   DbtModelInfo,
   MessageFeedback,
+  MessageFeedbackRow,
   QueryResult,
   ScheduleChannelType,
   TenantMemory,
@@ -355,6 +356,10 @@ export interface ConversationStore {
     userId: string | null;
     reaction: "thumbsup" | "thumbsdown";
   }): MessageFeedback;
+  listMessageFeedback(
+    tenantId: string,
+    opts?: { limit?: number; fromIso?: string; toIso?: string; reaction?: "thumbsup" | "thumbsdown" }
+  ): MessageFeedbackRow[];
 }
 
 export interface AdminGuardrails {
