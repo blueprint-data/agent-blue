@@ -3548,7 +3548,7 @@ function FeedbackPage({
 }): ReactElement {
   const [tenants, setTenants] = useState<TenantRecord[]>([]);
   const [selectedTenantId, setSelectedTenantId] = useState<string | null>(scopedTenantId ?? null);
-  const [filters, setFilters] = useState({ reaction: "", fromIso: "", toIso: "" });
+  const [filters, setFilters] = useState({ reaction: "", fromIso: "", toIso: "", limit: "100" });
   const [items, setItems] = useState<MessageFeedbackRow[]>([]);
   const [loading, setLoading] = useState(false);
 
@@ -3577,7 +3577,7 @@ function FeedbackPage({
       if (filters.reaction) params.set("reaction", filters.reaction);
       if (filters.fromIso) params.set("fromIso", filters.fromIso);
       if (filters.toIso) params.set("toIso", filters.toIso);
-      params.set("limit", "100");
+      params.set("limit", filters.limit || "100");
       const next = await apiRequest<MessageFeedbackRow[]>(
         `/api/tenants/${effectiveTenantId}/feedback?${params.toString()}`
       );
@@ -3666,6 +3666,15 @@ function FeedbackPage({
           placeholder="To (ISO)"
           value={filters.toIso}
           onChange={(event) => setFilters((current) => ({ ...current, toIso: event.target.value }))}
+        />
+        <Input
+          type="number"
+          placeholder="Limit"
+          value={filters.limit}
+          min={1}
+          max={1000}
+          onChange={(event) => setFilters((current) => ({ ...current, limit: event.target.value }))}
+          className="w-24"
         />
         <Button variant="outline" size="sm" onClick={() => void loadFeedback()}>
           Apply
