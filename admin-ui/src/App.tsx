@@ -3579,7 +3579,7 @@ function FeedbackPage({
       if (filters.toIso) params.set("toIso", filters.toIso);
       params.set("limit", filters.limit || "100");
       const next = await apiRequest<MessageFeedbackRow[]>(
-        `/api/tenants/${effectiveTenantId}/feedback?${params.toString()}`
+        `/api/admin/tenants/${effectiveTenantId}/feedback?${params.toString()}`
       );
       setItems(next);
     } catch (caught) {
@@ -3601,7 +3601,7 @@ function FeedbackPage({
       if (filters.fromIso) params.set("fromIso", filters.fromIso);
       if (filters.toIso) params.set("toIso", filters.toIso);
       const res = await fetch(
-        `/api/tenants/${effectiveTenantId}/feedback/export?${params.toString()}`,
+        `/api/admin/tenants/${effectiveTenantId}/feedback/export?${params.toString()}`,
         { credentials: "include" }
       );
       if (!res.ok) {
