@@ -12,12 +12,14 @@ import {
   TenantWarehouseProvider,
   WarehouseAdapter
 } from "./interfaces.js";
-import { AgentArtifact, AgentContext, AgentResponse, QueryResult, ScheduleChannelType, TenantMemory } from "./types.js";
+import { AgentArtifact, AgentContext, AgentResponse, MessageFeedbackRow, QueryResult, ScheduleChannelType, TenantMemory } from "./types.js";
 import { SqlGuard } from "./sqlGuard.js";
 
 export const TENANT_MEMORY_MAX_CONTENT_CHARS = 300;
 export const TENANT_MEMORY_MAX_PROMPT_ITEMS = 10;
 export const TENANT_MEMORY_MAX_PROMPT_CHARS = 1800;
+export const FEW_SHOT_MAX_EXAMPLES = 5;
+export const FEW_SHOT_MAX_CHARS = 1500;
 
 const metadataLookupSchema = z.object({
   kind: z.enum(["schemas", "tables", "columns"]),
@@ -129,6 +131,35 @@ function buildTenantMemoryPromptBlock(memories: TenantMemory[]): string | null {
 
 function buildTenantMemorySystemMessage(memories: TenantMemory[]): LlmMessage[] {
   const content = buildTenantMemoryPromptBlock(memories);
+  return content ? [{ role: "system", content }] : [];
+}
+
+function buildFewShotPromptBlock(rows: MessageFeedbackRow[]): string | null {
+  const usable = rows.filter((r) => r.rawUserText !== null && r.assistantText !== null);
+  const selected: Array<{ q: string; a: string }> = [];
+  let totalChars = 0;
+
+  for (const row of usable) {
+    if (selected.length >= FEW_SHOT_MAX_EXAMPLES) break;
+    const q = row.rawUserText as string;
+    const a = row.assistantText as string;
+    const chunkChars = q.length + a.length;
+    if (selected.length > 0 && totalChars + chunkChars > FEW_SHOT_MAX_CHARS) break;
+    selected.push({ q, a });
+    totalChars += chunkChars;
+  }
+
+  if (selected.length === 0) return null;
+
+  const lines = ["Approved response examples for this tenant (use as style and format reference):"];
+  for (const { q, a } of selected) {
+    lines.push(`\nQ: ${q}`, `A: ${a}`);
+  }
+  return lines.join("\n");
+}
+
+function buildFewShotSystemMessage(rows: MessageFeedbackRow[]): LlmMessage[] {
+  const content = buildFewShotPromptBlock(rows);
   return content ? [{ role: "system", content }] : [];
 }
 
@@ -650,6 +681,7 @@ export class AnalyticsAgentRuntime {
       timings.profileMs = Date.now() - startedAt;
       const history = this.store.getMessages(context.conversationId, 12);
       let tenantMemories = this.store.listTenantMemories(context.tenantId, 500);
+      const fewShotRows = this.store.listMessageFeedback(context.tenantId, { limit: 20, reaction: "thumbsup" });
       const tenantRepo = this.store.getTenantRepo(context.tenantId);
       const tenantWhConfig = this.store.getTenantWarehouseConfig(context.tenantId);
       const warehouse = this.resolveWarehouse(context.tenantId);
@@ -867,6 +899,7 @@ export class AnalyticsAgentRuntime {
         ].filter(Boolean).join("\n")
       },
       ...buildTenantMemorySystemMessage(tenantMemories),
+      ...buildFewShotSystemMessage(fewShotRows),
       {
         role: "system",
         content: `dbt models currently available (name -> path, suggested relation):\n${dbtModels
