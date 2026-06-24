@@ -229,6 +229,9 @@ function createMockStore(): ConversationStore {
         ...input,
         createdAt: new Date().toISOString()
       };
+    },
+    listMessageFeedback() {
+      return [];
     }
   };
 }

@@ -152,6 +152,11 @@ export interface MessageFeedback {
   createdAt: string;
 }
 
+export interface MessageFeedbackRow extends MessageFeedback {
+  rawUserText: string | null;
+  assistantText: string | null;
+}
+
 export interface TenantSchedule {
   id: string;
   tenantId: string;

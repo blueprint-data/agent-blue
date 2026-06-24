@@ -1841,5 +1841,73 @@ export function createAdminApiRouter(options: AdminApiRouterOptions): Router {
     }
   });
 
+  // -------------------------------------------------------------------------
+  // Feedback endpoints
+  // -------------------------------------------------------------------------
+
+  router.get("/tenants/:tenantId/feedback", (req: Request, res: Response) => {
+    try {
+      const tenantId = param(req, "tenantId");
+      if (denyUnlessTenantAccess(req, res, tenantId)) {
+        return;
+      }
+      const limitRaw = typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : 100;
+      const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 500) : 100;
+      const fromIso = typeof req.query.fromIso === "string" ? req.query.fromIso.trim() : undefined;
+      const toIso = typeof req.query.toIso === "string" ? req.query.toIso.trim() : undefined;
+      const reactionRaw = typeof req.query.reaction === "string" ? req.query.reaction.trim() : undefined;
+      const reaction =
+        reactionRaw === "thumbsup" || reactionRaw === "thumbsdown" ? reactionRaw : undefined;
+      res.json(
+        store.listMessageFeedback(tenantId, {
+          limit,
+          fromIso: fromIso || undefined,
+          toIso: toIso || undefined,
+          reaction
+        })
+      );
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  router.get("/tenants/:tenantId/feedback/export", (req: Request, res: Response) => {
+    try {
+      const tenantId = param(req, "tenantId");
+      if (denyUnlessTenantAccess(req, res, tenantId)) {
+        return;
+      }
+      const limitRaw = typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : 100;
+      const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 500) : 100;
+      const fromIso = typeof req.query.fromIso === "string" ? req.query.fromIso.trim() : undefined;
+      const toIso = typeof req.query.toIso === "string" ? req.query.toIso.trim() : undefined;
+      const reactionRaw = typeof req.query.reaction === "string" ? req.query.reaction.trim() : undefined;
+      const reaction =
+        reactionRaw === "thumbsup" || reactionRaw === "thumbsdown" ? reactionRaw : undefined;
+      const rows = store.listMessageFeedback(tenantId, {
+        limit,
+        fromIso: fromIso || undefined,
+        toIso: toIso || undefined,
+        reaction
+      });
+      const lines = rows.map((row) =>
+        JSON.stringify({
+          prompt: row.rawUserText,
+          completion: row.assistantText,
+          label: row.reaction === "thumbsup" ? "chosen" : "rejected",
+          feedback_id: row.id,
+          turn_id: row.executionTurnId,
+          channel: row.channel,
+          created_at: row.createdAt
+        })
+      );
+      res.setHeader("Content-Type", "application/x-ndjson");
+      res.setHeader("Content-Disposition", `attachment; filename="feedback-${tenantId}.jsonl"`);
+      res.send(lines.join("\n"));
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
   return router;
 }

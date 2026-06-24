@@ -182,6 +182,20 @@ interface TenantIntegrationTokenCreateResponse {
   warning?: string;
 }
 
+interface MessageFeedbackRow {
+  id: string;
+  tenantId: string;
+  conversationId: string;
+  executionTurnId: string | null;
+  channel: string;
+  messageTs: string;
+  userId: string | null;
+  reaction: "thumbsup" | "thumbsdown";
+  createdAt: string;
+  rawUserText: string | null;
+  assistantText: string | null;
+}
+
 interface TelegramMapping {
   chatId: string;
   tenantId: string;
@@ -519,6 +533,10 @@ function AdminShell({
               <Route
                 path="/conversations"
                 element={<ConversationsPage notify={notify} scopedTenantId={session.scopedTenantId} />}
+              />
+              <Route
+                path="/feedback"
+                element={<FeedbackPage notify={notify} scopedTenantId={session.scopedTenantId} />}
               />
               <Route
                 path="/schedules"
@@ -3517,6 +3535,185 @@ function MappingTable({
           </div>
         ))
       )}
+    </div>
+  );
+}
+
+function FeedbackPage({
+  notify,
+  scopedTenantId
+}: {
+  notify: (value: NotificationState | null) => void;
+  scopedTenantId?: string;
+}): ReactElement {
+  const [tenants, setTenants] = useState<TenantRecord[]>([]);
+  const [selectedTenantId, setSelectedTenantId] = useState<string | null>(scopedTenantId ?? null);
+  const [filters, setFilters] = useState({ reaction: "", fromIso: "", toIso: "", limit: "100" });
+  const [items, setItems] = useState<MessageFeedbackRow[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const effectiveTenantId = scopedTenantId ?? selectedTenantId;
+
+  useEffect(() => {
+    if (scopedTenantId) return;
+    void (async () => {
+      try {
+        const next = await apiRequest<TenantRecord[]>("/api/admin/tenants");
+        setTenants(next);
+        if (!selectedTenantId && next.length > 0) {
+          setSelectedTenantId(next[0].tenantId);
+        }
+      } catch (caught) {
+        notify({ type: "error", text: sectionError(caught) });
+      }
+    })();
+  }, [notify, scopedTenantId, selectedTenantId]);
+
+  const loadFeedback = useCallback(async () => {
+    if (!effectiveTenantId) return;
+    setLoading(true);
+    try {
+      const params = new URLSearchParams();
+      if (filters.reaction) params.set("reaction", filters.reaction);
+      if (filters.fromIso) params.set("fromIso", filters.fromIso);
+      if (filters.toIso) params.set("toIso", filters.toIso);
+      params.set("limit", filters.limit || "100");
+      const next = await apiRequest<MessageFeedbackRow[]>(
+        `/api/tenants/${effectiveTenantId}/feedback?${params.toString()}`
+      );
+      setItems(next);
+    } catch (caught) {
+      notify({ type: "error", text: sectionError(caught) });
+    } finally {
+      setLoading(false);
+    }
+  }, [effectiveTenantId, filters.reaction, filters.fromIso, filters.toIso, notify]);
+
+  useEffect(() => {
+    void loadFeedback();
+  }, [loadFeedback]);
+
+  async function handleExport() {
+    if (!effectiveTenantId) return;
+    try {
+      const params = new URLSearchParams();
+      if (filters.reaction) params.set("reaction", filters.reaction);
+      if (filters.fromIso) params.set("fromIso", filters.fromIso);
+      if (filters.toIso) params.set("toIso", filters.toIso);
+      const res = await fetch(
+        `/api/tenants/${effectiveTenantId}/feedback/export?${params.toString()}`,
+        { credentials: "include" }
+      );
+      if (!res.ok) {
+        throw new Error(`Export failed: ${res.statusText}`);
+      }
+      const text = await res.text();
+      const blob = new Blob([text], { type: "application/x-ndjson" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `feedback-${effectiveTenantId}.jsonl`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch (caught) {
+      notify({ type: "error", text: sectionError(caught) });
+    }
+  }
+
+  return (
+    <div className="page-grid">
+      <PageHeader
+        title="Feedback"
+        subtitle="User thumbs-up / thumbs-down reactions joined with the originating question and answer."
+        actions={
+          <Button variant="outline" size="sm" onClick={() => void handleExport()} disabled={!effectiveTenantId}>
+            Export JSONL
+          </Button>
+        }
+      />
+
+      {/* Filters bar */}
+      <div className="conv-filters">
+        {scopedTenantId ? (
+          <span className="muted text-sm">Tenant: <strong>{scopedTenantId}</strong></span>
+        ) : (
+          <select
+            value={selectedTenantId ?? ""}
+            onChange={(event) => setSelectedTenantId(event.target.value || null)}
+          >
+            <option value="">Select tenant…</option>
+            {tenants.map((t) => (
+              <option key={t.tenantId} value={t.tenantId}>{t.tenantId}</option>
+            ))}
+          </select>
+        )}
+        <select
+          value={filters.reaction}
+          onChange={(event) => setFilters((current) => ({ ...current, reaction: event.target.value }))}
+        >
+          <option value="">All reactions</option>
+          <option value="thumbsup">👍 Thumbs up</option>
+          <option value="thumbsdown">👎 Thumbs down</option>
+        </select>
+        <Input
+          type="datetime-local"
+          placeholder="From (ISO)"
+          value={filters.fromIso}
+          onChange={(event) => setFilters((current) => ({ ...current, fromIso: event.target.value }))}
+        />
+        <Input
+          type="datetime-local"
+          placeholder="To (ISO)"
+          value={filters.toIso}
+          onChange={(event) => setFilters((current) => ({ ...current, toIso: event.target.value }))}
+        />
+        <Input
+          type="number"
+          placeholder="Limit"
+          value={filters.limit}
+          min={1}
+          max={1000}
+          onChange={(event) => setFilters((current) => ({ ...current, limit: event.target.value }))}
+          className="w-24"
+        />
+        <Button variant="outline" size="sm" onClick={() => void loadFeedback()}>
+          Apply
+        </Button>
+      </div>
+
+      {/* Table */}
+      <div className="bp-card">
+        {!effectiveTenantId ? (
+          <div className="conv-empty">Select a tenant to view feedback.</div>
+        ) : loading ? (
+          <div className="conv-empty">Loading…</div>
+        ) : items.length === 0 ? (
+          <div className="conv-empty">No feedback rows match your filters.</div>
+        ) : (
+          <table className="admin-table">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Reaction</th>
+                <th>Channel</th>
+                <th>Question</th>
+                <th>Answer</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((row) => (
+                <tr key={row.id}>
+                  <td>{formatDate(row.createdAt)}</td>
+                  <td>{row.reaction === "thumbsup" ? "👍" : "👎"}</td>
+                  <td>{row.channel}</td>
+                  <td>{compactText(row.rawUserText, 80)}</td>
+                  <td>{compactText(row.assistantText, 80)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
     </div>
   );
 }

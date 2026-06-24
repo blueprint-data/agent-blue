@@ -705,3 +705,202 @@ describe("SqliteConversationStore message_feedback", () => {
     expect(names).toContain("execution_turn_id");
   });
 });
+
+describe("SqliteConversationStore listMessageFeedback", () => {
+  let seedCounter = 0;
+
+  function seedFeedbackWithTurn(
+    store: SqliteConversationStore,
+    opts: {
+      tenantId: string;
+      reaction?: "thumbsup" | "thumbsdown";
+      withTurn?: boolean;
+    }
+  ) {
+    seedCounter += 1;
+    const uniqueTs = `${1717600000 + seedCounter}.${String(seedCounter).padStart(6, "0")}`;
+
+    let executionTurnId: string | null = null;
+    let rawUserText: string | null = null;
+    let assistantText: string | null = null;
+
+    if (opts.withTurn !== false) {
+      const turn = store.createExecutionTurn({
+        tenantId: opts.tenantId,
+        conversationId: `conv_seed_${seedCounter}`,
+        source: "slack",
+        rawUserText: "What are the top customers?",
+        promptText: "Prompt text",
+        assistantText: "Here are the top customers.",
+        status: "completed"
+      });
+      executionTurnId = turn.id;
+      rawUserText = turn.rawUserText;
+      assistantText = turn.assistantText ?? null;
+    }
+
+    const feedback = store.saveMessageFeedback({
+      tenantId: opts.tenantId,
+      conversationId: `conv_seed_${seedCounter}`,
+      executionTurnId,
+      channel: "slack",
+      messageTs: uniqueTs,
+      userId: "U1",
+      reaction: opts.reaction ?? "thumbsup"
+    });
+
+    return { feedback, executionTurnId, rawUserText, assistantText };
+  }
+
+  it("returns joined rawUserText and assistantText when turn exists", () => {
+    const store = createStore();
+    const { feedback, rawUserText, assistantText } = seedFeedbackWithTurn(store, { tenantId: "acme" });
+
+    const rows = store.listMessageFeedback("acme");
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe(feedback.id);
+    expect(rows[0].rawUserText).toBe(rawUserText);
+    expect(rows[0].assistantText).toBe(assistantText);
+  });
+
+  it("returns null rawUserText and assistantText when execution_turn_id is null", () => {
+    const store = createStore();
+    const feedback = store.saveMessageFeedback({
+      tenantId: "acme",
+      conversationId: "conv_null_turn",
+      executionTurnId: null,
+      channel: "slack",
+      messageTs: "1717600010.000100",
+      userId: "U2",
+      reaction: "thumbsdown"
+    });
+
+    const rows = store.listMessageFeedback("acme");
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe(feedback.id);
+    expect(rows[0].rawUserText).toBeNull();
+    expect(rows[0].assistantText).toBeNull();
+  });
+
+  it("enforces tenant isolation — only returns rows for the requested tenant", () => {
+    const store = createStore();
+    seedFeedbackWithTurn(store, { tenantId: "tenant-a" });
+    seedFeedbackWithTurn(store, { tenantId: "tenant-b" });
+
+    const rowsA = store.listMessageFeedback("tenant-a");
+    const rowsB = store.listMessageFeedback("tenant-b");
+
+    expect(rowsA).toHaveLength(1);
+    expect(rowsA[0].tenantId).toBe("tenant-a");
+    expect(rowsB).toHaveLength(1);
+    expect(rowsB[0].tenantId).toBe("tenant-b");
+  });
+
+  it("filters by reaction", () => {
+    const store = createStore();
+    seedFeedbackWithTurn(store, { tenantId: "acme", reaction: "thumbsup" });
+    seedFeedbackWithTurn(store, { tenantId: "acme", reaction: "thumbsdown" });
+
+    const thumbsupRows = store.listMessageFeedback("acme", { reaction: "thumbsup" });
+    const thumbsdownRows = store.listMessageFeedback("acme", { reaction: "thumbsdown" });
+
+    expect(thumbsupRows).toHaveLength(1);
+    expect(thumbsupRows[0].reaction).toBe("thumbsup");
+    expect(thumbsdownRows).toHaveLength(1);
+    expect(thumbsdownRows[0].reaction).toBe("thumbsdown");
+  });
+
+  it("filters by fromIso date range", () => {
+    const store = createStore();
+    // Seed two rows with specific created_at using raw DB
+    const turn1 = store.createExecutionTurn({
+      tenantId: "acme",
+      conversationId: "conv1",
+      source: "slack",
+      rawUserText: "Q1",
+      promptText: "P1",
+      status: "completed"
+    });
+    const turn2 = store.createExecutionTurn({
+      tenantId: "acme",
+      conversationId: "conv2",
+      source: "slack",
+      rawUserText: "Q2",
+      promptText: "P2",
+      status: "completed"
+    });
+
+    // Insert feedback rows with controlled timestamps via raw DB access
+    const db = (store as unknown as { db: import("better-sqlite3").Database }).db;
+    db.prepare(
+      `INSERT INTO message_feedback (id, tenant_id, conversation_id, execution_turn_id, channel, message_ts, user_id, reaction, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run("feedback_old", "acme", "conv1", turn1.id, "slack", "111.000", "U1", "thumbsup", "2024-01-01T00:00:00.000Z");
+    db.prepare(
+      `INSERT INTO message_feedback (id, tenant_id, conversation_id, execution_turn_id, channel, message_ts, user_id, reaction, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run("feedback_new", "acme", "conv2", turn2.id, "slack", "222.000", "U2", "thumbsup", "2024-06-01T00:00:00.000Z");
+
+    const rows = store.listMessageFeedback("acme", { fromIso: "2024-03-01T00:00:00.000Z" });
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe("feedback_new");
+  });
+
+  it("filters by toIso date range", () => {
+    const store = createStore();
+    const db = (store as unknown as { db: import("better-sqlite3").Database }).db;
+    db.prepare(
+      `INSERT INTO message_feedback (id, tenant_id, conversation_id, execution_turn_id, channel, message_ts, user_id, reaction, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run("feedback_old2", "acme", "conv1", null, "slack", "333.000", "U1", "thumbsup", "2024-01-01T00:00:00.000Z");
+    db.prepare(
+      `INSERT INTO message_feedback (id, tenant_id, conversation_id, execution_turn_id, channel, message_ts, user_id, reaction, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run("feedback_new2", "acme", "conv2", null, "slack", "444.000", "U2", "thumbsup", "2024-06-01T00:00:00.000Z");
+
+    const rows = store.listMessageFeedback("acme", { toIso: "2024-03-01T00:00:00.000Z" });
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe("feedback_old2");
+  });
+
+  it("limits results and defaults to 100 rows max", () => {
+    const store = createStore();
+    const db = (store as unknown as { db: import("better-sqlite3").Database }).db;
+
+    for (let i = 0; i < 5; i++) {
+      db.prepare(
+        `INSERT INTO message_feedback (id, tenant_id, conversation_id, execution_turn_id, channel, message_ts, user_id, reaction, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(`feedback_limit_${i}`, "acme", "conv1", null, "slack", `${i}.000`, "U1", "thumbsup", new Date().toISOString());
+    }
+
+    const limited = store.listMessageFeedback("acme", { limit: 3 });
+    expect(limited).toHaveLength(3);
+
+    const all = store.listMessageFeedback("acme");
+    expect(all).toHaveLength(5);
+  });
+
+  it("orders results by created_at DESC", () => {
+    const store = createStore();
+    const db = (store as unknown as { db: import("better-sqlite3").Database }).db;
+
+    db.prepare(
+      `INSERT INTO message_feedback (id, tenant_id, conversation_id, execution_turn_id, channel, message_ts, user_id, reaction, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run("feedback_first", "acme", "conv1", null, "slack", "100.000", "U1", "thumbsup", "2024-01-01T00:00:00.000Z");
+    db.prepare(
+      `INSERT INTO message_feedback (id, tenant_id, conversation_id, execution_turn_id, channel, message_ts, user_id, reaction, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run("feedback_last", "acme", "conv2", null, "slack", "200.000", "U1", "thumbsup", "2024-12-01T00:00:00.000Z");
+
+    const rows = store.listMessageFeedback("acme");
+
+    expect(rows[0].id).toBe("feedback_last");
+    expect(rows[1].id).toBe("feedback_first");
+  });
+});
