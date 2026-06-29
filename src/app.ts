@@ -40,14 +40,14 @@ export function buildRuntime(store: SqliteConversationStore): AnalyticsAgentRunt
     return defaultWarehouse;
   };
   const chartTool = new ChartJsTool();
-  const dbtRepo = new GitDbtRepositoryService(store);
+  const dbtRepo = new GitDbtRepositoryService(store, env.dbtModelCacheTtlMs);
   const sqlGuard = new SqlGuard({
     enforceReadOnly: true,
     defaultLimit: 200,
     maxLimit: 2000
   });
 
-  return new AnalyticsAgentRuntime(llm, warehouseResolver, chartTool, dbtRepo, store, sqlGuard);
+  return new AnalyticsAgentRuntime(llm, warehouseResolver, chartTool, dbtRepo, store, sqlGuard, env.metadataCacheTtlMs);
 }
 
 export function buildLlmProvider(): OpenAiCompatibleProvider {

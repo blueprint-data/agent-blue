@@ -14,6 +14,7 @@ import {
 } from "./interfaces.js";
 import { AgentArtifact, AgentContext, AgentResponse, MessageFeedbackRow, QueryResult, ScheduleChannelType, TenantMemory } from "./types.js";
 import { SqlGuard } from "./sqlGuard.js";
+import { MetadataCache } from "../utils/metadataCache.js";
 
 export const TENANT_MEMORY_MAX_CONTENT_CHARS = 300;
 export const TENANT_MEMORY_MAX_PROMPT_ITEMS = 10;
@@ -546,14 +547,19 @@ export interface RuntimeRespondOptions {
 }
 
 export class AnalyticsAgentRuntime {
+  private readonly metadataCache: MetadataCache;
+
   constructor(
     private readonly llm: LlmProvider,
     private readonly warehouse: WarehouseResolver,
     private readonly chartTool: ChartTool,
     private readonly dbtRepo: DbtRepositoryService,
     private readonly store: ConversationStore,
-    private readonly sqlGuard: SqlGuard
-  ) {}
+    private readonly sqlGuard: SqlGuard,
+    metadataCacheTtlMs?: number
+  ) {
+    this.metadataCache = new MetadataCache(metadataCacheTtlMs);
+  }
 
   private resolveWarehouse(tenantId: string): WarehouseAdapter {
     return typeof this.warehouse === "function" ? this.warehouse(tenantId) : this.warehouse;
@@ -779,13 +785,13 @@ export class AnalyticsAgentRuntime {
             "- The warehouse is Google BigQuery. Write Standard SQL (not Legacy SQL).",
             "- Use fully-qualified BigQuery object names: `project.dataset.table`.",
             "- Never use unqualified table names like `fct_transactions`.",
-            hasWarehouseDefaults
-              ? `- Start with ${fqPrefix} as a default guess, but verify with warehouse.lookupMetadata if unsure.`
-              : "- BigQuery project/dataset defaults are unavailable, so infer carefully and avoid guessing.",
+            "- WORKFLOW (strict order):",
+            "  STEP 1 — call dbt.listModels FIRST to discover available dbt models.",
+            "  STEP 2 — call dbt.getModelSql({modelName}) to inspect the exact table references and columns from dbt model SQL.",
+            "  STEP 3 — write warehouse.query using the table names found in the dbt model SQL.",
+            "- NEVER guess table, dataset, or column names. Guessing causes SQL errors that waste tool steps.",
+            "- warehouse.lookupMetadata is the LAST resort — only if no dbt model matches the request.",
             `- Known dataset candidates: ${schemaCandidates.join(", ") || "(none)"}.`,
-            "- Use dbt model path hints and inspected dbt SQL to choose dataset.",
-            "- If table/dataset/column names are uncertain, use warehouse.lookupMetadata.",
-            "- If dbt lineage is uncertain, use dbt.getModelSql.",
             "- If visualization is requested, call chartjs.build after at least one successful query.",
             "- When a chart artifact is generated with chartjs.build, do NOT draw an ASCII/Markdown/text chart in the answer.",
             "- With chart artifacts, keep the narrative concise: key takeaway(s), notable outliers, and caveats only.",
@@ -801,13 +807,13 @@ export class AnalyticsAgentRuntime {
             "- The warehouse is Snowflake. Write Snowflake SQL.",
             "- Use fully-qualified Snowflake object names in every query: DATABASE.SCHEMA.OBJECT.",
             "- Never use unqualified table names like `fct_transactions`.",
-            hasWarehouseDefaults
-              ? `- Start with ${fqPrefix} as a default guess, but do not treat schema as fixed.`
-              : "- SNOWFLAKE_DATABASE/SCHEMA defaults are unavailable, so infer carefully and avoid guessing.",
+            "- WORKFLOW (strict order):",
+            "  STEP 1 — call dbt.listModels FIRST to discover available dbt models.",
+            "  STEP 2 — call dbt.getModelSql({modelName}) to inspect the exact table references and columns from dbt model SQL.",
+            "  STEP 3 — write warehouse.query using the table names found in the dbt model SQL.",
+            "- NEVER guess table, schema, or column names. Guessing causes SQL errors that waste tool steps.",
+            "- warehouse.lookupMetadata is the LAST resort — only if no dbt model matches the request.",
             `- Allowed/expected schema candidates to consider: ${schemaCandidates.join(", ")}.`,
-            "- Use dbt model path hints and inspected dbt SQL to choose schema.",
-            "- If table/schema/column names are uncertain, use warehouse.lookupMetadata.",
-            "- If dbt lineage is uncertain, use dbt.getModelSql.",
             "- If visualization is requested, call chartjs.build after at least one successful query.",
             "- When a chart artifact is generated with chartjs.build, do NOT draw an ASCII/Markdown/text chart in the answer.",
             "- With chart artifacts, keep the narrative concise: key takeaway(s), notable outliers, and caveats only.",
@@ -864,17 +870,17 @@ export class AnalyticsAgentRuntime {
           "- Never claim a schedule was created unless you already received a successful Tool result (schedule.create) in this turn.",
           "- If schedule.create fails or is rejected, explicitly say that scheduling did not happen.",
           "",
-          "Available tools and args:",
-          "- warehouse.query: { sql: string }",
-          "- dbt.listModels: {}",
-          "- dbt.getModelSql: { modelName: string }",
-          `- warehouse.lookupMetadata: { kind: "schemas"|"tables"|"columns", ${dbLabel}?: string, ${schemaLabel}?: string, table?: string, search?: string }`,
+          "Available tools and args (use in this priority order):",
+          "- dbt.listModels: {} — ALWAYS call FIRST to discover available models",
+          "- dbt.getModelSql: { modelName: string } — THEN inspect the model's SQL for table/column names",
+          `- warehouse.lookupMetadata: { kind: "schemas"|"tables"|"columns", ${dbLabel}?: string, ${schemaLabel}?: string, table?: string, search?: string } — LAST resort if dbt has no match`,
+          "- warehouse.query: { sql: string } — only after verifying table/column names via dbt.getModelSql or lookupMetadata",
           "- tenantMemory.save: { content: string }",
           '- chartjs.build: { type?: "bar"|"line"|"pie"|"doughnut", title?: string, xKey?: string, yKey?: string, seriesKey?: string, horizontal?: boolean, stacked?: boolean, grouped?: boolean, percentStacked?: boolean, sort?: "none"|"asc"|"desc"|"label_asc"|"label_desc", smooth?: boolean, tension?: number, fill?: boolean, step?: boolean, pointRadius?: number, donutCutout?: number, showPercentLabels?: boolean, topN?: number, otherLabel?: string, stackId?: string, maxPoints?: number }',
           '- schedule.create: { userRequest: string, cron: string, channelType?: "slack"|"telegram"|"console"|"custom", channelRef?: string, active?: boolean }',
           "",
           "Return ONLY valid JSON in one of these shapes:",
-          '{ "type": "tool_call", "tool": "warehouse.query|dbt.listModels|dbt.getModelSql|warehouse.lookupMetadata|tenantMemory.save|chartjs.build|schedule.create", "args": { ... }, "reasoning"?: string }',
+          '{ "type": "tool_call", "tool": "dbt.listModels|dbt.getModelSql|warehouse.lookupMetadata|warehouse.query|tenantMemory.save|chartjs.build|schedule.create", "args": { ... }, "reasoning"?: string }',
           '{ "type": "final_answer", "answer": string, "reasoning"?: string }',
           '{ "type": "cannot_answer", "reason": string, "reasoning"?: string }',
           "- If the user request is not analytical, ALWAYS return final_answer with the refusal text and do not call tools.",
@@ -1118,17 +1124,39 @@ export class AnalyticsAgentRuntime {
           if (!metadataSql) {
             throw new Error(`Metadata lookup requires ${isBigQuery ? "project" : "database"} context.`);
           }
-          const metadataResult = await runTool(
-            "warehouse.lookupMetadata",
-            { ...parsedLookup.data, sql: metadataSql },
-            async () => warehouse.query(metadataSql),
-            (result) => ({ rowCount: result.rowCount, columns: result.columns }),
-            (result) => ({
-              columns: result.columns,
-              rowCount: result.rowCount,
-              rows: result.rows.slice(0, profile.maxRowsPerQuery)
-            })
-          );
+          const cacheKey = this.metadataCache.key(context.tenantId, metadataSql);
+          const cachedResult = this.metadataCache.get(cacheKey);
+          const metadataResult = cachedResult
+            ? await runTool(
+                "warehouse.lookupMetadata",
+                { ...parsedLookup.data, sql: metadataSql, cached: true },
+                async () => cachedResult,
+                (result) => ({ rowCount: result.rowCount, columns: result.columns, cached: true }),
+                (result) => ({
+                  columns: result.columns,
+                  rowCount: result.rowCount,
+                  rows: result.rows.slice(0, profile.maxRowsPerQuery),
+                  cached: true
+                })
+              )
+            : await runTool(
+                "warehouse.lookupMetadata",
+                { ...parsedLookup.data, sql: metadataSql },
+                async () => warehouse.query(metadataSql),
+                (result) => ({ rowCount: result.rowCount, columns: result.columns }),
+                (result) => ({
+                  columns: result.columns,
+                  rowCount: result.rowCount,
+                  rows: result.rows.slice(0, profile.maxRowsPerQuery)
+                })
+              );
+          if (!cachedResult) {
+            this.metadataCache.set(cacheKey, {
+              rows: metadataResult.rows.slice(0, profile.maxRowsPerQuery),
+              columns: metadataResult.columns,
+              rowCount: metadataResult.rowCount
+            });
+          }
           loopMessages.push({
             role: "user",
             content: `Tool result (warehouse.lookupMetadata): ${asJsonBlock({

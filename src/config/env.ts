@@ -61,6 +61,8 @@ export const env = {
   googleOAuthRedirectUri: process.env.GOOGLE_OAUTH_REDIRECT_URI ?? "",
   /** Optional; when unset, OAuth success/error redirects use the incoming request Origin. */
   adminPublicOrigin: (process.env.ADMIN_PUBLIC_ORIGIN ?? "").replace(/\/$/, ""),
+  dbtModelCacheTtlMs: Number.parseInt(process.env.DBT_MODEL_CACHE_TTL_MS ?? "300000", 10),
+  metadataCacheTtlMs: Number.parseInt(process.env.METADATA_CACHE_TTL_MS ?? "1800000", 10),
   adminAuthSuperadminEmailDomainsRaw: process.env.ADMIN_AUTH_SUPERADMIN_EMAIL_DOMAINS ?? "",
   adminAuthTenantEmailDomainMapRaw: process.env.ADMIN_AUTH_TENANT_EMAIL_DOMAIN_MAP ?? "",
    schedulerTimezone: process.env.SCHEDULER_TIMEZONE ?? "UTC",
