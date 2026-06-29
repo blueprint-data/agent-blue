@@ -41,6 +41,18 @@ export interface DbtModelInfo {
   relativePath: string;
 }
 
+export interface DbtModelColumnDoc {
+  name: string;
+  description?: string;
+}
+
+/** Curated model metadata parsed from dbt schema YAML files (the dbt docs). */
+export interface DbtModelDoc {
+  name: string;
+  description?: string;
+  columns: DbtModelColumnDoc[];
+}
+
 export interface AgentContext {
   tenantId: string;
   profileName: string;

@@ -757,6 +757,14 @@ export class AnalyticsAgentRuntime {
           return [];
         }
       });
+      const dbtModelDocs = await measure("dbtModelDocsMs", async () => {
+        try {
+          return await this.dbtRepo.getModelDocs(context.tenantId);
+        } catch {
+          return [];
+        }
+      });
+      const dbtDocsByName = new Map(dbtModelDocs.map((doc) => [doc.name, doc]));
       const schemaCandidates = isBigQuery
         ? Array.from(
             new Set([
@@ -918,18 +926,27 @@ export class AnalyticsAgentRuntime {
       ...buildFewShotSystemMessage(fewShotRows),
       {
         role: "system",
-        content: `dbt models currently available (name -> path, suggested relation):\n${dbtModels
+        content: `dbt models currently available (name -> path, suggested relation; desc/cols from dbt docs):\n${dbtModels
           .slice(0, 300)
           .map((m) => {
+            let row: string;
             if (!hasWarehouseDefaults) {
-              return `${m.name} -> ${m.relativePath}`;
-            }
-            if (isBigQuery) {
+              row = `${m.name} -> ${m.relativePath}`;
+            } else if (isBigQuery) {
               const hintedDataset = inferSchemaHintFromModelPath(m.relativePath, whSchema).toLowerCase();
-              return `${m.name} -> ${m.relativePath} -> \`${whDatabase}.${hintedDataset}.${m.name}\``;
+              row = `${m.name} -> ${m.relativePath} -> \`${whDatabase}.${hintedDataset}.${m.name}\``;
+            } else {
+              const hintedSchema = inferSchemaHintFromModelPath(m.relativePath, whSchema.toUpperCase());
+              row = `${m.name} -> ${m.relativePath} -> "${whDatabase}"."${hintedSchema}".${quoteSqlIdent(m.name)}`;
             }
-            const hintedSchema = inferSchemaHintFromModelPath(m.relativePath, whSchema.toUpperCase());
-            return `${m.name} -> ${m.relativePath} -> "${whDatabase}"."${hintedSchema}".${quoteSqlIdent(m.name)}`;
+            const doc = dbtDocsByName.get(m.name);
+            if (doc?.description) {
+              row += ` | desc: ${doc.description.replace(/\s+/g, " ").slice(0, 120)}`;
+            }
+            if (doc && doc.columns.length > 0) {
+              row += ` | cols: ${doc.columns.slice(0, 50).map((c) => c.name).join(", ")}`;
+            }
+            return row;
           })
           .join("\n")}`
       },

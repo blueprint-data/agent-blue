@@ -9,6 +9,7 @@ import {
   ConversationMessage,
   ConversationOrigin,
   ConversationSource,
+  DbtModelDoc,
   DbtModelInfo,
   MessageFeedback,
   MessageFeedbackRow,
@@ -97,6 +98,8 @@ export interface DbtRepositoryService {
   syncRepo(tenantId: string): Promise<void>;
   listModels(tenantId: string, dbtSubpath?: string): Promise<DbtModelInfo[]>;
   getModelSql(tenantId: string, modelName: string, dbtSubpath?: string): Promise<string | null>;
+  /** Curated model docs (descriptions + columns) parsed from dbt schema YAML files. */
+  getModelDocs(tenantId: string, dbtSubpath?: string): Promise<DbtModelDoc[]>;
 }
 
 export type SlackTenantMappingRule =

@@ -1,8 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { parse as parseYaml } from "yaml";
 import { DbtRepositoryService, ConversationStore } from "../../core/interfaces.js";
-import { DbtModelInfo } from "../../core/types.js";
+import { DbtModelColumnDoc, DbtModelDoc, DbtModelInfo } from "../../core/types.js";
 
 interface CacheEntry<T> {
   data: T;
@@ -26,6 +27,36 @@ function walkDir(startPath: string): string[] {
   return files;
 }
 
+function toColumnDoc(raw: unknown): DbtModelColumnDoc | null {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+  const name = (raw as { name?: unknown }).name;
+  if (typeof name !== "string" || name.length === 0) {
+    return null;
+  }
+  const description = (raw as { description?: unknown }).description;
+  return typeof description === "string" && description.length > 0 ? { name, description } : { name };
+}
+
+function toModelDoc(raw: unknown): DbtModelDoc | null {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+  const name = (raw as { name?: unknown }).name;
+  if (typeof name !== "string" || name.length === 0) {
+    return null;
+  }
+  const rawColumns = (raw as { columns?: unknown }).columns;
+  const columns = Array.isArray(rawColumns)
+    ? rawColumns.map(toColumnDoc).filter((c): c is DbtModelColumnDoc => c !== null)
+    : [];
+  const description = (raw as { description?: unknown }).description;
+  return typeof description === "string" && description.length > 0
+    ? { name, description, columns }
+    : { name, columns };
+}
+
 function inferRepoSlug(repoUrl: string): string {
   const cleaned = repoUrl.replace(/\.git$/, "");
   const parts = cleaned.split(/[/:]/);
@@ -35,6 +66,7 @@ function inferRepoSlug(repoUrl: string): string {
 export class GitDbtRepositoryService implements DbtRepositoryService {
   private modelListCache = new Map<string, CacheEntry<DbtModelInfo[]>>();
   private modelSqlCache = new Map<string, CacheEntry<string | null>>();
+  private modelDocsCache = new Map<string, CacheEntry<DbtModelDoc[]>>();
 
   constructor(
     private readonly store: ConversationStore,
@@ -50,6 +82,11 @@ export class GitDbtRepositoryService implements DbtRepositoryService {
     for (const key of this.modelSqlCache.keys()) {
       if (key.startsWith(`${tenantId}:`)) {
         this.modelSqlCache.delete(key);
+      }
+    }
+    for (const key of this.modelDocsCache.keys()) {
+      if (key.startsWith(`${tenantId}:`)) {
+        this.modelDocsCache.delete(key);
       }
     }
   }
@@ -135,6 +172,45 @@ export class GitDbtRepositoryService implements DbtRepositoryService {
     const sql = fs.readFileSync(exact, "utf8");
     this.modelSqlCache.set(cacheKey, { data: sql, ts: Date.now() });
     return sql;
+  }
+
+  async getModelDocs(tenantId: string, dbtSubpath?: string): Promise<DbtModelDoc[]> {
+    const cacheKey = `${tenantId}:${dbtSubpath ?? ""}`;
+    const cached = this.getCached(this.modelDocsCache, cacheKey, this.modelCacheTtlMs);
+    if (cached) return cached;
+
+    const repo = this.store.getTenantRepo(tenantId);
+    if (!repo) {
+      return [];
+    }
+    const root = path.resolve(path.join(repo.localPath, dbtSubpath ?? repo.dbtSubpath));
+    if (!fs.existsSync(root)) {
+      return [];
+    }
+
+    const yamlFiles = walkDir(root).filter((f) => f.endsWith(".yml") || f.endsWith(".yaml"));
+    const docs: DbtModelDoc[] = [];
+    for (const file of yamlFiles) {
+      let parsed: unknown;
+      try {
+        parsed = parseYaml(fs.readFileSync(file, "utf8"));
+      } catch {
+        // Skip malformed YAML rather than failing the whole index.
+        continue;
+      }
+      const models = (parsed as { models?: unknown } | null)?.models;
+      if (!Array.isArray(models)) {
+        continue;
+      }
+      for (const model of models) {
+        const doc = toModelDoc(model);
+        if (doc) {
+          docs.push(doc);
+        }
+      }
+    }
+    this.modelDocsCache.set(cacheKey, { data: docs, ts: Date.now() });
+    return docs;
   }
 
   static buildLocalRepoPath(baseDir: string, tenantId: string, repoUrl: string): string {
