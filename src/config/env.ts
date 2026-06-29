@@ -14,6 +14,16 @@ function truthyEnv(value: string | undefined): boolean {
   return value === "1" || value?.toLowerCase() === "true";
 }
 
+/**
+ * Parse a positive integer env var, falling back when the value is missing,
+ * non-numeric, or non-positive. Guards against NaN — a NaN TTL silently makes
+ * time-based caches never expire (`Date.now() - ts > NaN` is always false).
+ */
+export function positiveIntEnv(value: string | undefined, fallback: number): number {
+  const parsed = Number.parseInt(value ?? "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 export const env = {
   appDataDir: process.env.APP_DATA_DIR ?? "data",
   llmBaseUrl: process.env.LLM_BASE_URL ?? "https://openrouter.ai/api/v1",
@@ -61,8 +71,8 @@ export const env = {
   googleOAuthRedirectUri: process.env.GOOGLE_OAUTH_REDIRECT_URI ?? "",
   /** Optional; when unset, OAuth success/error redirects use the incoming request Origin. */
   adminPublicOrigin: (process.env.ADMIN_PUBLIC_ORIGIN ?? "").replace(/\/$/, ""),
-  dbtModelCacheTtlMs: Number.parseInt(process.env.DBT_MODEL_CACHE_TTL_MS ?? "300000", 10),
-  metadataCacheTtlMs: Number.parseInt(process.env.METADATA_CACHE_TTL_MS ?? "1800000", 10),
+  dbtModelCacheTtlMs: positiveIntEnv(process.env.DBT_MODEL_CACHE_TTL_MS, 300000),
+  metadataCacheTtlMs: positiveIntEnv(process.env.METADATA_CACHE_TTL_MS, 1800000),
   adminAuthSuperadminEmailDomainsRaw: process.env.ADMIN_AUTH_SUPERADMIN_EMAIL_DOMAINS ?? "",
   adminAuthTenantEmailDomainMapRaw: process.env.ADMIN_AUTH_TENANT_EMAIL_DOMAIN_MAP ?? "",
    schedulerTimezone: process.env.SCHEDULER_TIMEZONE ?? "UTC",
