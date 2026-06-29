@@ -260,7 +260,8 @@ const chartTool: ChartTool = {
 const dbtRepo: DbtRepositoryService = {
   async syncRepo() {},
   async listModels() { return []; },
-  async getModelSql() { return null; }
+  async getModelSql() { return null; },
+  async getModelDocs() { return []; }
 };
 
 const warehouse: WarehouseAdapter = {
