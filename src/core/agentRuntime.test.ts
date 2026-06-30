@@ -647,7 +647,7 @@ describe("AnalyticsAgentRuntime column semantics and honesty", () => {
     const dbtRepoWithDocs: DbtRepositoryService = {
       async syncRepo() {},
       async listModels() {
-        return [{ name: "dim_users", relativePath: "models/marts/dim_users.sql" }];
+        return [{ name: "fct_orders", relativePath: "models/marts/fct_orders.sql" }];
       },
       async getModelSql() {
         return null;
@@ -655,11 +655,11 @@ describe("AnalyticsAgentRuntime column semantics and honesty", () => {
       async getModelDocs() {
         return [
           {
-            name: "dim_users",
-            description: "User dimension",
+            name: "fct_orders",
+            description: "Orders fact table",
             columns: [
-              { name: "phone_number", description: "Hashed (SHA-256). Do not filter by prefix." },
-              { name: "country", description: "Residence country (ISO-2)." }
+              { name: "customer_token", description: "Opaque identifier. Do not filter by raw value." },
+              { name: "region", description: "Customer region (ISO-2)." }
             ]
           }
         ];
@@ -691,9 +691,9 @@ describe("AnalyticsAgentRuntime column semantics and honesty", () => {
       (m) => typeof m.content === "string" && m.content.startsWith("dbt models currently available")
     );
     const content = indexMessage?.content ?? "";
-    expect(content).toContain("phone_number");
-    expect(content).toContain("Hashed (SHA-256). Do not filter by prefix.");
-    expect(content).toContain("Residence country (ISO-2).");
+    expect(content).toContain("customer_token");
+    expect(content).toContain("Opaque identifier. Do not filter by raw value.");
+    expect(content).toContain("Customer region (ISO-2).");
   });
 
   it("injects answer-honesty rules into the system prompt", async () => {
@@ -894,11 +894,11 @@ describe("AnalyticsAgentRuntime dbt column index — no column name truncation",
     const dbtRepoWith150Cols: DbtRepositoryService = {
       async syncRepo() {},
       async listModels() {
-        return [{ name: "dim_users", relativePath: "models/marts/dim_users.sql" }];
+        return [{ name: "fct_events", relativePath: "models/marts/fct_events.sql" }];
       },
       async getModelSql() { return null; },
       async getModelDocs() {
-        return [{ name: "dim_users", description: "User dimension table", columns }];
+        return [{ name: "fct_events", description: "Events fact table", columns }];
       }
     };
 
