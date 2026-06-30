@@ -28,6 +28,7 @@ import {
 import { SqlGuard } from "./sqlGuard.js";
 import { MetadataCache } from "../utils/metadataCache.js";
 import { createId } from "../utils/id.js";
+import { IterationBudget } from "./harness.js";
 
 export const TENANT_MEMORY_MAX_CONTENT_CHARS = 300;
 export const TENANT_MEMORY_MAX_PROMPT_ITEMS = 10;
@@ -903,6 +904,9 @@ export class AnalyticsAgentRuntime {
     this.metadataCache = new MetadataCache(metadataCacheTtlMs);
   }
 
+  /** Shared iteration budget for this agent instance (optional). */
+  budget?: IterationBudget;
+
   private resolveWarehouse(tenantId: string): WarehouseAdapter {
     return typeof this.warehouse === "function" ? this.warehouse(tenantId) : this.warehouse;
   }
@@ -936,6 +940,20 @@ export class AnalyticsAgentRuntime {
     });
     const recorder = new TurnRecorder(this.store, executionTurn, startedAt);
     recorder.appendEvent("turn.started", "info", "Execution turn started", { promptText: effectivePromptText });
+
+    // Budget check — refuse if exhausted
+    if (this.budget && !this.budget.consume()) {
+      const msg = "Budget exhausted. Start a new conversation to continue.";
+      recorder.appendEvent("turn.finalized", "warning", msg, { reason: "budget_exhausted" });
+      executionTurn.status = "completed";
+      executionTurn.assistantText = msg;
+      executionTurn.completedAt = new Date().toISOString();
+      return {
+        text: msg,
+        executionTurnId: executionTurn.id,
+        debug: recorder.buildDebug({}),
+      };
+    }
 
     const runTool = async <T>(
       tool: string,

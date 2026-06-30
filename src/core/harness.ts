@@ -1,3 +1,26 @@
+/**
+ * Harness facade — re-exports all Harness v3 components and provides
+ * backward-compatible convenience functions.
+ *
+ * New code should import directly from:
+ *   - src/core/harness/contextCompressor.ts
+ *   - src/core/harness/iterationBudget.ts
+ *   - src/core/harness/memoryProvider.ts
+ *   - src/core/harness/orchestrator.ts
+ *   - src/core/harness/types.ts
+ */
+
+export { ContextCompressor } from "./harness/contextCompressor.js";
+export type { CompressionResult, CompressorState, ContextCompressorConfig } from "./harness/types.js";
+export { IterationBudget } from "./harness/iterationBudget.js";
+export type { IterationBudgetConfig } from "./harness/types.js";
+export { SqliteMemoryProvider, EngramMemoryProvider } from "./harness/memoryProvider.js";
+export type { MemoryProvider } from "./harness/memoryProvider.js";
+export type { TurnRecord, ToolSchema } from "./harness/types.js";
+export { HarnessOrchestrator } from "./harness/orchestrator.js";
+export type { HarnessConfig } from "./harness/types.js";
+export { DEFAULT_COMPRESSOR_CONFIG, DEFAULT_HARNESS_CONFIG } from "./harness/types.js";
+
 import { createId } from "../utils/id.js";
 import type { ConversationStore } from "./interfaces.js";
 import type { AnalyticSkill } from "./types.js";
