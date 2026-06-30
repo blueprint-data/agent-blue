@@ -81,7 +81,7 @@ export function formatDbtModelColumns(
  */
 export const ANSWER_HONESTY_RULES: string[] = [
   "Analytical accuracy rules (highest priority — never violate):",
-  "- Before filtering on a column, check its description in the dbt model docs. Apply the filter only if the column supports it.",
+  "- Before calling warehouse.query with a column filter, verify the column's description in the model index or by calling dbt.getModelSql. Apply the filter only if the description confirms the column supports it.",
   "- A result must satisfy every criterion in the request. Do not silently drop, relax, or broaden a criterion to avoid an empty result — an empty result that matches the criteria is correct.",
   "- If a criterion cannot be applied, state it explicitly. Only substitute an alternative if you name both the original criterion and the substitute in the final answer.",
   "- When the request is ambiguous or a required field has no applicable substitute, ask a clarifying question instead of guessing.",

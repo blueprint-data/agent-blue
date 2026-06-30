@@ -720,7 +720,7 @@ describe("AnalyticsAgentRuntime column semantics and honesty", () => {
   it("documents not relaxing criteria and declaring unappliable filters", () => {
     const joined = ANSWER_HONESTY_RULES.join("\n").toLowerCase();
     expect(ANSWER_HONESTY_RULES.length).toBeGreaterThan(0);
-    expect(joined).toContain("dbt model docs");
+    expect(joined).toMatch(/dbt\.getmodelsql|dbt model docs|model index/);
     expect(joined).not.toContain("100% honesty");
     expect(joined).not.toContain("act like");
     expect(joined).toMatch(/cannot be applied|could not apply/);
