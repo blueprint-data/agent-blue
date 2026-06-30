@@ -28,7 +28,7 @@ import {
 import { SqlGuard } from "./sqlGuard.js";
 import { MetadataCache } from "../utils/metadataCache.js";
 import { createId } from "../utils/id.js";
-import { IterationBudget } from "./harness.js";
+import { ContextCompressor, HarnessOrchestrator, IterationBudget } from "./harness.js";
 
 export const TENANT_MEMORY_MAX_CONTENT_CHARS = 300;
 export const TENANT_MEMORY_MAX_PROMPT_ITEMS = 10;
@@ -887,6 +887,8 @@ class TurnRecorder {
 
 export interface RuntimeRespondOptions {
   promptText?: string;
+  /** Optional LLM summarizer callback for context compression. */
+  summarizer?: (messages: Record<string, unknown>[]) => Promise<string>;
 }
 
 export class AnalyticsAgentRuntime {
@@ -906,6 +908,10 @@ export class AnalyticsAgentRuntime {
 
   /** Shared iteration budget for this agent instance (optional). */
   budget?: IterationBudget;
+  /** Context compressor for long conversations (optional). */
+  compressor?: ContextCompressor;
+  /** Full harness orchestrator (optional). */
+  harness?: HarnessOrchestrator;
 
   private resolveWarehouse(tenantId: string): WarehouseAdapter {
     return typeof this.warehouse === "function" ? this.warehouse(tenantId) : this.warehouse;
@@ -1068,12 +1074,42 @@ export class AnalyticsAgentRuntime {
             )
           );
 
+      // Context compression — compress history if threshold is exceeded
+      let compressedSummary: string | undefined;
+      if (this.compressor) {
+        const contextLength = 128_000;
+        const historyForCompression = history.filter((m) => m.role !== "system");
+        const rawMessages = historyForCompression as unknown as Record<string, unknown>[];
+        if (this.compressor.shouldCompress(rawMessages, contextLength)) {
+          const summarize = options.summarizer;
+          const result = await this.compressor.compress({
+            messages: rawMessages,
+            contextLength,
+            summarize,
+          });
+          if (!result.aborted && result.savedTokens > 0) {
+            compressedSummary = result.summary;
+            recorder.appendEvent("context.compressed" as ExecutionTraceEventType, "info", "History compressed", {
+              savedTokens: result.savedTokens,
+              beforeTokens: result.beforeTokens,
+              afterTokens: result.afterTokens,
+            });
+          }
+        }
+      }
+
       const historyMessages: LlmMessage[] = history
         .filter((m) => m.role !== "tool" && m.role !== "system")
-        .map((m): LlmMessage => ({
-          role: m.role === "user" ? "user" : "assistant",
-          content: m.content
-        }));
+        .map((m): LlmMessage => {
+          // Replace compressed middle segment with summary if available
+          if (compressedSummary && m.role === "assistant" && m.content === compressedSummary) {
+            return { role: "assistant", content: compressedSummary };
+          }
+          return {
+            role: m.role === "user" ? "user" : "assistant",
+            content: m.content,
+          };
+        });
 
       const sqlGuidanceLines = isBigQuery
         ? [

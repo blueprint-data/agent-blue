@@ -129,6 +129,7 @@ export type ExecutionTraceEventType =
   | "tool.failed"
   | "tool.reused"
   | "feedback.observation"
+  | "context.compressed"
   | "turn.finalized";
 
 export interface ExecutionTraceEvent {

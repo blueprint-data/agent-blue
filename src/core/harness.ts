@@ -12,6 +12,7 @@
 
 export { ContextCompressor } from "./harness/contextCompressor.js";
 export type { CompressionResult, CompressorState, ContextCompressorConfig } from "./harness/types.js";
+export { createSummarizer } from "./harness/summarizer.js";
 export { IterationBudget } from "./harness/iterationBudget.js";
 export type { IterationBudgetConfig } from "./harness/types.js";
 export { SqliteMemoryProvider, EngramMemoryProvider } from "./harness/memoryProvider.js";
