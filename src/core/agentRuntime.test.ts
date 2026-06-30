@@ -877,17 +877,17 @@ describe("formatDbtModelColumns", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Phase 3: Integration test — 150-column model regression (original QR-bob bug)
+// Phase 3: Integration test — large model column-name regression
 // ---------------------------------------------------------------------------
 describe("AnalyticsAgentRuntime dbt column index — no column name truncation", () => {
   it("includes bottom-half column names (columns #125, #130) in the index for a 150-column model", async () => {
     const store = createStore();
     seedTenantRepo(store, "acme");
 
-    // Build 150 columns; put the "qr_bob" columns in the bottom half
+    // Build 150 columns; put important analytical columns in the bottom half
     const columns: DbtModelColumnDoc[] = Array.from({ length: 150 }, (_, i) => {
-      if (i === 124) return { name: "is_activated_qr_bob", description: "Flag for qr bob activation" };
-      if (i === 129) return { name: "lifetime_qr_bob_count", description: "Count of qr bob events" };
+      if (i === 124) return { name: "is_premium_feature_enabled", description: "Flag for premium feature enablement" };
+      if (i === 129) return { name: "lifetime_feature_event_count", description: "Count of lifetime feature events" };
       return { name: `col_${i}`, description: `Description for col_${i}` };
     });
 
@@ -920,7 +920,7 @@ describe("AnalyticsAgentRuntime dbt column index — no column name truncation",
         llmModel: "test-model",
         origin: { source: "cli" }
       },
-      "How many qr bob activations this week?"
+      "How many premium feature activations happened this week?"
     );
 
     const indexMessage = llm.calls[0]?.messages.find(
@@ -929,7 +929,7 @@ describe("AnalyticsAgentRuntime dbt column index — no column name truncation",
     expect(indexMessage).toBeDefined();
     const content = indexMessage?.content ?? "";
     // Both bottom-half columns must appear by name
-    expect(content).toContain("lifetime_qr_bob_count");
-    expect(content).toContain("is_activated_qr_bob");
+    expect(content).toContain("lifetime_feature_event_count");
+    expect(content).toContain("is_premium_feature_enabled");
   });
 });
