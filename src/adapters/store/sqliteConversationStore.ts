@@ -24,6 +24,7 @@ import {
   AgentContext,
   AgentExecutionTurn,
   AgentProfile,
+  AnalyticSkill,
   ConversationMessage,
   ConversationOrigin,
   ConversationSource,
@@ -31,6 +32,7 @@ import {
   MessageFeedback,
   MessageFeedbackRow,
   ScheduleChannelType,
+  SessionSummary,
   TenantMemory,
   TenantMemorySource,
   TenantSchedule,
@@ -365,6 +367,38 @@ export class SqliteConversationStore implements ConversationStore {
       );
       CREATE INDEX IF NOT EXISTS idx_agent_tool_executions_turn_created ON agent_tool_executions(turn_id, created_at);
       CREATE INDEX IF NOT EXISTS idx_agent_tool_executions_cache_key ON agent_tool_executions(turn_id, cache_key, status);
+
+      CREATE TABLE IF NOT EXISTS analytic_skills (
+        id TEXT PRIMARY KEY,
+        category TEXT NOT NULL,
+        description TEXT NOT NULL,
+        sql_text TEXT NOT NULL,
+        warehouse TEXT NOT NULL,
+        tags_json TEXT NOT NULL DEFAULT '[]',
+        complexity INTEGER NOT NULL DEFAULT 1,
+        success_count INTEGER NOT NULL DEFAULT 1,
+        last_used_at TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_analytic_skills_category ON analytic_skills(category);
+
+      CREATE TABLE IF NOT EXISTS tenant_context (
+        tenant_id TEXT PRIMARY KEY,
+        content TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS session_summaries (
+        conversation_id TEXT NOT NULL,
+        tenant_id TEXT NOT NULL,
+        summary_text TEXT NOT NULL,
+        topics_json TEXT NOT NULL DEFAULT '[]',
+        message_count INTEGER NOT NULL DEFAULT 0,
+        last_exchanges_json TEXT,
+        last_message_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (conversation_id, tenant_id)
+      );
     `);
     this.migrateAdminSessionsColumns();
     this.migrateTenantMemoriesTable();
@@ -1746,6 +1780,9 @@ export class SqliteConversationStore implements ConversationStore {
     this.db.prepare("DELETE FROM tenant_integration_tokens WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM tenant_llm_settings WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM llm_usage_events WHERE tenant_id = ?").run(tenantId);
+    this.db.prepare("DELETE FROM analytic_skills WHERE tenant_id = ?").run(tenantId);
+    this.db.prepare("DELETE FROM tenant_context WHERE tenant_id = ?").run(tenantId);
+    this.db.prepare("DELETE FROM session_summaries WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM agent_execution_events WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM agent_tool_executions WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM agent_execution_turns WHERE tenant_id = ?").run(tenantId);
@@ -2954,6 +2991,269 @@ export class SqliteConversationStore implements ConversationStore {
       userId: input.userId,
       reaction: input.reaction,
       createdAt
+    };
+  }
+
+  // ─── Harness storage: analytic skills ───────────────────
+
+  saveAnalyticSkill(skill: AnalyticSkill): void {
+    this.db
+      .prepare(
+        `INSERT INTO analytic_skills (id, category, description, sql_text, warehouse, tags_json, complexity, success_count, last_used_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           category = excluded.category,
+           description = excluded.description,
+           sql_text = excluded.sql_text,
+           warehouse = excluded.warehouse,
+           tags_json = excluded.tags_json,
+           complexity = excluded.complexity,
+           success_count = excluded.success_count,
+           last_used_at = excluded.last_used_at,
+           created_at = excluded.created_at`
+      )
+      .run(
+        skill.id,
+        skill.category,
+        skill.description,
+        skill.sql,
+        skill.warehouse,
+        JSON.stringify(skill.tags),
+        skill.complexity,
+        skill.successCount,
+        skill.lastUsedAt ?? null,
+        skill.createdAt
+      );
+  }
+
+  searchAnalyticSkills(query: string, limit = 20): AnalyticSkill[] {
+    const tokens = query
+      .trim()
+      .split(/\s+/)
+      .filter((t) => t.length > 0);
+    if (tokens.length === 0) {
+      return [];
+    }
+    const conditions = tokens.map(() => "(description LIKE ? OR sql_text LIKE ? OR tags_json LIKE ?)").join(" AND ");
+    const params: unknown[] = [];
+    for (const token of tokens) {
+      const like = `%${token}%`;
+      params.push(like, like, like);
+    }
+    params.push(Math.min(Math.max(limit, 1), 500));
+    const sql = `SELECT id, category, description, sql_text, warehouse, tags_json, complexity, success_count, last_used_at, created_at
+                 FROM analytic_skills
+                 WHERE ${conditions}
+                 ORDER BY success_count DESC, created_at DESC
+                 LIMIT ?`;
+    const rows = this.db.prepare(sql).all(...params) as Array<{
+      id: string;
+      category: string;
+      description: string;
+      sql_text: string;
+      warehouse: string;
+      tags_json: string;
+      complexity: number;
+      success_count: number;
+      last_used_at: string | null;
+      created_at: string;
+    }>;
+    return rows.map((r) => ({
+      id: r.id,
+      category: r.category,
+      description: r.description,
+      sql: r.sql_text,
+      warehouse: r.warehouse,
+      tags: JSON.parse(r.tags_json) as string[],
+      complexity: r.complexity,
+      successCount: r.success_count,
+      lastUsedAt: r.last_used_at ?? undefined,
+      createdAt: r.created_at
+    }));
+  }
+
+  findAnalyticSkillBySql(normalizedSql: string): AnalyticSkill | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, category, description, sql_text, warehouse, tags_json, complexity, success_count, last_used_at, created_at
+         FROM analytic_skills
+         WHERE sql_text = ?`
+      )
+      .get(normalizedSql) as
+      | {
+          id: string;
+          category: string;
+          description: string;
+          sql_text: string;
+          warehouse: string;
+          tags_json: string;
+          complexity: number;
+          success_count: number;
+          last_used_at: string | null;
+          created_at: string;
+        }
+      | undefined;
+    if (!row) {
+      return null;
+    }
+    return {
+      id: row.id,
+      category: row.category,
+      description: row.description,
+      sql: row.sql_text,
+      warehouse: row.warehouse,
+      tags: JSON.parse(row.tags_json) as string[],
+      complexity: row.complexity,
+      successCount: row.success_count,
+      lastUsedAt: row.last_used_at ?? undefined,
+      createdAt: row.created_at
+    };
+  }
+
+  updateAnalyticSkill(id: string, updates: Partial<AnalyticSkill>): void {
+    const row = this.db
+      .prepare(
+        `SELECT id, category, description, sql_text, warehouse, tags_json, complexity, success_count, last_used_at, created_at
+         FROM analytic_skills
+         WHERE id = ?`
+      )
+      .get(id) as
+      | {
+          id: string;
+          category: string;
+          description: string;
+          sql_text: string;
+          warehouse: string;
+          tags_json: string;
+          complexity: number;
+          success_count: number;
+          last_used_at: string | null;
+          created_at: string;
+        }
+      | undefined;
+    if (!row) {
+      return;
+    }
+    const next = {
+      category: updates.category ?? row.category,
+      description: updates.description ?? row.description,
+      sql_text: updates.sql ?? row.sql_text,
+      warehouse: updates.warehouse ?? row.warehouse,
+      tags_json: updates.tags ? JSON.stringify(updates.tags) : row.tags_json,
+      complexity: updates.complexity ?? row.complexity,
+      success_count: updates.successCount ?? row.success_count,
+      last_used_at: updates.lastUsedAt === undefined ? row.last_used_at : (updates.lastUsedAt ?? null)
+    };
+    this.db
+      .prepare(
+        `UPDATE analytic_skills
+         SET category = ?, description = ?, sql_text = ?, warehouse = ?, tags_json = ?, complexity = ?, success_count = ?, last_used_at = ?
+         WHERE id = ?`
+      )
+      .run(
+        next.category,
+        next.description,
+        next.sql_text,
+        next.warehouse,
+        next.tags_json,
+        next.complexity,
+        next.success_count,
+        next.last_used_at,
+        id
+      );
+  }
+
+  // ─── Harness storage: tenant context ────────────────────
+
+  getTenantContext(tenantId: string): string | null {
+    const row = this.db
+      .prepare("SELECT content FROM tenant_context WHERE tenant_id = ?")
+      .get(tenantId) as { content: string } | undefined;
+    return row ? row.content : null;
+  }
+
+  saveTenantContext(tenantId: string, content: string): void {
+    const updatedAt = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO tenant_context (tenant_id, content, updated_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(tenant_id) DO UPDATE SET
+           content = excluded.content,
+           updated_at = excluded.updated_at`
+      )
+      .run(tenantId, content, updatedAt);
+  }
+
+  // ─── Harness storage: session summaries ──────────────────
+
+  saveSessionSummary(params: {
+    conversationId: string;
+    tenantId: string;
+    summaryText: string;
+    topics: string[];
+    messageCount: number;
+    lastExchanges: Array<{ role: string; content: string }>;
+  }): void {
+    const lastMessageAt = new Date().toISOString();
+    const createdAt = lastMessageAt;
+    this.db
+      .prepare(
+        `INSERT INTO session_summaries
+         (conversation_id, tenant_id, summary_text, topics_json, message_count, last_exchanges_json, last_message_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(conversation_id, tenant_id) DO UPDATE SET
+           summary_text = excluded.summary_text,
+           topics_json = excluded.topics_json,
+           message_count = excluded.message_count,
+           last_exchanges_json = excluded.last_exchanges_json,
+           last_message_at = excluded.last_message_at`
+      )
+      .run(
+        params.conversationId,
+        params.tenantId,
+        params.summaryText,
+        JSON.stringify(params.topics),
+        params.messageCount,
+        params.lastExchanges.length > 0 ? JSON.stringify(params.lastExchanges) : null,
+        lastMessageAt,
+        createdAt
+      );
+  }
+
+  getSessionResumeData(
+    conversationId: string,
+    tenantId: string
+  ): {
+    summaryText: string;
+    topics: string[];
+    messageCount: number;
+    lastExchanges: Array<{ role: string; content: string }>;
+  } | null {
+    const row = this.db
+      .prepare(
+        `SELECT summary_text, topics_json, message_count, last_exchanges_json
+         FROM session_summaries
+         WHERE conversation_id = ? AND tenant_id = ?`
+      )
+      .get(conversationId, tenantId) as
+      | {
+          summary_text: string;
+          topics_json: string;
+          message_count: number;
+          last_exchanges_json: string | null;
+        }
+      | undefined;
+    if (!row) {
+      return null;
+    }
+    return {
+      summaryText: row.summary_text,
+      topics: JSON.parse(row.topics_json) as string[],
+      messageCount: row.message_count,
+      lastExchanges: row.last_exchanges_json
+        ? (JSON.parse(row.last_exchanges_json) as Array<{ role: string; content: string }>)
+        : []
     };
   }
 }

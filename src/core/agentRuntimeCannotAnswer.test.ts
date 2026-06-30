@@ -253,7 +253,15 @@ function createMockStore(): ConversationStore {
     },
     listMessageFeedback() {
       return [];
-    }
+    },
+    saveAnalyticSkill() {},
+    searchAnalyticSkills() { return []; },
+    findAnalyticSkillBySql() { return null; },
+    updateAnalyticSkill() {},
+    getTenantContext() { return null; },
+    saveTenantContext() {},
+    saveSessionSummary() {},
+    getSessionResumeData() { return null; }
   };
 }
 
