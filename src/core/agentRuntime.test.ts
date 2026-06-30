@@ -14,10 +14,13 @@ import type {
 import {
   AnalyticsAgentRuntime,
   ANSWER_HONESTY_RULES,
-  TENANT_MEMORY_MAX_PROMPT_ITEMS
+  DBT_MODEL_DESCRIPTION_BUDGET_CHARS,
+  TENANT_MEMORY_MAX_PROMPT_ITEMS,
+  formatDbtModelColumns
 } from "./agentRuntime.js";
 import { SqlGuard } from "./sqlGuard.js";
 import { SqliteConversationStore } from "../adapters/store/sqliteConversationStore.js";
+import type { DbtModelColumnDoc } from "./types.js";
 
 const tempPaths: string[] = [];
 
@@ -720,5 +723,211 @@ describe("AnalyticsAgentRuntime column semantics and honesty", () => {
     expect(joined).toContain("hashed");
     expect(joined).toMatch(/cannot be applied|could not apply/);
     expect(joined).toMatch(/clarif|ask/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 1: DBT_MODEL_DESCRIPTION_BUDGET_CHARS export
+// ---------------------------------------------------------------------------
+describe("DBT_MODEL_DESCRIPTION_BUDGET_CHARS", () => {
+  it("is exported as a positive number", () => {
+    expect(typeof DBT_MODEL_DESCRIPTION_BUDGET_CHARS).toBe("number");
+    expect(DBT_MODEL_DESCRIPTION_BUDGET_CHARS).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 2: formatDbtModelColumns unit tests
+// ---------------------------------------------------------------------------
+describe("formatDbtModelColumns", () => {
+  const opts = {
+    columnDescriptionMaxChars: 120,
+    modelDescriptionBudgetChars: DBT_MODEL_DESCRIPTION_BUDGET_CHARS
+  };
+
+  // R5: empty column list
+  it("returns empty string for empty column list", () => {
+    expect(formatDbtModelColumns([], opts)).toBe("");
+  });
+
+  // R5: column with undefined description renders as bare name, no budget consumed
+  it("renders column with undefined description as bare name", () => {
+    const cols: DbtModelColumnDoc[] = [{ name: "id" }];
+    expect(formatDbtModelColumns(cols, opts)).toBe("id");
+  });
+
+  // R5: column with empty string description renders as bare name, no budget consumed
+  it("renders column with empty string description as bare name", () => {
+    const cols: DbtModelColumnDoc[] = [{ name: "id", description: "" }];
+    expect(formatDbtModelColumns(cols, opts)).toBe("id");
+  });
+
+  // R3: mixed described and non-described columns, within budget
+  it("formats mixed described and bare columns as 'name [desc]; name; name [desc]'", () => {
+    const cols: DbtModelColumnDoc[] = [
+      { name: "a", description: "x" },
+      { name: "b" },
+      { name: "c", description: "y" }
+    ];
+    expect(formatDbtModelColumns(cols, opts)).toBe("a [x]; b; c [y]");
+  });
+
+  // R3: whitespace normalization in description
+  it("normalizes whitespace in descriptions", () => {
+    const cols: DbtModelColumnDoc[] = [{ name: "col", description: "  extra   spaces  " }];
+    const result = formatDbtModelColumns(cols, opts);
+    expect(result).toBe("col [extra spaces]");
+  });
+
+  // R2: all columns within budget get descriptions
+  it("attaches descriptions to all columns when total fits under budget", () => {
+    const cols: DbtModelColumnDoc[] = Array.from({ length: 5 }, (_, i) => ({
+      name: `col_${i}`,
+      description: "short desc"
+    }));
+    const result = formatDbtModelColumns(cols, opts);
+    for (let i = 0; i < 5; i++) {
+      expect(result).toContain(`col_${i} [short desc]`);
+    }
+  });
+
+  // R2: columns past budget render as name-only but still appear (R1)
+  it("renders columns past budget as bare names but still includes them", () => {
+    const tinyBudgetOpts = {
+      columnDescriptionMaxChars: 120,
+      modelDescriptionBudgetChars: 10 // exhausted after first real description
+    };
+    const cols: DbtModelColumnDoc[] = [
+      { name: "first", description: "123456789012" }, // 12 chars > budget 10, still attached (pre-add gate: 0 < 10)
+      { name: "second", description: "should not appear" },
+      { name: "third" }
+    ];
+    const result = formatDbtModelColumns(cols, tinyBudgetOpts);
+    // second and third must appear
+    expect(result).toContain("second");
+    expect(result).toContain("third");
+    // second description is dropped (budget exhausted after first)
+    expect(result).not.toContain("should not appear");
+    // first gets its description (pre-add gate passes when running=0 < budget=10)
+    expect(result).toContain("first [");
+  });
+
+  // R2: per-column description capped at columnDescriptionMaxChars
+  it("caps description at columnDescriptionMaxChars characters", () => {
+    const longDesc = "a".repeat(200);
+    const cols: DbtModelColumnDoc[] = [{ name: "col", description: longDesc }];
+    const result = formatDbtModelColumns(cols, opts);
+    // description part between [ and ] must be ≤ 120 chars
+    const match = result.match(/\[(.+)\]/);
+    expect(match).not.toBeNull();
+    expect(match![1].length).toBeLessThanOrEqual(120);
+  });
+
+  // R2: first column gets description even when capped length would exceed budget (pre-add gate is on BEFORE value)
+  it("attaches first column description even when budget < capped desc length (pre-add gate)", () => {
+    const tinyOpts = {
+      columnDescriptionMaxChars: 120,
+      modelDescriptionBudgetChars: 50 // small budget
+    };
+    const longDesc = "b".repeat(200);
+    const cols: DbtModelColumnDoc[] = [{ name: "only_col", description: longDesc }];
+    const result = formatDbtModelColumns(cols, tinyOpts);
+    // name must appear
+    expect(result).toContain("only_col");
+    // description must be attached (running=0 < 50) and capped at 120
+    expect(result).toContain("only_col [");
+    const match = result.match(/\[(.+)\]/);
+    expect(match).not.toBeNull();
+    expect(match![1].length).toBeLessThanOrEqual(120);
+  });
+
+  // R1: 150-column fixture — all names present
+  it("includes all 150 column names regardless of budget", () => {
+    const cols: DbtModelColumnDoc[] = Array.from({ length: 150 }, (_, i) => ({
+      name: `col_${i}`,
+      description: `description for column ${i}`
+    }));
+    const result = formatDbtModelColumns(cols, opts);
+    // Parse each rendered token back to its column name (strip any " [desc]")
+    // so substring collisions (e.g. "col_1" inside "col_10") cannot mask a
+    // genuinely missing column.
+    const renderedNames = new Set(
+      result.split("; ").map((token) => {
+        const bracket = token.indexOf(" [");
+        return bracket === -1 ? token : token.slice(0, bracket);
+      })
+    );
+    for (let i = 0; i < 150; i++) {
+      expect(renderedNames.has(`col_${i}`)).toBe(true);
+    }
+  });
+
+  // R4: same inputs → same output (referential purity)
+  it("returns identical output for identical inputs (pure function)", () => {
+    const cols: DbtModelColumnDoc[] = [
+      { name: "a", description: "alpha" },
+      { name: "b", description: "beta" }
+    ];
+    const r1 = formatDbtModelColumns(cols, opts);
+    const r2 = formatDbtModelColumns(cols, opts);
+    expect(r1).toBe(r2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 3: Integration test — 150-column model regression (original QR-bob bug)
+// ---------------------------------------------------------------------------
+describe("AnalyticsAgentRuntime dbt column index — no column name truncation", () => {
+  it("includes bottom-half column names (columns #125, #130) in the index for a 150-column model", async () => {
+    const store = createStore();
+    seedTenantRepo(store, "acme");
+
+    // Build 150 columns; put the "qr_bob" columns in the bottom half
+    const columns: DbtModelColumnDoc[] = Array.from({ length: 150 }, (_, i) => {
+      if (i === 124) return { name: "is_activated_qr_bob", description: "Flag for qr bob activation" };
+      if (i === 129) return { name: "lifetime_qr_bob_count", description: "Count of qr bob events" };
+      return { name: `col_${i}`, description: `Description for col_${i}` };
+    });
+
+    const dbtRepoWith150Cols: DbtRepositoryService = {
+      async syncRepo() {},
+      async listModels() {
+        return [{ name: "dim_users", relativePath: "models/marts/dim_users.sql" }];
+      },
+      async getModelSql() { return null; },
+      async getModelDocs() {
+        return [{ name: "dim_users", description: "User dimension table", columns }];
+      }
+    };
+
+    const llm = new StubLlmProvider([JSON.stringify({ type: "final_answer", answer: "ok" })]);
+    const runtime = new AnalyticsAgentRuntime(
+      llm,
+      warehouse,
+      chartTool,
+      dbtRepoWith150Cols,
+      store,
+      new SqlGuard({ enforceReadOnly: true, defaultLimit: 200, maxLimit: 2000 })
+    );
+
+    await runtime.respond(
+      {
+        tenantId: "acme",
+        profileName: "default",
+        conversationId: "conv_150col_regression",
+        llmModel: "test-model",
+        origin: { source: "cli" }
+      },
+      "How many qr bob activations this week?"
+    );
+
+    const indexMessage = llm.calls[0]?.messages.find(
+      (m) => typeof m.content === "string" && m.content.startsWith("dbt models currently available")
+    );
+    expect(indexMessage).toBeDefined();
+    const content = indexMessage?.content ?? "";
+    // Both bottom-half columns must appear by name
+    expect(content).toContain("lifetime_qr_bob_count");
+    expect(content).toContain("is_activated_qr_bob");
   });
 });
