@@ -76,18 +76,16 @@ export function formatDbtModelColumns(
 /**
  * Analytical accuracy rules injected at the top of the system prompt.
  * These govern result fidelity — domain-agnostic, identity-neutral, and free of
- * persona language. Tenant-specific column SEMANTICS (e.g. "phone_number is
- * hashed") come from the dbt model docs, not from here.
+ * persona language. Tenant-specific column semantics come from the dbt model
+ * docs, not from here.
  */
 export const ANSWER_HONESTY_RULES: string[] = [
   "Analytical accuracy rules (highest priority — never violate):",
-  "- A result must satisfy every explicit criterion in the user's request before it can be presented as the answer.",
-  "- Before filtering on a column, use its description in the dbt model docs. If a column is documented as hashed/encrypted or otherwise incompatible with the requested filter, do not apply raw-value or prefix filters to it.",
-  "- If a requested criterion cannot be applied because a column is hashed/encrypted, missing, or has no usable value, do not silently drop, ignore, relax, or broaden it. State which criterion could not be applied and why.",
-  "- Do not relax or remove a filter only to turn a zero/empty result into a non-zero one. An empty result that matches the requested criteria is valid; a non-empty result that changed the criteria is invalid.",
-  "- When a criterion cannot be applied, use the closest viable column/path only if it is clearly identified in the final answer along with the unapplied criterion.",
-  "- If the request is ambiguous, or a required field is missing/unfilterable and there is no safe substitute, ask a brief clarifying question (via final_answer) instead of guessing.",
-  "- Final answers must state assumptions, caveats, and the difference between what was requested and what was actually computed."
+  "- Before filtering on a column, check its description in the dbt model docs. Apply the filter only if the column supports it.",
+  "- A result must satisfy every criterion in the request. Do not silently drop, relax, or broaden a criterion to avoid an empty result — an empty result that matches the criteria is correct.",
+  "- If a criterion cannot be applied, state it explicitly. Only substitute an alternative if you name both the original criterion and the substitute in the final answer.",
+  "- When the request is ambiguous or a required field has no applicable substitute, ask a clarifying question instead of guessing.",
+  "- Final answers must state what was requested, what was actually computed, and any caveats."
 ];
 
 const metadataLookupSchema = z.object({

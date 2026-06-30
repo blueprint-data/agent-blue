@@ -684,7 +684,7 @@ describe("AnalyticsAgentRuntime column semantics and honesty", () => {
         llmModel: "test-model",
         origin: { source: "cli" }
       },
-      "How many users have a +591 phone?"
+      "How many users signed up last month?"
     );
 
     const indexMessage = llm.calls[0]?.messages.find(
@@ -720,7 +720,7 @@ describe("AnalyticsAgentRuntime column semantics and honesty", () => {
   it("documents not relaxing criteria and declaring unappliable filters", () => {
     const joined = ANSWER_HONESTY_RULES.join("\n").toLowerCase();
     expect(ANSWER_HONESTY_RULES.length).toBeGreaterThan(0);
-    expect(joined).toContain("hashed");
+    expect(joined).toContain("dbt model docs");
     expect(joined).not.toContain("100% honesty");
     expect(joined).not.toContain("act like");
     expect(joined).toMatch(/cannot be applied|could not apply/);
