@@ -894,11 +894,11 @@ describe("AnalyticsAgentRuntime dbt column index — no column name truncation",
     const dbtRepoWith150Cols: DbtRepositoryService = {
       async syncRepo() {},
       async listModels() {
-        return [{ name: "fct_events", relativePath: "models/marts/fct_events.sql" }];
+        return [{ name: "fct_wide_model", relativePath: "models/marts/fct_wide_model.sql" }];
       },
       async getModelSql() { return null; },
       async getModelDocs() {
-        return [{ name: "fct_events", description: "Events fact table", columns }];
+        return [{ name: "fct_wide_model", description: "Wide fact table fixture for truncation tests", columns }];
       }
     };
 
