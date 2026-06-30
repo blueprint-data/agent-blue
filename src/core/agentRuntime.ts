@@ -12,9 +12,22 @@ import {
   TenantWarehouseProvider,
   WarehouseAdapter
 } from "./interfaces.js";
-import { AgentArtifact, AgentContext, AgentResponse, DbtModelColumnDoc, MessageFeedbackRow, QueryResult, ScheduleChannelType, TenantMemory } from "./types.js";
+import {
+  AgentArtifact,
+  AgentContext,
+  AgentExecutionTurn,
+  AgentResponse,
+  DbtModelColumnDoc,
+  ExecutionTraceEventLevel,
+  ExecutionTraceEventType,
+  MessageFeedbackRow,
+  QueryResult,
+  ScheduleChannelType,
+  TenantMemory
+} from "./types.js";
 import { SqlGuard } from "./sqlGuard.js";
 import { MetadataCache } from "../utils/metadataCache.js";
+import { createId } from "../utils/id.js";
 
 export const TENANT_MEMORY_MAX_CONTENT_CHARS = 300;
 export const TENANT_MEMORY_MAX_PROMPT_ITEMS = 10;
@@ -608,6 +621,269 @@ function inferSchemaHintFromModelPath(relativePath: string, fallbackSchema: stri
 
 export type WarehouseResolver = WarehouseAdapter | ((tenantId: string) => WarehouseAdapter);
 
+function deepRedact(value: unknown): unknown {
+  if (value === null || value === undefined) {
+    return value;
+  }
+  if (typeof value === "string") {
+    if (/-----BEGIN (RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----/.test(value)) {
+      return "[REDACTED_PRIVATE_KEY]";
+    }
+    if (/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/.test(value)) {
+      return value.replace(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, "[REDACTED_EMAIL]");
+    }
+    if (/bearer\s+[a-zA-Z0-9_\-.]+/i.test(value)) {
+      return value.replace(/bearer\s+[a-zA-Z0-9_\-.]+/gi, "Bearer [REDACTED_TOKEN]");
+    }
+    if (/(api[_-]?key|token|secret|password|passwd|pwd)\s*[:=]\s*["']?[a-zA-Z0-9_\-.]+["']?/i.test(value)) {
+      return value.replace(
+        /((?:api[_-]?key|token|secret|password|passwd|pwd)\s*[:=]\s*["']?)[a-zA-Z0-9_\-.]+(["']?)/gi,
+        "$1[REDACTED]$2"
+      );
+    }
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map(deepRedact);
+  }
+  if (typeof value === "object") {
+    const result: Record<string, unknown> = {};
+    for (const [key, val] of Object.entries(value)) {
+      result[key] = deepRedact(val);
+    }
+    return result;
+  }
+  return value;
+}
+
+function summarizeOlderHistory(
+  messages: LlmMessage[],
+  keepLatestCount: number,
+  maxChars: number
+): LlmMessage[] | null {
+  if (messages.length <= keepLatestCount) {
+    return null;
+  }
+  const older = messages.slice(0, messages.length - keepLatestCount);
+  const charsPerMessage = Math.floor(maxChars / older.length);
+  const summary = older
+    .map((m) => `${m.role}: ${m.content.slice(0, charsPerMessage)}`)
+    .join("\n");
+  return [{ role: "system", content: `Conversation summary (earlier messages):\n${summary}` }];
+}
+
+function wildcardToRegex(pattern: string): RegExp {
+  const escaped = pattern
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*/g, ".*")
+    .replace(/\?/g, ".");
+  return new RegExp(`^${escaped}$`, "i");
+}
+
+function extractQualifiedRelations(sql: string): Array<{ schema: string; table: string }> {
+  const relations = new Map<string, { schema: string; table: string }>();
+  const normalized = sql
+    .replace(/\`([^\`]+)\`/g, (_, p1) => p1)
+    .replace(/"([^"]+)"/g, (_, p1) => p1);
+
+  const tableContextRegex = /\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+([a-zA-Z_][\w.]*)/gi;
+  let match: RegExpExecArray | null;
+  while ((match = tableContextRegex.exec(normalized)) !== null) {
+    const ref = match[1];
+    const parts = ref.split(".");
+    if (parts.length >= 2) {
+      const table = parts[parts.length - 1];
+      const schema = parts[parts.length - 2];
+      if (schema && table) {
+        const key = `${schema}.${table}`.toLowerCase();
+        relations.set(key, { schema, table });
+      }
+    }
+  }
+
+  return Array.from(relations.values());
+}
+
+class TurnRecorder {
+  readonly traceId: string;
+  private timings: Record<string, number>;
+  private plannerAttempts: Array<{ step: number; raw?: string; plan?: Record<string, unknown>; parseError?: string }>;
+  private toolCalls: Array<{
+    tool: string;
+    input: Record<string, unknown>;
+    status: "ok" | "error";
+    durationMs: number;
+    outputSummary?: Record<string, unknown>;
+    output?: unknown;
+    error?: string;
+  }>;
+  private llmCallSnapshots: Array<{
+    callIndex: number;
+    model: string;
+    usage?: LlmUsage;
+    generationId?: string;
+  }>;
+  private llmUsagePersisted: boolean;
+  private llmCallSeq: number;
+
+  constructor(
+    private readonly store: ConversationStore,
+    private readonly executionTurn: AgentExecutionTurn,
+    private readonly startedAt: number
+  ) {
+    this.traceId = executionTurn.traceId ?? createId("trace");
+    this.timings = {};
+    this.plannerAttempts = [];
+    this.toolCalls = [];
+    this.llmCallSnapshots = [];
+    this.llmUsagePersisted = false;
+    this.llmCallSeq = 0;
+  }
+
+  async measure<T>(label: string, fn: () => Promise<T>): Promise<T> {
+    const stepStart = Date.now();
+    const result = await fn();
+    this.timings[label] = Date.now() - stepStart;
+    return result;
+  }
+
+  addTiming(label: string, ms: number): void {
+    this.timings[label] = ms;
+  }
+
+  appendEvent(
+    type: ExecutionTraceEventType,
+    level: ExecutionTraceEventLevel,
+    message: string,
+    payload?: Record<string, unknown>,
+    step?: number
+  ): void {
+    this.store.appendExecutionEvent({
+      turnId: this.executionTurn.id,
+      tenantId: this.executionTurn.tenantId,
+      conversationId: this.executionTurn.conversationId,
+      step,
+      type,
+      level,
+      message,
+      payload: payload ? (deepRedact(payload) as Record<string, unknown>) : undefined
+    });
+  }
+
+  recordPlannerAttempt(
+    step: number,
+    raw?: string,
+    plan?: Record<string, unknown>,
+    parseError?: string
+  ): void {
+    this.plannerAttempts.push({ step, raw, plan, parseError });
+  }
+
+  recordLlmCall(model: string, result: { usage?: LlmUsage; generationId?: string }): void {
+    const callIndex = this.llmCallSeq++;
+    this.llmCallSnapshots.push({
+      callIndex,
+      model,
+      usage: result.usage,
+      generationId: result.generationId
+    });
+  }
+
+  persistLlmUsage(): void {
+    if (this.llmUsagePersisted) {
+      return;
+    }
+    this.llmUsagePersisted = true;
+    for (const snap of this.llmCallSnapshots) {
+      this.store.insertLlmUsageEvent({
+        tenantId: this.executionTurn.tenantId,
+        executionTurnId: this.executionTurn.id,
+        conversationId: this.executionTurn.conversationId,
+        model: snap.model,
+        generationId: snap.generationId ?? null,
+        promptTokens: snap.usage?.promptTokens ?? 0,
+        completionTokens: snap.usage?.completionTokens ?? 0,
+        totalTokens: snap.usage?.totalTokens ?? 0,
+        cost: snap.usage?.cost ?? null,
+        callIndex: snap.callIndex
+      });
+    }
+  }
+
+  buildLlmUsageDebug(): Record<string, unknown> {
+    const totals = this.llmCallSnapshots.reduce(
+      (acc, c) => ({
+        promptTokens: acc.promptTokens + (c.usage?.promptTokens ?? 0),
+        completionTokens: acc.completionTokens + (c.usage?.completionTokens ?? 0),
+        totalTokens: acc.totalTokens + (c.usage?.totalTokens ?? 0),
+        totalCost: acc.totalCost + (c.usage?.cost ?? 0)
+      }),
+      { promptTokens: 0, completionTokens: 0, totalTokens: 0, totalCost: 0 }
+    );
+    return {
+      totals,
+      calls: this.llmCallSnapshots.map((c) => ({
+        callIndex: c.callIndex,
+        model: c.model,
+        promptTokens: c.usage?.promptTokens ?? 0,
+        completionTokens: c.usage?.completionTokens ?? 0,
+        totalTokens: c.usage?.totalTokens ?? 0,
+        cost: c.usage?.cost,
+        generationId: c.generationId
+      }))
+    };
+  }
+
+  recordToolCall(entry: {
+    tool: string;
+    input: Record<string, unknown>;
+    status: "ok" | "error";
+    durationMs: number;
+    outputSummary?: Record<string, unknown>;
+    output?: unknown;
+    error?: string;
+    step?: number;
+    cacheKey?: string;
+    attemptCount?: number;
+  }): void {
+    this.store.recordToolExecution({
+      turnId: this.executionTurn.id,
+      tenantId: this.executionTurn.tenantId,
+      conversationId: this.executionTurn.conversationId,
+      step: entry.step ?? undefined,
+      cacheKey: entry.cacheKey ?? `${entry.tool}:${JSON.stringify(entry.input)}`,
+      tool: entry.tool,
+      input: entry.input,
+      status: entry.status,
+      durationMs: entry.durationMs,
+      attemptCount: entry.attemptCount ?? 1,
+      outputSummary: entry.outputSummary,
+      output: deepRedact(entry.output),
+      error: entry.error
+    });
+    this.toolCalls.push({
+      tool: entry.tool,
+      input: entry.input,
+      status: entry.status,
+      durationMs: entry.durationMs,
+      outputSummary: entry.outputSummary,
+      output: entry.output,
+      error: entry.error
+    });
+  }
+
+  buildDebug(extra: Record<string, unknown>): Record<string, unknown> {
+    return {
+      traceId: this.traceId,
+      timings: this.timings,
+      plannerAttempts: this.plannerAttempts,
+      toolCalls: this.toolCalls,
+      llmUsage: this.buildLlmUsageDebug(),
+      ...extra
+    };
+  }
+}
+
 export interface RuntimeRespondOptions {
   promptText?: string;
 }
@@ -635,55 +911,8 @@ export class AnalyticsAgentRuntime {
     const startedAt = Date.now();
     const persistedUserText = userText;
     const effectivePromptText = options.promptText?.trim() ? options.promptText : persistedUserText;
-    const timings: Record<string, number> = {};
     const maxToolSteps = 35;
-    const plannerAttempts: Array<{ step: number; raw?: string; parseError?: string; plan?: Record<string, unknown> }> = [];
     const attemptedSql = new Set<string>();
-    const toolCalls: Array<{
-      tool: string;
-      input: Record<string, unknown>;
-      status: "ok" | "error";
-      durationMs: number;
-      outputSummary?: Record<string, unknown>;
-      output?: unknown;
-      error?: string;
-    }> = [];
-    const measure = async <T>(label: string, fn: () => Promise<T>): Promise<T> => {
-      const stepStart = Date.now();
-      const result = await fn();
-      timings[label] = Date.now() - stepStart;
-      return result;
-    };
-    const runTool = async <T>(
-      tool: string,
-      input: Record<string, unknown>,
-      fn: () => Promise<T>,
-      summarize?: (value: T) => Record<string, unknown>,
-      fullOutput?: (value: T) => unknown
-    ): Promise<T> => {
-      const start = Date.now();
-      try {
-        const value = await fn();
-        toolCalls.push({
-          tool,
-          input,
-          status: "ok",
-          durationMs: Date.now() - start,
-          outputSummary: summarize ? summarize(value) : undefined,
-          output: fullOutput ? fullOutput(value) : undefined
-        });
-        return value;
-      } catch (error) {
-        toolCalls.push({
-          tool,
-          input,
-          status: "error",
-          durationMs: Date.now() - start,
-          error: (error as Error).message
-        });
-        throw error;
-      }
-    };
 
     this.store.createConversation(context);
     if (context.origin) {
@@ -695,72 +924,53 @@ export class AnalyticsAgentRuntime {
       role: "user",
       content: persistedUserText
     });
+    const traceId = createId("trace");
     const executionTurn = this.store.createExecutionTurn({
       tenantId: context.tenantId,
       conversationId: context.conversationId,
+      traceId,
       source: context.origin?.source ?? "cli",
       rawUserText: persistedUserText,
       promptText: effectivePromptText,
       status: "running"
     });
+    const recorder = new TurnRecorder(this.store, executionTurn, startedAt);
+    recorder.appendEvent("turn.started", "info", "Execution turn started", { promptText: effectivePromptText });
 
-    const llmCallSnapshots: Array<{
-      callIndex: number;
-      model: string;
-      usage?: LlmUsage;
-      generationId?: string;
-    }> = [];
-    let llmCallSeq = 0;
-    let llmUsagePersisted = false;
-
-    const persistLlmUsageToStore = (): void => {
-      if (llmUsagePersisted) {
-        return;
-      }
-      llmUsagePersisted = true;
-      for (const snap of llmCallSnapshots) {
-        this.store.insertLlmUsageEvent({
-          tenantId: context.tenantId,
-          executionTurnId: executionTurn.id,
-          conversationId: context.conversationId,
-          model: snap.model,
-          generationId: snap.generationId ?? null,
-          promptTokens: snap.usage?.promptTokens ?? 0,
-          completionTokens: snap.usage?.completionTokens ?? 0,
-          totalTokens: snap.usage?.totalTokens ?? 0,
-          cost: snap.usage?.cost ?? null,
-          callIndex: snap.callIndex
+    const runTool = async <T>(
+      tool: string,
+      input: Record<string, unknown>,
+      fn: () => Promise<T>,
+      summarize?: (value: T) => Record<string, unknown>,
+      fullOutput?: (value: T) => unknown
+    ): Promise<T> => {
+      const start = Date.now();
+      try {
+        const value = await fn();
+        recorder.recordToolCall({
+          tool,
+          input,
+          status: "ok",
+          durationMs: Date.now() - start,
+          outputSummary: summarize ? summarize(value) : undefined,
+          output: fullOutput ? fullOutput(value) : undefined
         });
+        return value;
+      } catch (error) {
+        recorder.recordToolCall({
+          tool,
+          input,
+          status: "error",
+          durationMs: Date.now() - start,
+          error: (error as Error).message
+        });
+        throw error;
       }
-    };
-
-    const buildLlmUsageDebug = (): Record<string, unknown> => {
-      const totals = llmCallSnapshots.reduce(
-        (acc, c) => ({
-          promptTokens: acc.promptTokens + (c.usage?.promptTokens ?? 0),
-          completionTokens: acc.completionTokens + (c.usage?.completionTokens ?? 0),
-          totalTokens: acc.totalTokens + (c.usage?.totalTokens ?? 0),
-          totalCost: acc.totalCost + (c.usage?.cost ?? 0)
-        }),
-        { promptTokens: 0, completionTokens: 0, totalTokens: 0, totalCost: 0 }
-      );
-      return {
-        totals,
-        calls: llmCallSnapshots.map((c) => ({
-          callIndex: c.callIndex,
-          model: c.model,
-          promptTokens: c.usage?.promptTokens ?? 0,
-          completionTokens: c.usage?.completionTokens ?? 0,
-          totalTokens: c.usage?.totalTokens ?? 0,
-          cost: c.usage?.cost,
-          generationId: c.generationId
-        }))
-      };
     };
 
     try {
       const profile = this.store.getOrCreateProfile(context.tenantId, context.profileName);
-      timings.profileMs = Date.now() - startedAt;
+      recorder.addTiming("profileMs", Date.now() - startedAt);
       const history = this.store.getMessages(context.conversationId, 12);
       let tenantMemories = this.store.listTenantMemories(context.tenantId, 500);
       const fewShotRows = this.store.listMessageFeedback(context.tenantId, { limit: 20, reaction: "thumbsup" });
@@ -785,18 +995,12 @@ export class AnalyticsAgentRuntime {
         "openai/gpt-4o-mini";
 
       const runLlm = async (input: { messages: LlmMessage[]; temperature: number }): Promise<string> => {
-        const callIndex = llmCallSeq++;
         const result = await this.llm.generateText({
           model: llmModel,
           messages: input.messages,
           temperature: input.temperature
         });
-        llmCallSnapshots.push({
-          callIndex,
-          model: llmModel,
-          usage: result.usage,
-          generationId: result.generationId
-        });
+        recorder.recordLlmCall(llmModel, result);
         return result.text;
       };
 
@@ -811,7 +1015,7 @@ export class AnalyticsAgentRuntime {
           ? `\`${whDatabase}.${whSchema}\``
           : `${quoteSqlIdent(whDatabase)}.${quoteSqlIdent(whSchema)}`
         : "";
-      const dbtModels = await measure("dbtModelsMs", async () => {
+      const dbtModels = await recorder.measure("dbtModelsMs", async () => {
         try {
           return await runTool(
             "dbt.listModels",
@@ -823,7 +1027,7 @@ export class AnalyticsAgentRuntime {
           return [];
         }
       });
-      const dbtModelDocs = await measure("dbtModelDocsMs", async () => {
+      const dbtModelDocs = await recorder.measure("dbtModelDocsMs", async () => {
         try {
           return await this.dbtRepo.getModelDocs(context.tenantId);
         } catch {
@@ -1028,13 +1232,17 @@ export class AnalyticsAgentRuntime {
       }
       ];
 
+      recorder.appendEvent("context.compiled", "info", "System prompt compiled");
+
       const finalizeSuccess = (
         text: string,
         debug: Record<string, unknown>,
         artifacts?: AgentArtifact[]
       ): AgentResponse => {
-        persistLlmUsageToStore();
-        const mergedDebug = { ...debug, llmUsage: buildLlmUsageDebug() };
+        recorder.persistLlmUsage();
+        recorder.addTiming("totalMs", Date.now() - startedAt);
+        recorder.appendEvent("turn.finalized", "info", "Turn finalized", { status: "completed" });
+        const mergedDebug = recorder.buildDebug({ ...debug });
         this.store.addMessage({
           tenantId: context.tenantId,
           conversationId: context.conversationId,
@@ -1066,7 +1274,7 @@ export class AnalyticsAgentRuntime {
       let scheduleCreateSucceededThisTurn = false;
 
       for (let step = 1; step <= maxToolSteps; step += 1) {
-      const planRaw = await measure(`plannerMs_step${step}`, async () =>
+      const planRaw = await recorder.measure(`plannerMs_step${step}`, async () =>
         runLlm({
           messages: [...baseMessages(), ...loopMessages],
           temperature: 0
@@ -1076,9 +1284,11 @@ export class AnalyticsAgentRuntime {
       let plan: z.infer<typeof toolDecisionSchema>;
       try {
         plan = toolDecisionSchema.parse(JSON.parse(planRaw));
-        plannerAttempts.push({ step, raw: planRaw, plan: plan as Record<string, unknown> });
+        recorder.recordPlannerAttempt(step, planRaw, plan as Record<string, unknown>);
+        recorder.appendEvent("planner.decision", "info", `Planner decision: ${plan.type}`, { type: plan.type, tool: plan.tool, args: plan.args ? deepRedact(plan.args) as Record<string, unknown> : undefined }, step);
       } catch (error) {
-        plannerAttempts.push({ step, raw: planRaw, parseError: (error as Error).message });
+        recorder.recordPlannerAttempt(step, planRaw, undefined, (error as Error).message);
+        recorder.appendEvent("planner.invalid_json", "error", `Planner invalid JSON at step ${step}: ${(error as Error).message}`, { raw: planRaw }, step);
         loopMessages.push({
           role: "user",
           content: `Invalid JSON response. Error: ${(error as Error).message}. Return valid JSON only.`
@@ -1112,11 +1322,8 @@ export class AnalyticsAgentRuntime {
           text,
           {
             plan,
-            plannerAttempts,
             sql: finalSql,
-            toolCalls,
-            mode: "direct_tool_loop",
-            timings: { ...timings, totalMs: Date.now() - startedAt }
+            mode: "direct_tool_loop"
           },
           latestChartArtifact ? [latestChartArtifact] : undefined
         );
@@ -1131,12 +1338,9 @@ export class AnalyticsAgentRuntime {
           text,
           {
             plan,
-            plannerAttempts,
             sql: finalSql,
-            toolCalls,
             mode: "direct_tool_loop",
-            outcome: "cannot_answer",
-            timings: { ...timings, totalMs: Date.now() - startedAt }
+            outcome: "cannot_answer"
           },
           undefined
         );
@@ -1163,6 +1367,7 @@ export class AnalyticsAgentRuntime {
               models: value.slice(0, 100).map((m) => ({ name: m.name, relativePath: m.relativePath }))
             })
           );
+          recorder.appendEvent("tool.completed", "success", "dbt.listModels completed", { modelCount: models.length }, step);
           loopMessages.push({
             role: "user",
             content: `Tool result (dbt.listModels): ${asJsonBlock({
@@ -1178,7 +1383,7 @@ export class AnalyticsAgentRuntime {
           if (!modelName) {
             throw new Error("dbt.getModelSql requires args.modelName.");
           }
-          const modelSql = await measure("getModelSqlMs", async () =>
+          const modelSql = await recorder.measure("getModelSqlMs", async () =>
             runTool(
               "dbt.getModelSql",
               { tenantId: context.tenantId, modelName },
@@ -1190,6 +1395,7 @@ export class AnalyticsAgentRuntime {
           if (!modelSql) {
             throw new Error(`Model "${modelName}" was not found in configured dbt repo.`);
           }
+          recorder.appendEvent("tool.completed", "success", "dbt.getModelSql completed", { modelName, found: Boolean(modelSql) }, step);
           loopMessages.push({
             role: "user",
             content: `Tool result (dbt.getModelSql): ${asJsonBlock({ modelName, sql: modelSql })}`
@@ -1245,6 +1451,7 @@ export class AnalyticsAgentRuntime {
               rowCount: metadataResult.rowCount
             });
           }
+          recorder.appendEvent("tool.completed", "success", "warehouse.lookupMetadata completed", { rowCount: metadataResult.rowCount, columns: metadataResult.columns, cached: Boolean(cachedResult) }, step);
           loopMessages.push({
             role: "user",
             content: `Tool result (warehouse.lookupMetadata): ${asJsonBlock({
@@ -1291,6 +1498,7 @@ export class AnalyticsAgentRuntime {
               );
           memorySaveSucceededThisTurn = true;
           tenantMemories = this.store.listTenantMemories(context.tenantId, 500);
+          recorder.appendEvent("tool.completed", "success", "tenantMemory.save completed", { memoryId: savedMemory.id, deduped: Boolean(existingMemory) }, step);
           loopMessages.push({
             role: "user",
             content: `Tool result (tenantMemory.save): ${asJsonBlock({
@@ -1350,6 +1558,7 @@ export class AnalyticsAgentRuntime {
             (value) => ({ scheduleId: value.id, active: value.active, channelType: value.channelType })
           );
           scheduleCreateSucceededThisTurn = true;
+          recorder.appendEvent("tool.completed", "success", "schedule.create completed", { scheduleId: schedule.id, channelType: schedule.channelType }, step);
           loopMessages.push({
             role: "user",
             content: `Tool result (schedule.create): ${asJsonBlock({
@@ -1422,6 +1631,7 @@ export class AnalyticsAgentRuntime {
             payload: chartBuild.config,
             summary: chartBuild.summary
           };
+          recorder.appendEvent("tool.completed", "success", "chartjs.build completed", { chartType: chartBuild.summary.type }, step);
           loopMessages.push({
             role: "user",
             content: `Tool result (chartjs.build): ${asJsonBlock(chartBuild.summary)}`
@@ -1442,7 +1652,35 @@ export class AnalyticsAgentRuntime {
           }
           attemptedSql.add(normalizedSql);
           finalSql = normalizedSql;
-          const queryResult = await measure("warehouseMs", async () =>
+
+          const relations = extractQualifiedRelations(normalizedSql);
+          const blockedSchemaPatterns = profile.blockedSchemaPatterns ?? [];
+          const blockedTablePatterns = profile.blockedTablePatterns ?? [];
+          let blocked = false;
+          for (const relation of relations) {
+            for (const pattern of blockedSchemaPatterns) {
+              if (wildcardToRegex(pattern).test(relation.schema)) {
+                recorder.appendEvent("policy.denied", "error", `Schema blocked by pattern: ${pattern}`, { schema: relation.schema, table: relation.table, pattern, sql: normalizedSql }, step);
+                blocked = true;
+                break;
+              }
+            }
+            if (blocked) break;
+            for (const pattern of blockedTablePatterns) {
+              if (wildcardToRegex(pattern).test(relation.table)) {
+                recorder.appendEvent("policy.denied", "error", `Table blocked by pattern: ${pattern}`, { schema: relation.schema, table: relation.table, pattern, sql: normalizedSql }, step);
+                blocked = true;
+                break;
+              }
+            }
+            if (blocked) break;
+          }
+          if (blocked) {
+            throw new Error("Query blocked by policy.");
+          }
+          recorder.appendEvent("policy.approved", "success", "SQL passed policy checks", { sql: normalizedSql, relations }, step);
+
+          const queryResult = await recorder.measure("warehouseMs", async () =>
             runTool(
               "warehouse.query",
               { sql: normalizedSql },
@@ -1460,6 +1698,7 @@ export class AnalyticsAgentRuntime {
           if (successfulQueries.length > maxToolSteps) {
             successfulQueries.shift();
           }
+          recorder.appendEvent("tool.completed", "success", "warehouse.query completed", { rowCount: queryResult.rowCount, columns: queryResult.columns }, step);
           loopMessages.push({
             role: "user",
             content: `Tool result (warehouse.query): ${asJsonBlock({
@@ -1536,11 +1775,8 @@ export class AnalyticsAgentRuntime {
           text,
           {
             plan: finalPlan,
-            plannerAttempts,
             sql: lastSuccessfulQuery.sql,
-            toolCalls,
             mode: "direct_tool_loop",
-            timings: { ...timings, totalMs: Date.now() - startedAt },
             finalizedFromLastSuccessfulQuery: true
           },
           latestChartArtifact ? [latestChartArtifact] : undefined
@@ -1552,26 +1788,20 @@ export class AnalyticsAgentRuntime {
         fallback,
         {
           plan: finalPlan,
-          plannerAttempts,
           sql: finalSql,
-          toolCalls,
-          mode: "direct_tool_loop",
-          timings: { ...timings, totalMs: Date.now() - startedAt }
+          mode: "direct_tool_loop"
         },
         latestChartArtifact ? [latestChartArtifact] : undefined
       );
     } catch (error) {
-      persistLlmUsageToStore();
+      recorder.persistLlmUsage();
+      recorder.addTiming("totalMs", Date.now() - startedAt);
+      recorder.appendEvent("turn.finalized", "error", `Turn failed: ${(error as Error).message}`, { status: "failed" });
       this.store.completeExecutionTurn({
         turnId: executionTurn.id,
         status: "failed",
         errorMessage: (error as Error).message,
-        debug: {
-          plannerAttempts,
-          toolCalls,
-          timings: { ...timings, totalMs: Date.now() - startedAt },
-          llmUsage: buildLlmUsageDebug()
-        }
+        debug: recorder.buildDebug({})
       });
       throw error;
     }

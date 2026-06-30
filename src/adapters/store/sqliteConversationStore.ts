@@ -27,12 +27,14 @@ import {
   ConversationMessage,
   ConversationOrigin,
   ConversationSource,
+  ExecutionTraceEvent,
   MessageFeedback,
   MessageFeedbackRow,
   ScheduleChannelType,
   TenantMemory,
   TenantMemorySource,
-  TenantSchedule
+  TenantSchedule,
+  ToolExecutionRecord
 } from "../../core/types.js";
 import { createId } from "../../utils/id.js";
 import { normalizeDomainPart } from "../../config/adminAuthPolicy.js";
@@ -328,11 +330,48 @@ export class SqliteConversationStore implements ConversationStore {
         created_at TEXT NOT NULL,
         UNIQUE (channel, message_ts, user_id, reaction)
       );
+
+      CREATE TABLE IF NOT EXISTS agent_execution_events (
+        id TEXT PRIMARY KEY,
+        turn_id TEXT NOT NULL,
+        tenant_id TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        step INTEGER,
+        type TEXT NOT NULL,
+        level TEXT NOT NULL,
+        message TEXT NOT NULL,
+        payload_json TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_agent_execution_events_turn_created ON agent_execution_events(turn_id, created_at);
+
+      CREATE TABLE IF NOT EXISTS agent_tool_executions (
+        id TEXT PRIMARY KEY,
+        turn_id TEXT NOT NULL,
+        tenant_id TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        step INTEGER,
+        cache_key TEXT NOT NULL,
+        tool TEXT NOT NULL,
+        input_json TEXT NOT NULL,
+        status TEXT NOT NULL,
+        duration_ms INTEGER NOT NULL,
+        attempt_count INTEGER NOT NULL,
+        output_summary_json TEXT,
+        output_json TEXT,
+        error_text TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_agent_tool_executions_turn_created ON agent_tool_executions(turn_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_agent_tool_executions_cache_key ON agent_tool_executions(turn_id, cache_key, status);
     `);
     this.migrateAdminSessionsColumns();
     this.migrateTenantMemoriesTable();
     this.migrateMessagesTable();
     this.migrateMessageFeedbackColumns();
+    this.migrateAgentProfilesTable();
+    this.migrateExecutionTurnsTable();
   }
 
   private migrateAdminSessionsColumns(): void {
@@ -495,6 +534,49 @@ export class SqliteConversationStore implements ConversationStore {
     const names = new Set(rows.map((r) => r.name));
     if (!names.has("execution_turn_id")) {
       this.db.exec(`ALTER TABLE message_feedback ADD COLUMN execution_turn_id TEXT`);
+    }
+  }
+
+  private migrateAgentProfilesTable(): void {
+    const exists = this.db
+      .prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agent_profiles'`)
+      .get() as { 1: number } | undefined;
+    if (!exists) {
+      return;
+    }
+    const rows = this.db.prepare("PRAGMA table_info(agent_profiles)").all() as Array<{ name: string }>;
+    const names = new Set(rows.map((r) => r.name));
+    if (!names.has("allowed_tools")) {
+      this.db.exec(`ALTER TABLE agent_profiles ADD COLUMN allowed_tools TEXT NOT NULL DEFAULT '[]'`);
+    }
+    if (!names.has("blocked_schema_patterns")) {
+      this.db.exec(`ALTER TABLE agent_profiles ADD COLUMN blocked_schema_patterns TEXT NOT NULL DEFAULT '[]'`);
+    }
+    if (!names.has("blocked_table_patterns")) {
+      this.db.exec(`ALTER TABLE agent_profiles ADD COLUMN blocked_table_patterns TEXT NOT NULL DEFAULT '[]'`);
+    }
+    if (!names.has("tool_timeout_ms")) {
+      this.db.exec(`ALTER TABLE agent_profiles ADD COLUMN tool_timeout_ms INTEGER NOT NULL DEFAULT 20000`);
+    }
+    if (!names.has("max_tool_retries")) {
+      this.db.exec(`ALTER TABLE agent_profiles ADD COLUMN max_tool_retries INTEGER NOT NULL DEFAULT 2`);
+    }
+    if (!names.has("max_planner_steps")) {
+      this.db.exec(`ALTER TABLE agent_profiles ADD COLUMN max_planner_steps INTEGER NOT NULL DEFAULT 35`);
+    }
+  }
+
+  private migrateExecutionTurnsTable(): void {
+    const exists = this.db
+      .prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agent_execution_turns'`)
+      .get() as { 1: number } | undefined;
+    if (!exists) {
+      return;
+    }
+    const rows = this.db.prepare("PRAGMA table_info(agent_execution_turns)").all() as Array<{ name: string }>;
+    const names = new Set(rows.map((r) => r.name));
+    if (!names.has("trace_id")) {
+      this.db.exec(`ALTER TABLE agent_execution_turns ADD COLUMN trace_id TEXT`);
     }
   }
 
@@ -837,7 +919,9 @@ export class SqliteConversationStore implements ConversationStore {
   getOrCreateProfile(tenantId: string, profileName: string): AgentProfile {
     const row = this.db
       .prepare(
-        `SELECT id, tenant_id, name, soul_prompt, max_rows_per_query, allowed_dbt_path_prefixes, created_at
+        `SELECT id, tenant_id, name, soul_prompt, max_rows_per_query, allowed_dbt_path_prefixes,
+                allowed_tools, blocked_schema_patterns, blocked_table_patterns,
+                tool_timeout_ms, max_tool_retries, max_planner_steps, created_at
          FROM agent_profiles
          WHERE tenant_id = ? AND name = ?`
       )
@@ -849,6 +933,12 @@ export class SqliteConversationStore implements ConversationStore {
           soul_prompt: string;
           max_rows_per_query: number;
           allowed_dbt_path_prefixes: string;
+          allowed_tools: string;
+          blocked_schema_patterns: string;
+          blocked_table_patterns: string;
+          tool_timeout_ms: number;
+          max_tool_retries: number;
+          max_planner_steps: number;
           created_at: string;
         }
       | undefined;
@@ -861,6 +951,12 @@ export class SqliteConversationStore implements ConversationStore {
         soulPrompt: row.soul_prompt,
         maxRowsPerQuery: row.max_rows_per_query,
         allowedDbtPathPrefixes: JSON.parse(row.allowed_dbt_path_prefixes),
+        allowedTools: JSON.parse(row.allowed_tools || "[]"),
+        blockedSchemaPatterns: JSON.parse(row.blocked_schema_patterns || "[]"),
+        blockedTablePatterns: JSON.parse(row.blocked_table_patterns || "[]"),
+        toolTimeoutMs: row.tool_timeout_ms ?? 20000,
+        maxToolRetries: row.max_tool_retries ?? 2,
+        maxPlannerSteps: row.max_planner_steps ?? 35,
         createdAt: row.created_at
       };
     }
@@ -872,10 +968,13 @@ export class SqliteConversationStore implements ConversationStore {
     this.db
       .prepare(
         `INSERT INTO agent_profiles
-         (id, tenant_id, name, soul_prompt, max_rows_per_query, allowed_dbt_path_prefixes, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`
+         (id, tenant_id, name, soul_prompt, max_rows_per_query, allowed_dbt_path_prefixes,
+          allowed_tools, blocked_schema_patterns, blocked_table_patterns,
+          tool_timeout_ms, max_tool_retries, max_planner_steps, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
-      .run(id, tenantId, profileName, DEFAULT_SOUL_PROMPT, 200, JSON.stringify(prefixes), createdAt);
+      .run(id, tenantId, profileName, DEFAULT_SOUL_PROMPT, 200, JSON.stringify(prefixes),
+           JSON.stringify([]), JSON.stringify([]), JSON.stringify([]), 20000, 2, 35, createdAt);
 
     return {
       id,
@@ -884,6 +983,12 @@ export class SqliteConversationStore implements ConversationStore {
       soulPrompt: DEFAULT_SOUL_PROMPT,
       maxRowsPerQuery: 200,
       allowedDbtPathPrefixes: prefixes,
+      allowedTools: [],
+      blockedSchemaPatterns: [],
+      blockedTablePatterns: [],
+      toolTimeoutMs: 20000,
+      maxToolRetries: 2,
+      maxPlannerSteps: 35,
       createdAt
     };
   }
@@ -896,11 +1001,19 @@ export class SqliteConversationStore implements ConversationStore {
       soul_prompt: string;
       max_rows_per_query: number;
       allowed_dbt_path_prefixes: string;
+      allowed_tools: string;
+      blocked_schema_patterns: string;
+      blocked_table_patterns: string;
+      tool_timeout_ms: number;
+      max_tool_retries: number;
+      max_planner_steps: number;
       created_at: string;
     };
     const rows = this.db
       .prepare(
-        `SELECT id, tenant_id, name, soul_prompt, max_rows_per_query, allowed_dbt_path_prefixes, created_at
+        `SELECT id, tenant_id, name, soul_prompt, max_rows_per_query, allowed_dbt_path_prefixes,
+                allowed_tools, blocked_schema_patterns, blocked_table_patterns,
+                tool_timeout_ms, max_tool_retries, max_planner_steps, created_at
          FROM agent_profiles WHERE tenant_id = ? ORDER BY name`
       )
       .all(tenantId) as Row[];
@@ -911,6 +1024,12 @@ export class SqliteConversationStore implements ConversationStore {
       soulPrompt: row.soul_prompt,
       maxRowsPerQuery: row.max_rows_per_query,
       allowedDbtPathPrefixes: JSON.parse(row.allowed_dbt_path_prefixes),
+      allowedTools: JSON.parse(row.allowed_tools || "[]"),
+      blockedSchemaPatterns: JSON.parse(row.blocked_schema_patterns || "[]"),
+      blockedTablePatterns: JSON.parse(row.blocked_table_patterns || "[]"),
+      toolTimeoutMs: row.tool_timeout_ms ?? 20000,
+      maxToolRetries: row.max_tool_retries ?? 2,
+      maxPlannerSteps: row.max_planner_steps ?? 35,
       createdAt: row.created_at
     }));
   }
@@ -921,18 +1040,39 @@ export class SqliteConversationStore implements ConversationStore {
     soulPrompt: string;
     maxRowsPerQuery: number;
     allowedDbtPathPrefixes: string[];
+    allowedTools?: string[];
+    blockedSchemaPatterns?: string[];
+    blockedTablePatterns?: string[];
+    toolTimeoutMs?: number;
+    maxToolRetries?: number;
+    maxPlannerSteps?: number;
   }): AgentProfile {
     const existing = this.getOrCreateProfile(input.tenantId, input.name);
+    const allowedTools = input.allowedTools ?? existing.allowedTools;
+    const blockedSchemaPatterns = input.blockedSchemaPatterns ?? existing.blockedSchemaPatterns;
+    const blockedTablePatterns = input.blockedTablePatterns ?? existing.blockedTablePatterns;
+    const toolTimeoutMs = input.toolTimeoutMs ?? existing.toolTimeoutMs;
+    const maxToolRetries = input.maxToolRetries ?? existing.maxToolRetries;
+    const maxPlannerSteps = input.maxPlannerSteps ?? existing.maxPlannerSteps;
+
     this.db
       .prepare(
         `UPDATE agent_profiles
-         SET soul_prompt = ?, max_rows_per_query = ?, allowed_dbt_path_prefixes = ?
+         SET soul_prompt = ?, max_rows_per_query = ?, allowed_dbt_path_prefixes = ?,
+             allowed_tools = ?, blocked_schema_patterns = ?, blocked_table_patterns = ?,
+             tool_timeout_ms = ?, max_tool_retries = ?, max_planner_steps = ?
          WHERE tenant_id = ? AND name = ?`
       )
       .run(
         input.soulPrompt,
         input.maxRowsPerQuery,
         JSON.stringify(input.allowedDbtPathPrefixes),
+        JSON.stringify(allowedTools),
+        JSON.stringify(blockedSchemaPatterns),
+        JSON.stringify(blockedTablePatterns),
+        toolTimeoutMs,
+        maxToolRetries,
+        maxPlannerSteps,
         input.tenantId,
         input.name
       );
@@ -943,6 +1083,12 @@ export class SqliteConversationStore implements ConversationStore {
       soulPrompt: input.soulPrompt,
       maxRowsPerQuery: input.maxRowsPerQuery,
       allowedDbtPathPrefixes: input.allowedDbtPathPrefixes,
+      allowedTools,
+      blockedSchemaPatterns,
+      blockedTablePatterns,
+      toolTimeoutMs,
+      maxToolRetries,
+      maxPlannerSteps,
       createdAt: existing.createdAt
     };
   }
@@ -1600,6 +1746,9 @@ export class SqliteConversationStore implements ConversationStore {
     this.db.prepare("DELETE FROM tenant_integration_tokens WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM tenant_llm_settings WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM llm_usage_events WHERE tenant_id = ?").run(tenantId);
+    this.db.prepare("DELETE FROM agent_execution_events WHERE tenant_id = ?").run(tenantId);
+    this.db.prepare("DELETE FROM agent_tool_executions WHERE tenant_id = ?").run(tenantId);
+    this.db.prepare("DELETE FROM agent_execution_turns WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM messages WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM conversations WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM agent_profiles WHERE tenant_id = ?").run(tenantId);
@@ -1875,13 +2024,14 @@ export class SqliteConversationStore implements ConversationStore {
     this.db
       .prepare(
         `INSERT INTO agent_execution_turns
-         (id, tenant_id, conversation_id, source, raw_user_text, prompt_text, assistant_text, status, error_message, debug_json, created_at, updated_at, completed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         (id, tenant_id, conversation_id, trace_id, source, raw_user_text, prompt_text, assistant_text, status, error_message, debug_json, created_at, updated_at, completed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         id,
         input.tenantId,
         input.conversationId,
+        input.traceId ?? null,
         input.source,
         input.rawUserText,
         input.promptText,
@@ -1897,6 +2047,7 @@ export class SqliteConversationStore implements ConversationStore {
       id,
       tenantId: input.tenantId,
       conversationId: input.conversationId,
+      traceId: input.traceId,
       source: input.source,
       rawUserText: input.rawUserText,
       promptText: input.promptText,
@@ -1944,7 +2095,7 @@ export class SqliteConversationStore implements ConversationStore {
   getExecutionTurn(turnId: string): AgentExecutionTurn | null {
     const row = this.db
       .prepare(
-        `SELECT id, tenant_id, conversation_id, source, raw_user_text, prompt_text, assistant_text, status,
+        `SELECT id, tenant_id, conversation_id, trace_id, source, raw_user_text, prompt_text, assistant_text, status,
                 error_message, debug_json, created_at, updated_at, completed_at
          FROM agent_execution_turns
          WHERE id = ?`
@@ -1954,6 +2105,7 @@ export class SqliteConversationStore implements ConversationStore {
           id: string;
           tenant_id: string;
           conversation_id: string;
+          trace_id: string | null;
           source: ConversationSource;
           raw_user_text: string;
           prompt_text: string;
@@ -1973,6 +2125,7 @@ export class SqliteConversationStore implements ConversationStore {
       id: row.id,
       tenantId: row.tenant_id,
       conversationId: row.conversation_id,
+      traceId: row.trace_id ?? undefined,
       source: row.source,
       rawUserText: row.raw_user_text,
       promptText: row.prompt_text,
@@ -1980,6 +2133,8 @@ export class SqliteConversationStore implements ConversationStore {
       status: row.status,
       errorMessage: row.error_message ?? undefined,
       debug: row.debug_json ? (JSON.parse(row.debug_json) as Record<string, unknown>) : undefined,
+      events: this.listExecutionEvents(turnId),
+      toolExecutions: this.listToolExecutions(turnId),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       completedAt: row.completed_at ?? undefined
@@ -1989,15 +2144,361 @@ export class SqliteConversationStore implements ConversationStore {
   listExecutionTurns(conversationId: string): AgentExecutionTurn[] {
     const rows = this.db
       .prepare(
-        `SELECT id
+        `SELECT id, tenant_id, conversation_id, trace_id, source, raw_user_text, prompt_text, assistant_text, status,
+                error_message, debug_json, created_at, updated_at, completed_at
          FROM agent_execution_turns
          WHERE conversation_id = ?
          ORDER BY created_at ASC`
       )
-      .all(conversationId) as Array<{ id: string }>;
-    return rows
-      .map((row) => this.getExecutionTurn(row.id))
-      .filter((turn): turn is AgentExecutionTurn => turn !== null);
+      .all(conversationId) as Array<{
+      id: string;
+      tenant_id: string;
+      conversation_id: string;
+      trace_id: string | null;
+      source: ConversationSource;
+      raw_user_text: string;
+      prompt_text: string;
+      assistant_text: string | null;
+      status: AgentExecutionTurn["status"];
+      error_message: string | null;
+      debug_json: string | null;
+      created_at: string;
+      updated_at: string;
+      completed_at: string | null;
+    }>;
+
+    if (rows.length === 0) {
+      return [];
+    }
+
+    const turnIds = rows.map((r) => r.id);
+    const placeholders = turnIds.map(() => "?").join(",");
+
+    const eventRows = this.db
+      .prepare(
+        `SELECT id, turn_id, tenant_id, conversation_id, step, type, level, message, payload_json, created_at
+         FROM agent_execution_events
+         WHERE turn_id IN (${placeholders})
+         ORDER BY created_at ASC`
+      )
+      .all(...turnIds) as Array<{
+      id: string;
+      turn_id: string;
+      tenant_id: string;
+      conversation_id: string;
+      step: number | null;
+      type: ExecutionTraceEvent["type"];
+      level: ExecutionTraceEvent["level"];
+      message: string;
+      payload_json: string | null;
+      created_at: string;
+    }>;
+
+    const toolRows = this.db
+      .prepare(
+        `SELECT id, turn_id, tenant_id, conversation_id, step, cache_key, tool, input_json, status,
+                duration_ms, attempt_count, output_summary_json, output_json, error_text, created_at, updated_at
+         FROM agent_tool_executions
+         WHERE turn_id IN (${placeholders})
+         ORDER BY created_at ASC`
+      )
+      .all(...turnIds) as Array<{
+      id: string;
+      turn_id: string;
+      tenant_id: string;
+      conversation_id: string;
+      step: number | null;
+      cache_key: string;
+      tool: string;
+      input_json: string;
+      status: ToolExecutionRecord["status"];
+      duration_ms: number;
+      attempt_count: number;
+      output_summary_json: string | null;
+      output_json: string | null;
+      error_text: string | null;
+      created_at: string;
+      updated_at: string;
+    }>;
+
+    const eventsByTurn = new Map<string, ExecutionTraceEvent[]>();
+    for (const r of eventRows) {
+      const list = eventsByTurn.get(r.turn_id) ?? [];
+      list.push({
+        id: r.id,
+        turnId: r.turn_id,
+        tenantId: r.tenant_id,
+        conversationId: r.conversation_id,
+        step: r.step ?? undefined,
+        type: r.type,
+        level: r.level,
+        message: r.message,
+        payload: r.payload_json ? (JSON.parse(r.payload_json) as Record<string, unknown>) : undefined,
+        createdAt: r.created_at
+      });
+      eventsByTurn.set(r.turn_id, list);
+    }
+
+    const toolsByTurn = new Map<string, ToolExecutionRecord[]>();
+    for (const r of toolRows) {
+      const list = toolsByTurn.get(r.turn_id) ?? [];
+      list.push({
+        id: r.id,
+        turnId: r.turn_id,
+        tenantId: r.tenant_id,
+        conversationId: r.conversation_id,
+        step: r.step ?? undefined,
+        cacheKey: r.cache_key,
+        tool: r.tool,
+        input: JSON.parse(r.input_json) as Record<string, unknown>,
+        status: r.status,
+        durationMs: r.duration_ms,
+        attemptCount: r.attempt_count,
+        outputSummary: r.output_summary_json ? (JSON.parse(r.output_summary_json) as Record<string, unknown>) : undefined,
+        output: r.output_json ? JSON.parse(r.output_json) : undefined,
+        error: r.error_text ?? undefined,
+        createdAt: r.created_at,
+        updatedAt: r.updated_at
+      });
+      toolsByTurn.set(r.turn_id, list);
+    }
+
+    return rows.map((row) => ({
+      id: row.id,
+      tenantId: row.tenant_id,
+      conversationId: row.conversation_id,
+      traceId: row.trace_id ?? undefined,
+      source: row.source,
+      rawUserText: row.raw_user_text,
+      promptText: row.prompt_text,
+      assistantText: row.assistant_text ?? undefined,
+      status: row.status,
+      errorMessage: row.error_message ?? undefined,
+      debug: row.debug_json ? (JSON.parse(row.debug_json) as Record<string, unknown>) : undefined,
+      events: eventsByTurn.get(row.id) ?? [],
+      toolExecutions: toolsByTurn.get(row.id) ?? [],
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      completedAt: row.completed_at ?? undefined
+    }));
+  }
+
+  appendExecutionEvent(input: Omit<ExecutionTraceEvent, "id" | "createdAt">): ExecutionTraceEvent {
+    const id = createId("event");
+    const createdAt = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO agent_execution_events
+         (id, turn_id, tenant_id, conversation_id, step, type, level, message, payload_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        id,
+        input.turnId,
+        input.tenantId,
+        input.conversationId,
+        input.step ?? null,
+        input.type,
+        input.level,
+        input.message,
+        input.payload ? JSON.stringify(input.payload) : null,
+        createdAt
+      );
+    return {
+      id,
+      turnId: input.turnId,
+      tenantId: input.tenantId,
+      conversationId: input.conversationId,
+      step: input.step,
+      type: input.type,
+      level: input.level,
+      message: input.message,
+      payload: input.payload,
+      createdAt
+    };
+  }
+
+  listExecutionEvents(turnId: string): ExecutionTraceEvent[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, turn_id, tenant_id, conversation_id, step, type, level, message, payload_json, created_at
+         FROM agent_execution_events
+         WHERE turn_id = ?
+         ORDER BY created_at ASC`
+      )
+      .all(turnId) as Array<{
+      id: string;
+      turn_id: string;
+      tenant_id: string;
+      conversation_id: string;
+      step: number | null;
+      type: ExecutionTraceEvent["type"];
+      level: ExecutionTraceEvent["level"];
+      message: string;
+      payload_json: string | null;
+      created_at: string;
+    }>;
+    return rows.map((r) => ({
+      id: r.id,
+      turnId: r.turn_id,
+      tenantId: r.tenant_id,
+      conversationId: r.conversation_id,
+      step: r.step ?? undefined,
+      type: r.type,
+      level: r.level,
+      message: r.message,
+      payload: r.payload_json ? (JSON.parse(r.payload_json) as Record<string, unknown>) : undefined,
+      createdAt: r.created_at
+    }));
+  }
+
+  recordToolExecution(input: Omit<ToolExecutionRecord, "id" | "createdAt" | "updatedAt">): ToolExecutionRecord {
+    const id = createId("tool");
+    const createdAt = new Date().toISOString();
+    const updatedAt = createdAt;
+    this.db
+      .prepare(
+        `INSERT INTO agent_tool_executions
+         (id, turn_id, tenant_id, conversation_id, step, cache_key, tool, input_json, status,
+          duration_ms, attempt_count, output_summary_json, output_json, error_text, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        id,
+        input.turnId,
+        input.tenantId,
+        input.conversationId,
+        input.step ?? null,
+        input.cacheKey,
+        input.tool,
+        JSON.stringify(input.input),
+        input.status,
+        input.durationMs,
+        input.attemptCount,
+        input.outputSummary ? JSON.stringify(input.outputSummary) : null,
+        input.output !== undefined ? JSON.stringify(input.output) : null,
+        input.error ?? null,
+        createdAt,
+        updatedAt
+      );
+    return {
+      id,
+      turnId: input.turnId,
+      tenantId: input.tenantId,
+      conversationId: input.conversationId,
+      step: input.step,
+      cacheKey: input.cacheKey,
+      tool: input.tool,
+      input: input.input,
+      status: input.status,
+      durationMs: input.durationMs,
+      attemptCount: input.attemptCount,
+      outputSummary: input.outputSummary,
+      output: input.output,
+      error: input.error,
+      createdAt,
+      updatedAt
+    };
+  }
+
+  getToolExecutionByCacheKey(turnId: string, cacheKey: string): ToolExecutionRecord | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, turn_id, tenant_id, conversation_id, step, cache_key, tool, input_json, status,
+                duration_ms, attempt_count, output_summary_json, output_json, error_text, created_at, updated_at
+         FROM agent_tool_executions
+         WHERE turn_id = ? AND cache_key = ?
+         ORDER BY created_at DESC
+         LIMIT 1`
+      )
+      .get(turnId, cacheKey) as
+      | {
+          id: string;
+          turn_id: string;
+          tenant_id: string;
+          conversation_id: string;
+          step: number | null;
+          cache_key: string;
+          tool: string;
+          input_json: string;
+          status: ToolExecutionRecord["status"];
+          duration_ms: number;
+          attempt_count: number;
+          output_summary_json: string | null;
+          output_json: string | null;
+          error_text: string | null;
+          created_at: string;
+          updated_at: string;
+        }
+      | undefined;
+    if (!row) {
+      return null;
+    }
+    return {
+      id: row.id,
+      turnId: row.turn_id,
+      tenantId: row.tenant_id,
+      conversationId: row.conversation_id,
+      step: row.step ?? undefined,
+      cacheKey: row.cache_key,
+      tool: row.tool,
+      input: JSON.parse(row.input_json) as Record<string, unknown>,
+      status: row.status,
+      durationMs: row.duration_ms,
+      attemptCount: row.attempt_count,
+      outputSummary: row.output_summary_json ? (JSON.parse(row.output_summary_json) as Record<string, unknown>) : undefined,
+      output: row.output_json ? JSON.parse(row.output_json) : undefined,
+      error: row.error_text ?? undefined,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  listToolExecutions(turnId: string): ToolExecutionRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, turn_id, tenant_id, conversation_id, step, cache_key, tool, input_json, status,
+                duration_ms, attempt_count, output_summary_json, output_json, error_text, created_at, updated_at
+         FROM agent_tool_executions
+         WHERE turn_id = ?
+         ORDER BY created_at ASC`
+      )
+      .all(turnId) as Array<{
+      id: string;
+      turn_id: string;
+      tenant_id: string;
+      conversation_id: string;
+      step: number | null;
+      cache_key: string;
+      tool: string;
+      input_json: string;
+      status: ToolExecutionRecord["status"];
+      duration_ms: number;
+      attempt_count: number;
+      output_summary_json: string | null;
+      output_json: string | null;
+      error_text: string | null;
+      created_at: string;
+      updated_at: string;
+    }>;
+    return rows.map((r) => ({
+      id: r.id,
+      turnId: r.turn_id,
+      tenantId: r.tenant_id,
+      conversationId: r.conversation_id,
+      step: r.step ?? undefined,
+      cacheKey: r.cache_key,
+      tool: r.tool,
+      input: JSON.parse(r.input_json) as Record<string, unknown>,
+      status: r.status,
+      durationMs: r.duration_ms,
+      attemptCount: r.attempt_count,
+      outputSummary: r.output_summary_json ? (JSON.parse(r.output_summary_json) as Record<string, unknown>) : undefined,
+      output: r.output_json ? JSON.parse(r.output_json) : undefined,
+      error: r.error_text ?? undefined,
+      createdAt: r.created_at,
+      updatedAt: r.updated_at
+    }));
   }
 
   listAdminConversations(input?: {

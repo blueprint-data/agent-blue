@@ -14,6 +14,7 @@ import { hashAdminPassword } from "./adapters/api/admin/adminAuth.js";
 import { createId } from "./utils/id.js";
 import { getStringArg, parseArgs } from "./utils/args.js";
 import { env } from "./config/env.js";
+import { DEFAULT_GOLDEN_EVAL_CASES, scoreEvaluationTurn } from "./core/evaluationHarness.js";
 
 const canUseAnsi = Boolean(output.isTTY) && process.env.NO_COLOR !== "1";
 
@@ -564,7 +565,8 @@ function usage(): string {
     "  npm run dev -- e2e-loop --tenant <id> [--profile default] [--model <provider/model>] [--models <m1,m2>] [--prompts e2e-default-v1] [--prompts-path benchmark/prompts/e2e-default-v1.json] [--runs 1] [--output benchmark/results/run.json] [--verbose]",
     "  npm run dev -- benchmark-local --tenant <id> [--profile default] [--model <provider/model>] [--models <m1,m2>] [--prompts e2e-default-v1] [--prompts-path benchmark/prompts/e2e-default-v1.json] [--runs 5] [--output benchmark/results/run.json] [--verbose]",
     "  npm run dev -- benchmark-compare --baseline benchmark/results/base.json --candidate benchmark/results/candidate.json [--report benchmark/results/compare.md] [--tolerance-pct 5] [--tolerance-pp 1] [--fail-on-worse]",
-    "  npm run dev -- benchmark-one-shot --tenant <id> --baseline benchmark/results/base.json [--candidate-output benchmark/results/candidate.json] [--report benchmark/results/compare.md] [--model <provider/model>|--models <m1,m2>] [--prompts e2e-default-v1] [--runs 2] [--tolerance-pct 5] [--tolerance-pp 1] [--fail-on-worse] [--verbose]",
+    "  npm run dev -- eval-harness --tenant <id> [--profile default] [--model <provider/model>] [--models <m1,m2>] [--runs 1]",
+  "  npm run dev -- benchmark-one-shot --tenant <id> --baseline benchmark/results/base.json [--candidate-output benchmark/results/candidate.json] [--report benchmark/results/compare.md] [--model <provider/model>|--models <m1,m2>] [--prompts e2e-default-v1] [--runs 2] [--tolerance-pct 5] [--tolerance-pp 1] [--fail-on-worse] [--verbose]",
     "  npm run dev -- prod-smoke --tenant <id> [--model <provider/model>]",
     "  npm run dev -- chat --tenant <id> [--profile default] [--conversation <id>] [--message \"...\"] [--verbose] [--model <provider/model>]",
     "  npm run dev -- slack [--tenant <id>] [--profile default] [--port 3000] [--model <provider/model>]",
@@ -1210,6 +1212,84 @@ async function run(): Promise<void> {
     }
 
     runShellCommand(compareParts);
+    return;
+  }
+
+  if (command === "eval-harness") {
+    const runtime = buildRuntime(store);
+    const tenantId = getStringArg(args, "tenant");
+    const profileName = getStringArg(args, "profile", "default");
+    const singleModel = typeof args.model === "string" ? args.model.trim() : "";
+    const modelsFromCsv = parseCsvArg(args.models);
+    const models =
+      modelsFromCsv.length > 0
+        ? modelsFromCsv
+        : singleModel.length > 0
+          ? [singleModel]
+          : [env.llmModel];
+
+    const runsRaw = typeof args.runs === "string" ? Number.parseInt(args.runs, 10) : 1;
+    const runs = Number.isFinite(runsRaw) && runsRaw > 0 ? runsRaw : 1;
+
+    output.write(
+      `${infoLabel("Eval harness started.")} tenant=${tenantId} profile=${profileName} runs=${runs} models=${models.join(", ")}\n`
+    );
+
+    for (const llmModel of models) {
+      output.write(`\n${paint(`=== Model: ${llmModel} ===`, 35)}\n`);
+
+      const caseScores = new Map<string, { scores: number[] }>();
+      for (const goldenCase of DEFAULT_GOLDEN_EVAL_CASES) {
+        caseScores.set(goldenCase.id, { scores: [] });
+      }
+
+      for (let runIndex = 1; runIndex <= runs; runIndex += 1) {
+        output.write(`${infoLabel(`[run ${runIndex}/${runs}]`)}\n`);
+
+        for (const goldenCase of DEFAULT_GOLDEN_EVAL_CASES) {
+          const conversationId = createId("eval");
+          output.write(`${warnText(`Case:`)} ${goldenCase.id} | ${goldenCase.prompt}\n`);
+          try {
+            const response = await runtime.respond(
+              { tenantId, profileName, conversationId, llmModel, origin: { source: "cli" } },
+              goldenCase.prompt
+            );
+            const turn = response.executionTurnId ? store.getExecutionTurn(response.executionTurnId) : null;
+            if (!turn) {
+              output.write(`${errorText("Error:")} Could not retrieve execution turn for scoring.\n`);
+              continue;
+            }
+            const summary = scoreEvaluationTurn(turn, goldenCase);
+            const agg = caseScores.get(goldenCase.id);
+            if (agg) {
+              agg.scores.push(summary.score);
+            }
+            output.write(`${successText("Score:")} ${summary.score}/100\n`);
+            if (summary.notes.length > 0) {
+              output.write(`  ${infoLabel("Notes:")} ${summary.notes.join("; ")}\n`);
+            }
+          } catch (error) {
+            output.write(`${errorText(`Error: ${(error as Error).message}`)}\n`);
+          }
+        }
+      }
+
+      output.write(`\n${paint("Model summary", 36)}\n`);
+      let totalScore = 0;
+      let totalCases = 0;
+      for (const [caseId, agg] of caseScores) {
+        if (agg.scores.length === 0) {
+          continue;
+        }
+        const avgScore = agg.scores.reduce((a, b) => a + b, 0) / agg.scores.length;
+        totalScore += avgScore;
+        totalCases += 1;
+        output.write(`  ${caseId}: avg=${avgScore.toFixed(2)} runs=${agg.scores.length}\n`);
+      }
+      const modelAvg = totalCases > 0 ? totalScore / totalCases : 0;
+      output.write(`  Overall average: ${modelAvg.toFixed(2)}/100\n`);
+    }
+
     return;
   }
 

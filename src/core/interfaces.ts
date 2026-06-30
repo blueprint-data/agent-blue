@@ -11,13 +11,15 @@ import {
   ConversationSource,
   DbtModelDoc,
   DbtModelInfo,
+  ExecutionTraceEvent,
   MessageFeedback,
   MessageFeedbackRow,
   QueryResult,
   ScheduleChannelType,
   TenantMemory,
   TenantMemorySource,
-  TenantSchedule
+  TenantSchedule,
+  ToolExecutionRecord
 } from "./types.js";
 
 export interface LlmMessage {
@@ -176,6 +178,12 @@ export interface ConversationStore {
     soulPrompt: string;
     maxRowsPerQuery: number;
     allowedDbtPathPrefixes: string[];
+    allowedTools?: string[];
+    blockedSchemaPatterns?: string[];
+    blockedTablePatterns?: string[];
+    toolTimeoutMs?: number;
+    maxToolRetries?: number;
+    maxPlannerSteps?: number;
   }): AgentProfile;
   upsertTenantRepo(input: {
     tenantId: string;
@@ -258,6 +266,11 @@ export interface ConversationStore {
   }): void;
   getExecutionTurn(turnId: string): AgentExecutionTurn | null;
   listExecutionTurns(conversationId: string): AgentExecutionTurn[];
+  appendExecutionEvent(input: Omit<ExecutionTraceEvent, "id" | "createdAt">): ExecutionTraceEvent;
+  listExecutionEvents(turnId: string): ExecutionTraceEvent[];
+  recordToolExecution(input: Omit<ToolExecutionRecord, "id" | "createdAt" | "updatedAt">): ToolExecutionRecord;
+  getToolExecutionByCacheKey(turnId: string, cacheKey: string): ToolExecutionRecord | null;
+  listToolExecutions(turnId: string): ToolExecutionRecord[];
   listAdminConversations(input?: {
     tenantId?: string;
     source?: ConversationSource;
