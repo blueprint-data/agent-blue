@@ -74,20 +74,20 @@ export function formatDbtModelColumns(
 }
 
 /**
- * Answer-honesty rules injected at the top of the system prompt.
- * These govern HOW the agent reports results — domain-agnostic, so they scale
- * without hardcoding any tenant-specific column or value. The column SEMANTICS
- * (e.g. "phone_number is hashed") come from the dbt model docs, not from here.
+ * Analytical accuracy rules injected at the top of the system prompt.
+ * These govern result fidelity — domain-agnostic, identity-neutral, and free of
+ * persona language. Tenant-specific column SEMANTICS (e.g. "phone_number is
+ * hashed") come from the dbt model docs, not from here.
  */
 export const ANSWER_HONESTY_RULES: string[] = [
-  "Answer-honesty rules (highest priority — never violate):",
-  "- 100% honesty. Never present a number or result as the answer unless it matches EVERY criterion the user asked for.",
-  "- Before filtering on a column, read its description in the dbt model docs. If a column is documented as hashed/encrypted (or otherwise not filterable the way the user wants), you CANNOT filter by its raw/prefix value — a filter like LIKE '+34%' on a hashed column silently matches nothing and produces a wrong answer.",
-  "- If a requested criterion CANNOT be applied (column hashed/encrypted, does not exist, or has no usable value), do NOT silently drop, ignore, relax, or broaden it. Say clearly which criterion you could not apply and why.",
-  "- Never relax or remove a filter just to turn a zero/empty result into a non-zero one. An empty result that honestly matches the question is a correct answer; a non-empty result that quietly changed the question is wrong.",
-  "- When a criterion cannot be applied, prefer the closest viable column/path that CAN be applied, compute that, and tell the user exactly what you used and what you could not apply.",
+  "Analytical accuracy rules (highest priority — never violate):",
+  "- A result must satisfy every explicit criterion in the user's request before it can be presented as the answer.",
+  "- Before filtering on a column, use its description in the dbt model docs. If a column is documented as hashed/encrypted or otherwise incompatible with the requested filter, do not apply raw-value or prefix filters to it.",
+  "- If a requested criterion cannot be applied because a column is hashed/encrypted, missing, or has no usable value, do not silently drop, ignore, relax, or broaden it. State which criterion could not be applied and why.",
+  "- Do not relax or remove a filter only to turn a zero/empty result into a non-zero one. An empty result that matches the requested criteria is valid; a non-empty result that changed the criteria is invalid.",
+  "- When a criterion cannot be applied, use the closest viable column/path only if it is clearly identified in the final answer along with the unapplied criterion.",
   "- If the request is ambiguous, or a required field is missing/unfilterable and there is no safe substitute, ask a brief clarifying question (via final_answer) instead of guessing.",
-  "- Act like an intelligent analyst: state assumptions, surface caveats, and be transparent about what the query actually computed versus what was asked."
+  "- Final answers must state assumptions, caveats, and the difference between what was requested and what was actually computed."
 ];
 
 const metadataLookupSchema = z.object({
@@ -1503,7 +1503,8 @@ export class AnalyticsAgentRuntime {
                   "",
                   profile.soulPrompt,
                   "",
-                  "Answer using business language and include caveats when sample size or nulls matter."
+                  "Answer using business language and include caveats when sample size, nulls, or unapplied criteria matter.",
+                  "Do not present a computed result as satisfying criteria that were not actually applied."
                 ].join("\n")
               },
               ...buildTenantMemorySystemMessage(tenantMemories),

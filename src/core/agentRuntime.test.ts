@@ -713,14 +713,16 @@ describe("AnalyticsAgentRuntime column semantics and honesty", () => {
     );
 
     const systemText = systemTextFrom(llm);
-    expect(systemText).toContain("100% honesty");
-    expect(systemText.toLowerCase()).toMatch(/never (silently )?(drop|relax|broaden|remove)/);
+    expect(systemText).toContain("Analytical accuracy rules");
+    expect(systemText.toLowerCase()).toMatch(/do not silently (drop|ignore|relax|broaden)/);
   });
 
   it("documents not relaxing criteria and declaring unappliable filters", () => {
     const joined = ANSWER_HONESTY_RULES.join("\n").toLowerCase();
     expect(ANSWER_HONESTY_RULES.length).toBeGreaterThan(0);
     expect(joined).toContain("hashed");
+    expect(joined).not.toContain("100% honesty");
+    expect(joined).not.toContain("act like");
     expect(joined).toMatch(/cannot be applied|could not apply/);
     expect(joined).toMatch(/clarif|ask/);
   });
