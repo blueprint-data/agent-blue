@@ -22,6 +22,26 @@ export const TENANT_MEMORY_MAX_PROMPT_CHARS = 1800;
 export const FEW_SHOT_MAX_EXAMPLES = 5;
 export const FEW_SHOT_MAX_CHARS = 1500;
 
+/** Max chars of a single dbt column description surfaced in the model index. */
+export const DBT_COLUMN_DESCRIPTION_MAX_CHARS = 120;
+
+/**
+ * Answer-honesty rules injected at the top of the system prompt.
+ * These govern HOW the agent reports results — domain-agnostic, so they scale
+ * without hardcoding any tenant-specific column or value. The column SEMANTICS
+ * (e.g. "phone_number is hashed") come from the dbt model docs, not from here.
+ */
+export const ANSWER_HONESTY_RULES: string[] = [
+  "Answer-honesty rules (highest priority — never violate):",
+  "- 100% honesty. Never present a number or result as the answer unless it matches EVERY criterion the user asked for.",
+  "- Before filtering on a column, read its description in the dbt model docs. If a column is documented as hashed/encrypted (or otherwise not filterable the way the user wants), you CANNOT filter by its raw/prefix value — a filter like LIKE '+34%' on a hashed column silently matches nothing and produces a wrong answer.",
+  "- If a requested criterion CANNOT be applied (column hashed/encrypted, does not exist, or has no usable value), do NOT silently drop, ignore, relax, or broaden it. Say clearly which criterion you could not apply and why.",
+  "- Never relax or remove a filter just to turn a zero/empty result into a non-zero one. An empty result that honestly matches the question is a correct answer; a non-empty result that quietly changed the question is wrong.",
+  "- When a criterion cannot be applied, prefer the closest viable column/path that CAN be applied, compute that, and tell the user exactly what you used and what you could not apply.",
+  "- If the request is ambiguous, or a required field is missing/unfilterable and there is no safe substitute, ask a brief clarifying question (via final_answer) instead of guessing.",
+  "- Act like an intelligent analyst: state assumptions, surface caveats, and be transparent about what the query actually computed versus what was asked."
+];
+
 const metadataLookupSchema = z.object({
   kind: z.enum(["schemas", "tables", "columns"]),
   database: z.string().optional(),
@@ -853,6 +873,8 @@ export class AnalyticsAgentRuntime {
           "- For any non-analytical or unrelated request, do not call tools and return final_answer refusing the request.",
           '- Refusal text for non-analytical requests: "I can only help with analytical questions about data and business metrics."',
           "",
+          ...ANSWER_HONESTY_RULES,
+          "",
           profile.soulPrompt,
           "",
           "You are an analytics assistant with tools. Use tools iteratively and then provide a final answer.",
@@ -944,7 +966,15 @@ export class AnalyticsAgentRuntime {
               row += ` | desc: ${doc.description.replace(/\s+/g, " ").slice(0, 120)}`;
             }
             if (doc && doc.columns.length > 0) {
-              row += ` | cols: ${doc.columns.slice(0, 50).map((c) => c.name).join(", ")}`;
+              row += ` | cols: ${doc.columns
+                .slice(0, 50)
+                .map((c) => {
+                  const description = c.description?.replace(/\s+/g, " ").trim();
+                  return description
+                    ? `${c.name} [${description.slice(0, DBT_COLUMN_DESCRIPTION_MAX_CHARS)}]`
+                    : c.name;
+                })
+                .join("; ")}`;
             }
             return row;
           })

@@ -11,7 +11,11 @@ import type {
   LlmUsage,
   WarehouseAdapter
 } from "./interfaces.js";
-import { AnalyticsAgentRuntime, TENANT_MEMORY_MAX_PROMPT_ITEMS } from "./agentRuntime.js";
+import {
+  AnalyticsAgentRuntime,
+  ANSWER_HONESTY_RULES,
+  TENANT_MEMORY_MAX_PROMPT_ITEMS
+} from "./agentRuntime.js";
 import { SqlGuard } from "./sqlGuard.js";
 import { SqliteConversationStore } from "../adapters/store/sqliteConversationStore.js";
 
@@ -622,5 +626,99 @@ describe("AnalyticsAgentRuntime dbt model index", () => {
     expect(content).toContain("user_id");
     expect(content).toContain("amount");
     expect(content).toContain("created_at");
+  });
+});
+
+describe("AnalyticsAgentRuntime column semantics and honesty", () => {
+  function systemTextFrom(llm: StubLlmProvider): string {
+    return (llm.calls[0]?.messages ?? [])
+      .filter((m) => m.role === "system" && typeof m.content === "string")
+      .map((m) => m.content)
+      .join("\n");
+  }
+
+  it("surfaces dbt column descriptions (not just names) so the planner knows column semantics", async () => {
+    const store = createStore();
+    seedTenantRepo(store, "acme");
+
+    const dbtRepoWithDocs: DbtRepositoryService = {
+      async syncRepo() {},
+      async listModels() {
+        return [{ name: "dim_users", relativePath: "models/marts/dim_users.sql" }];
+      },
+      async getModelSql() {
+        return null;
+      },
+      async getModelDocs() {
+        return [
+          {
+            name: "dim_users",
+            description: "User dimension",
+            columns: [
+              { name: "phone_number", description: "Hashed (SHA-256). Do not filter by prefix." },
+              { name: "country", description: "Residence country (ISO-2)." }
+            ]
+          }
+        ];
+      }
+    };
+
+    const llm = new StubLlmProvider([JSON.stringify({ type: "final_answer", answer: "ok" })]);
+    const runtime = new AnalyticsAgentRuntime(
+      llm,
+      warehouse,
+      chartTool,
+      dbtRepoWithDocs,
+      store,
+      new SqlGuard({ enforceReadOnly: true, defaultLimit: 200, maxLimit: 2000 })
+    );
+
+    await runtime.respond(
+      {
+        tenantId: "acme",
+        profileName: "default",
+        conversationId: "conv_col_desc",
+        llmModel: "test-model",
+        origin: { source: "cli" }
+      },
+      "How many users have a +591 phone?"
+    );
+
+    const indexMessage = llm.calls[0]?.messages.find(
+      (m) => typeof m.content === "string" && m.content.startsWith("dbt models currently available")
+    );
+    const content = indexMessage?.content ?? "";
+    expect(content).toContain("phone_number");
+    expect(content).toContain("Hashed (SHA-256). Do not filter by prefix.");
+    expect(content).toContain("Residence country (ISO-2).");
+  });
+
+  it("injects answer-honesty rules into the system prompt", async () => {
+    const store = createStore();
+    const llm = new StubLlmProvider([JSON.stringify({ type: "final_answer", answer: "ok" })]);
+    const runtime = createRuntime(llm, store);
+
+    await runtime.respond(
+      {
+        tenantId: "acme",
+        profileName: "default",
+        conversationId: "conv_honesty",
+        llmModel: "test-model",
+        origin: { source: "cli" }
+      },
+      "hello"
+    );
+
+    const systemText = systemTextFrom(llm);
+    expect(systemText).toContain("100% honesty");
+    expect(systemText.toLowerCase()).toMatch(/never (silently )?(drop|relax|broaden|remove)/);
+  });
+
+  it("documents not relaxing criteria and declaring unappliable filters", () => {
+    const joined = ANSWER_HONESTY_RULES.join("\n").toLowerCase();
+    expect(ANSWER_HONESTY_RULES.length).toBeGreaterThan(0);
+    expect(joined).toContain("hashed");
+    expect(joined).toMatch(/cannot be applied|could not apply/);
+    expect(joined).toMatch(/clarif|ask/);
   });
 });
