@@ -12,7 +12,7 @@ import {
   TenantWarehouseProvider,
   WarehouseAdapter
 } from "./interfaces.js";
-import { AgentArtifact, AgentContext, AgentResponse, MessageFeedbackRow, QueryResult, ScheduleChannelType, TenantMemory } from "./types.js";
+import { AgentArtifact, AgentContext, AgentResponse, DbtModelColumnDoc, MessageFeedbackRow, QueryResult, ScheduleChannelType, TenantMemory } from "./types.js";
 import { SqlGuard } from "./sqlGuard.js";
 import { MetadataCache } from "../utils/metadataCache.js";
 
@@ -21,6 +21,72 @@ export const TENANT_MEMORY_MAX_PROMPT_ITEMS = 10;
 export const TENANT_MEMORY_MAX_PROMPT_CHARS = 1800;
 export const FEW_SHOT_MAX_EXAMPLES = 5;
 export const FEW_SHOT_MAX_CHARS = 1500;
+
+/** Max chars of a single dbt column description surfaced in the model index. */
+export const DBT_COLUMN_DESCRIPTION_MAX_CHARS = 120;
+
+/**
+ * Per-model character budget for column descriptions in the dbt model index.
+ * Column names are ALWAYS emitted (no cap). Descriptions are attached greedily
+ * in column order until this budget is reached; further columns render name-only.
+ *
+ * Sized so typical models (≤ ~30 cols × ~80 chars/desc ≈ 2400 chars) keep all
+ * descriptions, while giant outliers (dim_users ~150 cols) are description-capped
+ * but still expose every column name (the correctness floor).
+ */
+export const DBT_MODEL_DESCRIPTION_BUDGET_CHARS = 2500;
+
+/**
+ * Formats a list of dbt model columns for inclusion in the model index string.
+ *
+ * - ALL column NAMES are always included (no slice/truncation).
+ * - Descriptions are attached greedily in column order using a pre-add gate:
+ *   a column gets its description only when the running description-char total
+ *   BEFORE that column is strictly less than `modelDescriptionBudgetChars`.
+ * - Each description is whitespace-normalised, then capped to
+ *   `columnDescriptionMaxChars` before rendering and before the capped length
+ *   is added to the running total.
+ * - Format: `name [description]` for described columns, bare `name` otherwise,
+ *   joined by `; `.  Empty column list returns `""`.
+ *
+ * Pure function — no I/O, no side effects, no adapter imports.
+ */
+export function formatDbtModelColumns(
+  columns: DbtModelColumnDoc[],
+  opts: { columnDescriptionMaxChars: number; modelDescriptionBudgetChars: number }
+): string {
+  if (columns.length === 0) return "";
+
+  const { columnDescriptionMaxChars, modelDescriptionBudgetChars } = opts;
+  let runningTotal = 0;
+
+  return columns
+    .map((col) => {
+      const rawDesc = col.description?.replace(/\s+/g, " ").trim();
+      if (rawDesc && runningTotal < modelDescriptionBudgetChars) {
+        const capped = rawDesc.slice(0, columnDescriptionMaxChars);
+        runningTotal += capped.length;
+        return `${col.name} [${capped}]`;
+      }
+      return col.name;
+    })
+    .join("; ");
+}
+
+/**
+ * Analytical accuracy rules injected at the top of the system prompt.
+ * These govern result fidelity — domain-agnostic, identity-neutral, and free of
+ * persona language. Tenant-specific column semantics come from the dbt model
+ * docs, not from here.
+ */
+export const ANSWER_HONESTY_RULES: string[] = [
+  "Analytical accuracy rules (highest priority — never violate):",
+  "- Before calling warehouse.query with a column filter, verify the column's description in the model index or by calling dbt.getModelSql. Apply the filter only if the description confirms the column supports it.",
+  "- A result must satisfy every criterion in the request. Do not silently drop, relax, or broaden a criterion to avoid an empty result — an empty result that matches the criteria is correct.",
+  "- If a criterion cannot be applied, state it explicitly. Only substitute an alternative if you name both the original criterion and the substitute in the final answer.",
+  "- When the request is ambiguous or a required field has no applicable substitute, ask a clarifying question instead of guessing.",
+  "- Final answers must state what was requested, what was actually computed, and any caveats."
+];
 
 const metadataLookupSchema = z.object({
   kind: z.enum(["schemas", "tables", "columns"]),
@@ -853,6 +919,8 @@ export class AnalyticsAgentRuntime {
           "- For any non-analytical or unrelated request, do not call tools and return final_answer refusing the request.",
           '- Refusal text for non-analytical requests: "I can only help with analytical questions about data and business metrics."',
           "",
+          ...ANSWER_HONESTY_RULES,
+          "",
           profile.soulPrompt,
           "",
           "You are an analytics assistant with tools. Use tools iteratively and then provide a final answer.",
@@ -944,7 +1012,10 @@ export class AnalyticsAgentRuntime {
               row += ` | desc: ${doc.description.replace(/\s+/g, " ").slice(0, 120)}`;
             }
             if (doc && doc.columns.length > 0) {
-              row += ` | cols: ${doc.columns.slice(0, 50).map((c) => c.name).join(", ")}`;
+              row += ` | cols: ${formatDbtModelColumns(doc.columns, {
+                columnDescriptionMaxChars: DBT_COLUMN_DESCRIPTION_MAX_CHARS,
+                modelDescriptionBudgetChars: DBT_MODEL_DESCRIPTION_BUDGET_CHARS
+              })}`;
             }
             return row;
           })
@@ -1430,7 +1501,8 @@ export class AnalyticsAgentRuntime {
                   "",
                   profile.soulPrompt,
                   "",
-                  "Answer using business language and include caveats when sample size or nulls matter."
+                  "Answer using business language and include caveats when sample size, nulls, or unapplied criteria matter.",
+                  "Do not present a computed result as satisfying criteria that were not actually applied."
                 ].join("\n")
               },
               ...buildTenantMemorySystemMessage(tenantMemories),
