@@ -6,18 +6,22 @@ import {
   AgentContext,
   AgentExecutionTurn,
   AgentProfile,
+  AnalyticSkill,
   ConversationMessage,
   ConversationOrigin,
   ConversationSource,
   DbtModelDoc,
   DbtModelInfo,
+  ExecutionTraceEvent,
   MessageFeedback,
   MessageFeedbackRow,
   QueryResult,
   ScheduleChannelType,
+  SessionSummary,
   TenantMemory,
   TenantMemorySource,
-  TenantSchedule
+  TenantSchedule,
+  ToolExecutionRecord
 } from "./types.js";
 
 export interface LlmMessage {
@@ -176,6 +180,12 @@ export interface ConversationStore {
     soulPrompt: string;
     maxRowsPerQuery: number;
     allowedDbtPathPrefixes: string[];
+    allowedTools?: string[];
+    blockedSchemaPatterns?: string[];
+    blockedTablePatterns?: string[];
+    toolTimeoutMs?: number;
+    maxToolRetries?: number;
+    maxPlannerSteps?: number;
   }): AgentProfile;
   upsertTenantRepo(input: {
     tenantId: string;
@@ -258,6 +268,11 @@ export interface ConversationStore {
   }): void;
   getExecutionTurn(turnId: string): AgentExecutionTurn | null;
   listExecutionTurns(conversationId: string): AgentExecutionTurn[];
+  appendExecutionEvent(input: Omit<ExecutionTraceEvent, "id" | "createdAt">): ExecutionTraceEvent;
+  listExecutionEvents(turnId: string): ExecutionTraceEvent[];
+  recordToolExecution(input: Omit<ToolExecutionRecord, "id" | "createdAt" | "updatedAt">): ToolExecutionRecord;
+  getToolExecutionByCacheKey(turnId: string, cacheKey: string): ToolExecutionRecord | null;
+  listToolExecutions(turnId: string): ToolExecutionRecord[];
   listAdminConversations(input?: {
     tenantId?: string;
     source?: ConversationSource;
@@ -363,6 +378,32 @@ export interface ConversationStore {
     tenantId: string,
     opts?: { limit?: number; fromIso?: string; toIso?: string; reaction?: "thumbsup" | "thumbsdown" }
   ): MessageFeedbackRow[];
+
+  // ─── Harness storage: analytic skills ───────────────────
+  saveAnalyticSkill(skill: AnalyticSkill): void;
+  searchAnalyticSkills(query: string, limit?: number): AnalyticSkill[];
+  findAnalyticSkillBySql(normalizedSql: string): AnalyticSkill | null;
+  updateAnalyticSkill(id: string, updates: Partial<AnalyticSkill>): void;
+
+  // ─── Harness storage: tenant context ────────────────────
+  getTenantContext(tenantId: string): string | null;
+  saveTenantContext(tenantId: string, content: string): void;
+
+  // ─── Harness storage: session summaries ──────────────────
+  saveSessionSummary(params: {
+    conversationId: string;
+    tenantId: string;
+    summaryText: string;
+    topics: string[];
+    messageCount: number;
+    lastExchanges: Array<{ role: string; content: string }>;
+  }): void;
+  getSessionResumeData(conversationId: string, tenantId: string): {
+    summaryText: string;
+    topics: string[];
+    messageCount: number;
+    lastExchanges: Array<{ role: string; content: string }>;
+  } | null;
 }
 
 export interface AdminGuardrails {

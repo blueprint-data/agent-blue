@@ -87,6 +87,12 @@ function createMockStore(): ConversationStore {
         soulPrompt: "You are a test agent.",
         maxRowsPerQuery: 100,
         allowedDbtPathPrefixes: [],
+        allowedTools: [],
+        blockedSchemaPatterns: [],
+        blockedTablePatterns: [],
+        toolTimeoutMs: 20000,
+        maxToolRetries: 2,
+        maxPlannerSteps: 35,
         createdAt: new Date().toISOString()
       };
     },
@@ -99,6 +105,12 @@ function createMockStore(): ConversationStore {
         soulPrompt: input.soulPrompt,
         maxRowsPerQuery: input.maxRowsPerQuery,
         allowedDbtPathPrefixes: input.allowedDbtPathPrefixes,
+        allowedTools: input.allowedTools ?? [],
+        blockedSchemaPatterns: input.blockedSchemaPatterns ?? [],
+        blockedTablePatterns: input.blockedTablePatterns ?? [],
+        toolTimeoutMs: input.toolTimeoutMs ?? 20000,
+        maxToolRetries: input.maxToolRetries ?? 2,
+        maxPlannerSteps: input.maxPlannerSteps ?? 35,
         createdAt: new Date().toISOString()
       };
     },
@@ -157,6 +169,15 @@ function createMockStore(): ConversationStore {
     },
     getExecutionTurn(turnId) { return turns.find((t) => t.id === turnId) ?? null; },
     listExecutionTurns() { return turns; },
+    appendExecutionEvent(input) {
+      return { ...input, id: `evt_${Date.now()}`, createdAt: new Date().toISOString() };
+    },
+    listExecutionEvents() { return []; },
+    recordToolExecution(input) {
+      return { ...input, id: `tool_${Date.now()}`, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    },
+    getToolExecutionByCacheKey() { return null; },
+    listToolExecutions() { return []; },
     listAdminConversations() { return []; },
     getAdminConversationDetail() { return null; },
     getAdminBotState() { return null; },
@@ -232,7 +253,15 @@ function createMockStore(): ConversationStore {
     },
     listMessageFeedback() {
       return [];
-    }
+    },
+    saveAnalyticSkill() {},
+    searchAnalyticSkills() { return []; },
+    findAnalyticSkillBySql() { return null; },
+    updateAnalyticSkill() {},
+    getTenantContext() { return null; },
+    saveTenantContext() {},
+    saveSessionSummary() {},
+    getSessionResumeData() { return null; }
   };
 }
 

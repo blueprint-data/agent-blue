@@ -16,6 +16,12 @@ export interface AgentProfile {
   soulPrompt: string;
   maxRowsPerQuery: number;
   allowedDbtPathPrefixes: string[];
+  allowedTools: string[];
+  blockedSchemaPatterns: string[];
+  blockedTablePatterns: string[];
+  toolTimeoutMs: number;
+  maxToolRetries: number;
+  maxPlannerSteps: number;
   createdAt: string;
 }
 
@@ -87,10 +93,82 @@ export interface ConversationOrigin {
 
 export type AgentExecutionStatus = "running" | "completed" | "failed";
 
+export interface ExecutionBudget {
+  maxPlannerSteps: number;
+  maxRowsPerQuery: number;
+  toolTimeoutMs: number;
+  maxToolRetries: number;
+  contextBudgetChars: {
+    tenantMemory: number;
+    dbtModels: number;
+    historySummary: number;
+  };
+}
+
+export interface ContextSectionDiagnostic {
+  section: string;
+  includedItems: number;
+  totalItems: number;
+  approxChars: number;
+  truncated: boolean;
+  notes?: string[];
+}
+
+export type ExecutionTraceEventLevel = "info" | "success" | "warning" | "error";
+
+export type ExecutionTraceEventType =
+  | "turn.started"
+  | "context.compiled"
+  | "planner.invalid_json"
+  | "planner.decision"
+  | "policy.approved"
+  | "policy.denied"
+  | "tool.started"
+  | "tool.retry"
+  | "tool.completed"
+  | "tool.failed"
+  | "tool.reused"
+  | "feedback.observation"
+  | "context.compressed"
+  | "turn.finalized";
+
+export interface ExecutionTraceEvent {
+  id: string;
+  turnId: string;
+  tenantId: string;
+  conversationId: string;
+  step?: number;
+  type: ExecutionTraceEventType;
+  level: ExecutionTraceEventLevel;
+  message: string;
+  payload?: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface ToolExecutionRecord {
+  id: string;
+  turnId: string;
+  tenantId: string;
+  conversationId: string;
+  step?: number;
+  cacheKey: string;
+  tool: string;
+  input: Record<string, unknown>;
+  status: "ok" | "error" | "reused";
+  durationMs: number;
+  attemptCount: number;
+  outputSummary?: Record<string, unknown>;
+  output?: unknown;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface AgentExecutionTurn {
   id: string;
   tenantId: string;
   conversationId: string;
+  traceId?: string;
   source: ConversationSource;
   rawUserText: string;
   promptText: string;
@@ -98,6 +176,8 @@ export interface AgentExecutionTurn {
   status: AgentExecutionStatus;
   errorMessage?: string;
   debug?: Record<string, unknown>;
+  events?: ExecutionTraceEvent[];
+  toolExecutions?: ToolExecutionRecord[];
   createdAt: string;
   updatedAt: string;
   completedAt?: string;
@@ -181,4 +261,72 @@ export interface TenantSchedule {
   lastError?: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+// ─── Evaluation Harness ───────────────────────────────────────
+
+export interface GoldenEvalCase {
+  id: string;
+  prompt: string;
+  expectedSqlPatterns?: string[];
+  forbiddenSqlPatterns?: string[];
+  requiredTools?: string[];
+  forbiddenTools?: string[];
+  requireAnswer?: boolean;
+}
+
+export interface EvalTurnBreakdown {
+  planner: number;
+  tools: number;
+  sqlSafety: number;
+  correctnessSignals: number;
+  latency: number;
+}
+
+export interface EvalTurnSummary {
+  caseId: string;
+  prompt: string;
+  score: number;
+  breakdown: EvalTurnBreakdown;
+  fallback: boolean;
+  matchedExpectedSqlPatterns: string[];
+  violatedForbiddenSqlPatterns: string[];
+  missingRequiredTools: string[];
+  violatedForbiddenTools: string[];
+  notes: string[];
+}
+
+// ─── Harness: Self-Improving Skills ───────────────────────────
+
+export interface AnalyticSkill {
+  id: string;
+  category: string;
+  description: string;
+  sql: string;
+  warehouse: string;
+  tags: string[];
+  complexity: number;
+  successCount: number;
+  createdAt: string;
+  lastUsedAt?: string;
+}
+
+// ─── Harness: Context Files ──────────────────────────────────
+
+export interface TenantContextFile {
+  tenantId: string;
+  content: string;
+  updatedAt: string;
+}
+
+// ─── Harness: Session Resume ──────────────────────────────────
+
+export interface SessionSummary {
+  conversationId: string;
+  tenantId: string;
+  lastMessageAt: string;
+  messageCount: number;
+  topics: string[];
+  summary: string;
+  createdAt: string;
 }

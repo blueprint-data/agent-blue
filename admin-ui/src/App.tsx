@@ -115,6 +115,7 @@ interface ExecutionTurn {
   id: string;
   tenantId: string;
   conversationId: string;
+  traceId?: string;
   source: string;
   rawUserText: string;
   promptText: string;
@@ -122,6 +123,29 @@ interface ExecutionTurn {
   status: string;
   errorMessage?: string;
   debug?: Record<string, unknown>;
+  events?: Array<{
+    id: string;
+    step?: number;
+    type: string;
+    level: "info" | "success" | "warning" | "error";
+    message: string;
+    payload?: Record<string, unknown>;
+    createdAt: string;
+  }>;
+  toolExecutions?: Array<{
+    id: string;
+    step?: number;
+    cacheKey: string;
+    tool: string;
+    status: string;
+    durationMs: number;
+    attemptCount: number;
+    input: Record<string, unknown>;
+    outputSummary?: Record<string, unknown>;
+    output?: unknown;
+    error?: string;
+    createdAt: string;
+  }>;
   createdAt: string;
   updatedAt: string;
   completedAt?: string;
@@ -2938,6 +2962,87 @@ function ExecutionTurnLlmUsage({ debug }: { debug: Record<string, unknown> }): R
   );
 }
 
+function ExecutionTurnTrace({ turn }: { turn: ExecutionTurn }): ReactElement | null {
+  if (!turn.events?.length && !turn.toolExecutions?.length) return null;
+
+  const levelTone = (level: string): string => {
+    if (level === "error") return "error";
+    if (level === "warning") return "warning";
+    if (level === "success") return "success";
+    return "neutral";
+  };
+
+  return (
+    <div className="conv-turn__trace">
+      {turn.events && turn.events.length > 0 ? (
+        <div className="conv-turn__field">
+          <span className="conv-turn__label">Trace Events</span>
+          <div className="conv-turn__trace-events">
+            {turn.events.map((event) => (
+              <div key={event.id} className="conv-turn__trace-event">
+                <div className="conv-turn__trace-event-header">
+                  <StatusBadge label={event.level} tone={levelTone(event.level)} />
+                  <span className="conv-turn__trace-event-type">{event.type}</span>
+                  {event.step !== undefined ? <span className="muted">step {event.step}</span> : null}
+                  <span className="muted">{formatDate(event.createdAt)}</span>
+                </div>
+                <p className="conv-turn__trace-event-message">{event.message}</p>
+                {event.payload ? (
+                  <details className="conv-turn__trace-event-payload">
+                    <summary className="muted">Payload</summary>
+                    <JsonBlock value={event.payload} />
+                  </details>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {turn.toolExecutions && turn.toolExecutions.length > 0 ? (
+        <div className="conv-turn__field">
+          <span className="conv-turn__label">Tool Executions</span>
+          <div className="conv-turn__trace-tools">
+            {turn.toolExecutions.map((tool) => (
+              <div key={tool.id} className="conv-turn__trace-tool">
+                <div className="conv-turn__trace-tool-header">
+                  <strong>{tool.tool}</strong>
+                  <StatusBadge
+                    label={tool.status}
+                    tone={tool.status === "completed" ? "success" : tool.status === "failed" ? "error" : "neutral"}
+                  />
+                  {tool.step !== undefined ? <span className="muted">step {tool.step}</span> : null}
+                  <span className="muted">{tool.attemptCount} attempt{tool.attemptCount !== 1 ? "s" : ""}</span>
+                  <span className="muted">{tool.durationMs}ms</span>
+                </div>
+                <div className="conv-turn__trace-tool-body">
+                  <details className="conv-turn__trace-tool-io">
+                    <summary className="muted">Input</summary>
+                    <JsonBlock value={tool.input} />
+                  </details>
+                  {tool.output !== undefined || tool.outputSummary ? (
+                    <details className="conv-turn__trace-tool-io">
+                      <summary className="muted">Output</summary>
+                      {tool.outputSummary ? <JsonBlock value={tool.outputSummary} /> : null}
+                      {tool.output !== undefined ? <JsonBlock value={tool.output} /> : null}
+                    </details>
+                  ) : null}
+                  {tool.error ? (
+                    <div className="conv-turn__field conv-turn__field--error">
+                      <span className="conv-turn__label">Error</span>
+                      <p className="conv-turn__value">{tool.error}</p>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function ConversationsPage({
   notify,
   scopedTenantId
@@ -3151,12 +3256,19 @@ function ConversationsPage({
                           <p className="conv-turn__value">{compactText(turn.assistantText, 200)}</p>
                         </div>
                       ) : null}
+                      {turn.traceId ? (
+                        <div className="conv-turn__field">
+                          <span className="conv-turn__label">Trace ID</span>
+                          <code className="conv-turn__value">{turn.traceId}</code>
+                        </div>
+                      ) : null}
                       {turn.errorMessage ? (
                         <div className="conv-turn__field conv-turn__field--error">
                           <span className="conv-turn__label">Error</span>
                           <p className="conv-turn__value">{turn.errorMessage}</p>
                         </div>
                       ) : null}
+                      <ExecutionTurnTrace turn={turn} />
                       {turn.debug ? <JsonBlock value={turn.debug} /> : null}
                     </div>
                   </details>
