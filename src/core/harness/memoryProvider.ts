@@ -5,7 +5,7 @@ import type { AnalyticSkill } from "../types.js";
 /**
  * MemoryProvider — pluggable memory backend for the agent harness.
  *
- * Lifecycle (inspired by Hermes Agent 206k ⭐):
+ * Lifecycle:
  *   initialize → prefetch (per turn) → syncTurn (per turn) → shutdown
  *
  * Built-in implementations:

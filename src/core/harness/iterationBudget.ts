@@ -7,11 +7,6 @@ import { IterationBudgetConfig } from "./types.js";
  * - Subagents get independent budgets (default 50).
  * - Tool cache hits should refund() one iteration.
  * - Warehouse timeouts should NOT consume an iteration.
- * 
- * Pattern from Hermes Agent (206k ⭐):
- * - consume/refund pattern with thread safety
- * - maxTotal ceiling per agent
- * - refund for cache hits (execute_code in Hermes)
  */
 export class IterationBudget {
   private readonly _maxTotal: number;

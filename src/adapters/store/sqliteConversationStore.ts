@@ -1780,7 +1780,6 @@ export class SqliteConversationStore implements ConversationStore {
     this.db.prepare("DELETE FROM tenant_integration_tokens WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM tenant_llm_settings WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM llm_usage_events WHERE tenant_id = ?").run(tenantId);
-    this.db.prepare("DELETE FROM analytic_skills WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM tenant_context WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM session_summaries WHERE tenant_id = ?").run(tenantId);
     this.db.prepare("DELETE FROM agent_execution_events WHERE tenant_id = ?").run(tenantId);

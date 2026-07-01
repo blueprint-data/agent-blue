@@ -38,7 +38,6 @@ function estimateTokens(messages: Record<string, unknown>[]): number {
 
 /**
  * Summarize a tool call + result into a compact one-liner.
- * Pattern from Hermes agent's _summarize_tool_result().
  */
 function summarizeToolResult(
   toolName: string,
@@ -67,7 +66,7 @@ function summarizeToolResult(
 /**
  * ContextCompressor — compresses long conversations using LLM summarization.
  *
- * Algorithm (from Hermes Agent):
+ * Algorithm:
  * 1. Prune old tool results (cheap, no LLM call)
  * 2. Protect HEAD messages (system prompt + first exchange)
  * 3. Protect TAIL messages by token budget (most recent ~20K tokens)
@@ -172,18 +171,18 @@ export class ContextCompressor {
         summary = this.deterministicFallback(middle);
       }
 
-      // Step 4: Record iterative summary
+      // Step 4: Record iterative summary (keep last summary, not full chain)
       if (this.state.previousSummary) {
-        summary = `Previous summary:\n${this.state.previousSummary}\n\nNew summary:\n${summary}`;
+        summary = `Previous summary:\n${this.state.previousSummary.slice(0, 2000)}\n\nNew summary:\n${summary}`;
       }
-      this.state.previousSummary = summary;
+      this.state.previousSummary = summary.slice(0, 4000);
       this.state.compressionCount += 1;
 
       // Step 5: Build compressed message list
       const summaryBlock = `${SUMMARY_PREFIX}\n\n${summary}\n\n${SUMMARY_END_MARKER}`;
       const compressed = [
         ...head,
-        { role: "user", content: summaryBlock },
+        { role: "system", content: summaryBlock },
         ...tail,
       ];
 
@@ -254,7 +253,6 @@ export class ContextCompressor {
 
   /**
    * Replace old tool result contents with one-line summaries.
-   * Pattern from Hermes context_compressor.py:_prune_old_tool_results().
    * No LLM call — pure string processing.
    */
   private pruneToolResults(messages: Record<string, unknown>[]): Record<string, unknown>[] {
@@ -270,7 +268,12 @@ export class ContextCompressor {
         const name = String(msg.name ?? "");
         const content = String(msg.content ?? "");
         if (content.length > 200) {
-          msg.content = `[Pruned] ${content.slice(0, 100)}... (${content.length} chars)`;
+          // Use specialized summarizer for known tools, fallback to truncation
+          if (name === "warehouse.query" || name === "warehouse.lookupMetadata") {
+            msg.content = summarizeToolResult(name, "{}", content);
+          } else {
+            msg.content = `[Pruned] ${content.slice(0, 100)}... (${content.length} chars)`;
+          }
         }
       }
     }
@@ -282,7 +285,6 @@ export class ContextCompressor {
   /**
    * Split messages into HEAD (protected start), MIDDLE (to compress),
    * and TAIL (protected end by token budget).
-   * Pattern from Hermes context_compressor.py:compress().
    */
   private splitMessages(
     messages: Record<string, unknown>[],

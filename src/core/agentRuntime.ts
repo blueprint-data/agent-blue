@@ -622,9 +622,13 @@ function inferSchemaHintFromModelPath(relativePath: string, fallbackSchema: stri
 
 export type WarehouseResolver = WarehouseAdapter | ((tenantId: string) => WarehouseAdapter);
 
-function deepRedact(value: unknown): unknown {
+function deepRedact(value: unknown, visited?: WeakSet<object>): unknown {
   if (value === null || value === undefined) {
     return value;
+  }
+  if (typeof value === "object") {
+    if (visited?.has(value)) return "[CIRCULAR]";
+    (visited ??= new WeakSet()).add(value);
   }
   if (typeof value === "string") {
     if (/-----BEGIN (RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----/.test(value)) {
@@ -645,12 +649,12 @@ function deepRedact(value: unknown): unknown {
     return value;
   }
   if (Array.isArray(value)) {
-    return value.map(deepRedact);
+    return value.map((el) => deepRedact(el, visited));
   }
-  if (typeof value === "object") {
+  if (typeof value === "object" && !Array.isArray(value)) {
     const result: Record<string, unknown> = {};
     for (const [key, val] of Object.entries(value)) {
-      result[key] = deepRedact(val);
+      result[key] = deepRedact(val, visited);
     }
     return result;
   }
@@ -674,7 +678,8 @@ function summarizeOlderHistory(
 }
 
 function wildcardToRegex(pattern: string): RegExp {
-  const escaped = pattern
+  const trimmed = pattern.trim();
+  const escaped = trimmed
     .replace(/[.+^${}()|[\]\\]/g, "\\$&")
     .replace(/\*/g, ".*")
     .replace(/\?/g, ".");
@@ -852,9 +857,9 @@ class TurnRecorder {
       tenantId: this.executionTurn.tenantId,
       conversationId: this.executionTurn.conversationId,
       step: entry.step ?? undefined,
-      cacheKey: entry.cacheKey ?? `${entry.tool}:${JSON.stringify(entry.input)}`,
+      cacheKey: entry.cacheKey ?? `${entry.tool}:${JSON.stringify(deepRedact(entry.input))}`,
       tool: entry.tool,
-      input: entry.input,
+      input: deepRedact(entry.input) as Record<string, unknown>,
       status: entry.status,
       durationMs: entry.durationMs,
       attemptCount: entry.attemptCount ?? 1,
@@ -864,7 +869,7 @@ class TurnRecorder {
     });
     this.toolCalls.push({
       tool: entry.tool,
-      input: entry.input,
+      input: deepRedact(entry.input) as Record<string, unknown>,
       status: entry.status,
       durationMs: entry.durationMs,
       outputSummary: entry.outputSummary,
